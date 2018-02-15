@@ -82,7 +82,28 @@ private:
 //      }
       
       pcm_market_share share1;
-      share1.set_grid(std::stoi(argv[1]),std::stoi(argv[2]));
-
+//      share1.set_grid(std::stoi(argv[1]),std::stoi(argv[2]));
+      
+      std::vector<double> delta, delta_p;
+      std::vector<double> p;
+      std::vector<vector<double> > jacobian;
+      double sigma_p=1;
+      delta.push_back(1);
+      delta_p.push_back(1);
+      
+      delta.push_back(2);
+      delta_p.push_back(2-1e-4);
+      
+      delta.push_back(4);
+      delta_p.push_back(4);
+      
+      p.push_back(stod(argv[1]));
+      p.push_back(stod(argv[2]));
+      p.push_back(stod(argv[3]));
+      cond_share(delta,p,sigma_p, jacobian);
+      vector<double> val1 = cond_share(delta,p,sigma_p);
+      vector<double> val2 = cond_share(delta_p,p,sigma_p);
+      cout<<"numerical jac " <<(val1[2]-val2[2])*1e4<<endl;
+      print_jacobian(jacobian);
       return 0;
   }

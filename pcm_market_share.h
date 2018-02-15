@@ -28,11 +28,21 @@ public:
     bool set_grid(std::vector<std::vector<double> > grid1, std::vector<double> weights1);
     bool set_grid(int dim, int n); // sets up a grid to integrate with respect to standard normal measure gauss hermite quadrature with dimension and number of points in each dimension
     
-    std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p, double sigma_p); // computes market share of vertical model (conditional on draw of heterogeneity. 
+    
 };
 
-#endif /* PCM_MARKET_SHARE_H */
 
+std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p, double sigma_p, std::vector<std::vector<double> > & jacobian ); // computes market share of vertical model (conditional on draw of heterogeneity. 
+std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p, double sigma_p ); //does the same but does not calculate jacobian
+
+inline void print_jacobian(std::vector<std::vector<double> > jac){
+    for(auto p : jac){
+        for(auto b : p){
+            std::cout<<b<<"\t";
+        }
+        std::cout<<std::endl;
+    }
+}
 inline pcm_market_share::pcm_market_share() : dimension(1)  { 
 //    set up grid and weights
     std::vector<double> point;
@@ -40,3 +50,5 @@ inline pcm_market_share::pcm_market_share() : dimension(1)  {
     grid.push_back(point);
     weights.push_back(1);
 }
+
+#endif /* PCM_MARKET_SHARE_H */
