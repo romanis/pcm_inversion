@@ -16,6 +16,7 @@
 #include <vector>
 #include <map>
 #include "/storage/home/rji5040/work/Tasmanian_run/include/TasmanianSparseGrid.hpp"
+#include <omp.h>
 
 class pcm_market_share{
 private:
@@ -27,7 +28,9 @@ public:
     pcm_market_share ();
     bool set_grid(std::vector<std::vector<double> > grid1, std::vector<double> weights1);
     bool set_grid(int dim, int n); // sets up a grid to integrate with respect to standard normal measure gauss hermite quadrature with dimension and number of points in each dimension
-    
+    std::vector<double> unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x ); //does the same but does not calculate jacobian
+    std::vector<double> unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x, std::vector<std::vector<double> > & jacobian ); //does the same but does not calculate jacobian
+
     
 };
 

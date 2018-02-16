@@ -82,10 +82,12 @@ private:
 //      }
       
       pcm_market_share share1;
-//      share1.set_grid(std::stoi(argv[1]),std::stoi(argv[2]));
+      share1.set_grid(3,10);
       
       std::vector<double> delta, delta_p;
       std::vector<double> p;
+      vector<vector<double>> x = {{0,1,2},{1,1,0},{1,1,1}};
+      vector<double> sigmax = {1,1,1};
       std::vector<vector<double> > jacobian;
       double sigma_p=1;
       delta.push_back(1);
@@ -101,9 +103,13 @@ private:
       p.push_back(stod(argv[2]));
       p.push_back(stod(argv[3]));
       cond_share(delta,p,sigma_p, jacobian);
-      vector<double> val1 = cond_share(delta,p,sigma_p);
-      vector<double> val2 = cond_share(delta_p,p,sigma_p);
-      cout<<"numerical jac " <<(val1[2]-val2[2])*1e4<<endl;
+//      vector<double> val1 = cond_share(delta,p,sigma_p);
+//      vector<double> val2 = cond_share(delta_p,p,sigma_p);
+//      cout<<"numerical jac " <<(val1[2]-val2[2])*1e4<<endl;
+      print_jacobian(jacobian);
+      double start = omp_get_wtime();
+      share1.unc_share(delta, x, p, sigma_p, sigmax,jacobian);
+      cout<< "time to calculate "<< omp_get_wtime() - start<<endl;
       print_jacobian(jacobian);
       return 0;
   }
