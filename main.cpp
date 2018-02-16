@@ -91,10 +91,10 @@ private:
       std::vector<vector<double> > jacobian;
       double sigma_p=1;
       delta.push_back(1);
-      delta_p.push_back(1);
+      delta_p.push_back(1-1e-4);
       
       delta.push_back(2);
-      delta_p.push_back(2-1e-4);
+      delta_p.push_back(2);
       
       delta.push_back(4);
       delta_p.push_back(4);
@@ -102,10 +102,10 @@ private:
       p.push_back(stod(argv[1]));
       p.push_back(stod(argv[2]));
       p.push_back(stod(argv[3]));
-      cond_share(delta,p,sigma_p, jacobian);
-//      vector<double> val1 = cond_share(delta,p,sigma_p);
-//      vector<double> val2 = cond_share(delta_p,p,sigma_p);
-//      cout<<"numerical jac " <<(val1[2]-val2[2])*1e4<<endl;
+//      cond_share(delta,p,sigma_p, jacobian);
+//      vector<double> val1 = share1.unc_share(delta, x, p, sigma_p, sigmax,jacobian);
+//      vector<double> val2 = share1.unc_share(delta_p, x, p, sigma_p, sigmax,jacobian);
+//      cout<<"numerical jac " <<(val1[1]-val2[1])*1e4<<endl;
       print_jacobian(jacobian);
       double start = omp_get_wtime();
       share1.unc_share(delta, x, p, sigma_p, sigmax,jacobian);

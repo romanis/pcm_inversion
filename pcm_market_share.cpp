@@ -443,9 +443,9 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
             }
         }
     }
-    cout<<"share"<<endl;
-        for(auto it: un_share){
-            cout<< it<<endl;
-        }
+//    cout<<"share"<<endl;
+//        for(auto it: un_share){
+//            cout<< it<<endl;
+//        }
     return un_share;
 }
