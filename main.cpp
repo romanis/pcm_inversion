@@ -4,104 +4,110 @@
 #include "pcm_market_share.h"
 #include "/storage/home/rji5040/work/Tasmanian_run/include/TasmanianSparseGrid.hpp"
 #include <bits/stdc++.h>
+#include <random>
+#include <numeric>
+#include <string>
+#include <functional>
+
 using namespace TasGrid;
 using namespace std;
 
-class ProblemExample : public knitro::KTRProblem {
-private:
-    // objective properties
-    void setObjectiveProperties() {
-        setObjType(knitro::KTREnums::ObjectiveType::ObjGeneral);
-        setObjGoal(knitro::KTREnums::ObjectiveGoal::Minimize);
-    }
+inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
+   if (solveStatus != 0) {
+     std::cout << "Failed to solve problem, final status = " << solveStatus << std::endl;
+//     return;
+   }
+   else{
+    std::cout << "---------- Solution found ----------" << std::endl << std::endl;
+   }
 
-    // variable bounds. All variables 0 <= x.
-    void setVariableProperties() {
-        setVarLoBnds(0.0);
-    }
+   std::cout.precision(2);
+   std::cout << std::scientific;
 
-    // constraint properties
-    void setConstraintProperties() {
-        // set constraint types
-        setConTypes(0, knitro::KTREnums::ConstraintType::ConGeneral);
-        setConTypes(1, knitro::KTREnums::ConstraintType::ConGeneral);
+   // Objective value
+   std::cout << std::right << std::setw(28) << "Objective value = " << solver.getObjValue() << std::endl;
 
-        // set constraint lower bounds to zero for all variables
-        setConLoBnds(0.0);
+   // Solution point
+   std::cout << std::right << std::setw(29) << "Final point = (";
+   const std::vector<double>& point = solver.getXValues();
+   std::vector<double>::const_iterator it = point.begin();
+   while ( it != point.end()) {
+       std::cout << *it;
+       if (++it != point.end())
+           std::cout << ", ";
+   }
+   std::cout << ")" << std::endl;
 
-        // set constraint upper bounds
-        setConUpBnds(0, 0.0);
-        setConUpBnds(1, KTR_INFBOUND);
-    }
+   if (!((solver.getProblem())->isMipProblem()))
+   {
+       std::cout << std::right << std::setw(28) << "Feasibility violation = " << solver.getAbsFeasError() << std::      endl;
+       std::cout << std::right << std::setw(28) << "KKT optimality violation = " << solver.getAbsOptError() <<          std::endl;
+   }
+   else {
+       std::cout << std::right << std::setw(28) << "Absolute integrality gap = " << solver.getMipAbsGap() << std::      endl;
+   }
+   std::cout << std::endl;
+ }
 
-  public:
-      // constructor: pass number of variables and constraints to base class.
-      // 3 variables, 2 constraints.
-      ProblemExample() : KTRProblem(3, 2) {
-          // set problem properties in constructor
-          setObjectiveProperties();
-          setVariableProperties();
-          setConstraintProperties();
-      }
 
-      // Objective and constraint evaluation function
-      // overrides KTRIProblem class
-      double evaluateFC(
-          const std::vector<double>& x,
-          std::vector<double>& c,
-          std::vector<double>& objGrad,
-          std::vector<double>& jac) {
-
-          // constraints
-          c[0] = 8.0e0*x[0] + 14.0e0*x[1] + 7.0e0*x[2] - 56.0e0;
-          c[1] = x[0] * x[0] + x[1] * x[1] + x[2] * x[2] - 25.0e0;
-
-          // return objective function value
-          return 1000 - x[0] * x[0] - 2.0e0*x[1] * x[1] - x[2] * x[2]
-              - x[0] * x[1] - x[0] * x[2];
-      }
-  };
 
   int main(int argc, char *argv[]) {
-//      // Create a problem instance.
-//      ProblemExample* problem = new ProblemExample();
-//
-//      // Create a solver - optional arguments: use numerical derivative evaluation.
-//      knitro::KTRSolver solver(problem, KTR_GRADOPT_FORWARD, KTR_HESSOPT_BFGS);
-//
-//      int solveStatus = solver.solve();
-//
-//      if (solveStatus != 0) {
-//          std::cout << std::endl;
-//    std::cout << "Knitro failed to solve the problem, final status = ";
-//          std::cout << solveStatus << std::endl;
-//      }
-//      else {
-//          std::cout << std::endl << "Knitro successful, objective is = ";
-//          std::cout << solver.getObjValue() << std::endl;
-//      }
+      vector<double> sch ;//= {0.1, 0.2, 0.1};
       
-      pcm_market_share share1;
-      share1.set_grid(3,10);
+      
+      std::vector<double> c;  
+      std::vector<double> objGrad; 
+      std::vector<double> jac;
       
       std::vector<double> delta, delta_p;
       std::vector<double> p;
-      vector<vector<double>> x = {{0,1,2},{1,1,0},{1,1,1}};
+      int dim = 3;
+      int num_prod = 3;
+      
+    std::uniform_real_distribution<double> unif(-1,1);
+    std::default_random_engine re;
+    
+      
+      vector<vector<double>> x;
+      for(int i = 0; i< num_prod; i++){
+          vector<double> x_tmp;
+          for (int j=0; j< dim; ++j){
+              x_tmp.push_back(unif(re));
+          }
+          p.push_back((i+1));
+          delta.push_back(i);
+          x.push_back(x_tmp);
+          sch.push_back(unif(re)+1);
+      }
+      double sum_sch=1;
+      for(int i = 0; i<sch.size(); ++i){
+          sum_sch += sch[i];
+//          sch[i] = sch[i]/sum_sch;
+//          cout<<"share " <<sch[i]<<endl;
+      }
+      for(int i = 0; i<sch.size(); ++i){
+//          sum_sch += sch[i];
+          sch[i] = sch[i]/sum_sch;
+          cout<<"share " <<sch[i]<<endl;
+      }
       vector<double> sigmax = {1,1,1};
       std::vector<vector<double> > jacobian;
       double sigma_p=1;
-      delta.push_back(1);
-      delta_p.push_back(1-1e-4);
+//      delta.push_back(1);
+//      delta_p.push_back(1-1e-4);
+//      
+//      delta.push_back(2);
+//      delta_p.push_back(2);
+//      
+//      delta.push_back(4);
+//      delta_p.push_back(4);
+//      
+//      p.push_back(stod(argv[1]));
+//      p.push_back(stod(argv[2]));
+//      p.push_back(stod(argv[3]));
+      pcm_market_share share1(sch, x, sigmax, p, sigma_p);
+      share1.set_grid(dim,10);
       
-      delta.push_back(2);
-      delta_p.push_back(2);
-      
-      delta.push_back(4);
-      delta_p.push_back(4);
-      
-      p.push_back(stod(argv[1]));
-      p.push_back(stod(argv[2]));
-      p.push_back(stod(argv[3]));
 //      cond_share(delta,p,sigma_p, jacobian);
 //      vector<double> val1 = share1.unc_share(delta, x, p, sigma_p, sigmax,jacobian);
 //      vector<double> val2 = share1.unc_share(delta_p, x, p, sigma_p, sigmax,jacobian);
@@ -109,7 +115,25 @@ private:
       print_jacobian(jacobian);
       double start = omp_get_wtime();
       share1.unc_share(delta, x, p, sigma_p, sigmax,jacobian);
-      cout<< "time to calculate "<< omp_get_wtime() - start<<endl;
-      print_jacobian(jacobian);
+      
+      cout<<" value " <<share1.evaluateFC(delta,c,objGrad,jac)<<endl;
+      share1.evaluateGA(delta, objGrad, jac);
+      for(auto it: jac){
+          cout<<it<<" ";
+      }
+      cout<<endl<< "time to calculate "<< omp_get_wtime() - start<<endl;
+      share1.setXInitial(delta);
+      knitro::KTRSolver solver(&share1, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
+      int result = solver.solve();
+      printSolutionResults(solver, result);
+//      print_jacobian(jacobian);
+      
+      
+//      ProblemExample* problem = new ProblemExample();
+//
+//      // Create a solver - optional arguments: use numerical derivative evaluation.
+//      knitro::KTRSolver solver1(problem, KTR_GRADOPT_FORWARD, KTR_HESSOPT_BFGS);
+//
+//      int solveStatus = solver1.solve();
       return 0;
   }
