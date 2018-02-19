@@ -116,6 +116,12 @@ std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p,
     
 //    creadte lognormal distr
     boost::math::lognormal lognormDistr(0, sigma_p);
+
+//    if(endpoints[0] > 1e5){
+//        cout<<std::scientific;
+//        cout<< "endpoint if too large " << endpoints[0]<<" " << delta[0] << " " <<p[0]<<endl;
+//    }
+    
 //    put down market shares
     con_share.push_back(boost::math::cdf(lognormDistr,endpoints[0]));
     for(int i=1; i< delta.size(); ++i){
@@ -164,9 +170,11 @@ std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p,
 //    creadte lognormal distr
     boost::math::lognormal lognormDistr(0, sigma_p);
 //    put down market shares
+//    cout<<endl<<endpoints[0]<<" " <<delta[0]<< " " <<p[0]<<endl;
     con_share.push_back(boost::math::cdf(lognormDistr,endpoints[0]));
     for(int i=1; i< delta.size(); ++i){
 //        push back cdf at new point
+//        cout<<endpoints[i]<<endl;
         con_share.push_back(boost::math::cdf(lognormDistr,endpoints[i]));
 //        subtract from previous point the pushed value
         con_share[i-1] -= con_share[i];
@@ -242,8 +250,12 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
 //        delta_hat = delta + sigma_x*x*nu(i,:);
         vector<double> delta_cond(delta_bar);
         for(int k=0; k<delta_cond.size(); ++k){
-        for(int j=0; j<x.size(); ++j){
+        for(int j=0; j<x[0].size(); ++j){
             delta_cond[k] += sigma_x[j]*x[k][j]*grid[i][j];
+            if(delta_cond[k] > 1e5){
+                cout<<std::scientific;
+                cout<<"too large delta " << delta_cond[k]<< " delta bar "<< delta_bar[k]<< " sigma x "<<sigma_x[j]<< " x " <<x[k][j] << " grid " <<grid[i][j]<<endl;
+            }
         }
         }
 //        cout<<"node " <<i<<endl;
@@ -304,7 +316,12 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
             for(auto i_positive : ind){
                 delta_positive.push_back(delta_cond[i_positive]);
                 p_positive.push_back(p[i_positive]);
+                if(delta_cond[i_positive] > 1e5){
+                    cout<<std::scientific;
+                    cout<<"too large delta " << delta_cond[i_positive]<< " "<<i_positive<< " " <<delta_bar[i_positive]<<endl;
+                }
             }
+            
             vector<double> shares_tmp = cond_share(delta_positive,p_positive, sigma_p);
 
 //            add shares to corresponding dimensions of un_share
@@ -314,10 +331,10 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
             }
         }
     }
-    cout<<"share"<<endl;
-        for(auto it: un_share){
-            cout<< it<<endl;
-        }
+//    cout<<"share"<<endl;
+//        for(auto it: un_share){
+//            cout<< it<<endl;
+//        }
     return un_share;
 }
 
@@ -325,7 +342,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
 std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x, std::vector<std::vector<double> > & jacobian){
 /*
  * delta_bar is average quality of each good size Nx1 N- number of products
- * x - values of heterogeneity size Kx1 K - number of characteristics of horizontal differentiation 
+ * x - values of heterogeneity size NxK K - number of characteristics of horizontal differentiation 
  * p - vector of prices size Nx1
  * sigma_p - standard deviation of log of price sensitivity
  * sigma_x - vector of standard deviation of each horizontal differentiation.
@@ -448,4 +465,60 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
 //            cout<< it<<endl;
 //        }
     return un_share;
+}
+
+std::vector<double> pcm_market_share::initial_guess(){
+    vector<double> guess;
+//    calculate initial guess based on undisturbed model
+//    delta_0(1) = p_sim(1) * logninv(sum(share),0,sigma_p);
+    double sum_share=0;
+    for(auto share: shares_data){
+        sum_share += share;
+    }
+    //    creadte lognormal distr
+    boost::math::lognormal lognormDistr(0, sigma_p);
+//    cout<<boost::math::quantile(lognormDistr, sum_share)<<endl;
+//    compute the first delta guess
+    guess.push_back(p[0]*boost::math::quantile(lognormDistr, sum_share));
+//    compute the rest guesses
+    for(int i=1; i<shares_data.size(); ++i){
+        sum_share -=shares_data[i-1];
+        guess.push_back(guess[i-1] + (p[i] - p[i-1])*boost::math::quantile(lognormDistr, sum_share));
+    }
+    return guess;
+}
+
+void pcm_market_share::get_traction(){
+    vector<double> sch_start = this->unc_share(this->getXInitial(), x, p, sigma_p, sigmax);
+//    if all of market shares are greater than 1e-4, return
+    if(all_of(sch_start.begin(), sch_start.end(),[](double it){return it > 0;})){
+        return;
+    }
+    
+    while(!(all_of(sch_start.begin(), sch_start.end(),[](double it){return it > 0;}))){
+//        increase all coordinates that have zero market share
+        vector<double> X = this->getXInitial();
+        double max = *(max_element(X.begin(), X.end()));
+        double min = *(min_element(X.begin(), X.end()));
+        for(int i=0; i<shares_data.size(); ++i){
+            if(!(sch_start[i]>0)){
+                X[i] += 1e-1;
+            }
+        }
+//        update market shares
+        this->setXInitial(X);
+        sch_start = this->unc_share(X, x, p, sigma_p, sigmax);
+        cout<< "_____________________________"<<endl;
+        std::cout.precision(4);
+        std::cout << std::fixed;
+        for(auto it : sch_start){
+            cout<<it << " ";
+        }
+        cout<<endl;
+        for(auto it : X){
+            cout<<it << " ";
+        }
+        cout<<endl;
+    }
+    return;
 }

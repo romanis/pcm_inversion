@@ -45,20 +45,33 @@ public:
     pcm_market_share ();
 //    default constructor
     pcm_market_share (std::vector<double> sch, std::vector<std::vector<double>> x, std::vector<double> sigmax, std::vector<double> p, double sigma_p):  
-    KTRProblem(sch.size(), sch.size()), dimension(1), shares_data(sch), x(x), sigmax(sigmax), p(p), sigma_p(sigma_p)  { 
-//    set up grid and weights
-    std::vector<double> point;
-    point.push_back(0);
-    grid.push_back(point);
-    weights.push_back(1);
-    setObjectiveProperties();
-    setVariableProperties();
-    setConstraintProperties(sch.size());
-}
+        KTRProblem(sch.size(), sch.size()), dimension(1), shares_data(sch), x(x), sigmax(sigmax), p(p), sigma_p(sigma_p)  { 
+    //    set up grid and weights
+        std::vector<double> point;
+        point.push_back(0);
+        grid.push_back(point);
+        weights.push_back(1);
+        setObjectiveProperties();
+        setVariableProperties();
+        setConstraintProperties(sch.size());
+    }
+    
+    std::vector<double> initial_guess(); // calculates initial guess based on undisturbed model.
+    void get_traction(); // pushes initial point up so that each market share if greater than 1e-4;
     bool set_grid(std::vector<std::vector<double> > grid1, std::vector<double> weights1);
     bool set_grid(int dim, int n); // sets up a grid to integrate with respect to standard normal measure gauss hermite quadrature with dimension and number of points in each dimension
     void set_shares(std::vector<double> sch){
         shares_data = sch;
+    }
+    void decrease_sigma_x(){
+        for(auto it : sigmax){
+            it /= 2;
+        }
+    }
+    void increase_sigma_x(){
+        for(auto it : sigmax){
+            it *= 2;
+        }
     }
     
     std::vector<double> unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x ); //does the same but does not calculate jacobian
@@ -116,11 +129,7 @@ public:
         c.clear();
         for(int i=0; i<shares_data.size(); ++i){
             c.push_back(share_predict[i] - shares_data[i]);
-//            obj += (share_predict[i] - shares_data[i])*(share_predict[i] - shares_data[i]);
-//            objGrad.push_back(0);
-//            jac.insert(jac.end(),jacobian[i].begin(), jacobian[i].end());
         }
-        
           // return objective function value
           return 0;
       }
