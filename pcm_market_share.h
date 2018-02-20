@@ -45,7 +45,7 @@ public:
     pcm_market_share ();
 //    default constructor
     pcm_market_share (std::vector<double> sch, std::vector<std::vector<double>> x, std::vector<double> sigmax, std::vector<double> p, double sigma_p):  
-        KTRProblem(sch.size(), sch.size()), dimension(1), shares_data(sch), x(x), sigmax(sigmax), p(p), sigma_p(sigma_p)  { 
+        KTRProblem(sch.size(), 0), dimension(1), shares_data(sch), x(x), sigmax(sigmax), p(p), sigma_p(sigma_p)  { 
     //    set up grid and weights
         std::vector<double> point;
         point.push_back(0);
@@ -53,7 +53,7 @@ public:
         weights.push_back(1);
         setObjectiveProperties();
         setVariableProperties();
-        setConstraintProperties(sch.size());
+        setConstraintProperties(0);
     }
     
     std::vector<double> initial_guess(); // calculates initial guess based on undisturbed model.
@@ -74,6 +74,10 @@ public:
         }
     }
     
+    
+    double relax_til_solved(std::vector<double> & solution);
+//    this function reduces variance of sigma_x until problem solves, reports ratio of final delta to original one
+    
     std::vector<double> unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x ); //does the same but does not calculate jacobian
     std::vector<double> unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x, std::vector<std::vector<double> > & jacobian ); //does the same but does not calculate jacobian
     
@@ -92,15 +96,15 @@ public:
     // constraint properties
     void setConstraintProperties() {
         // set constraint types
-        setConTypes(0, knitro::KTREnums::ConstraintType::ConGeneral);
-        setConTypes(1, knitro::KTREnums::ConstraintType::ConGeneral);
+//        setConTypes(0, knitro::KTREnums::ConstraintType::ConGeneral);
+//        setConTypes(1, knitro::KTREnums::ConstraintType::ConGeneral);
 
         // set constraint lower bounds to zero for all variables
         setConLoBnds(0.0);
 
         // set constraint upper bounds
-        setConUpBnds(0, 0.0);
-        setConUpBnds(1, KTR_INFBOUND);
+//        setConUpBnds(0, 0.0);
+//        setConUpBnds(1, KTR_INFBOUND);
     }
     
     // constraint properties when know how many constrains
@@ -128,32 +132,33 @@ public:
         jac.clear();
         c.clear();
         for(int i=0; i<shares_data.size(); ++i){
-            c.push_back(share_predict[i] - shares_data[i]);
+//            c.push_back(share_predict[i] - shares_data[i]);
+            obj += (share_predict[i] - shares_data[i])*(share_predict[i] - shares_data[i]);
         }
           // return objective function value
-          return 0;
+          return obj;
       }
     
     int evaluateGA(const std::vector<double>& delta, std::vector<double>& objGrad, std::vector<double>& jac) {
         std::vector<std::vector<double>> jacobian;
         
         std::vector<double> share_predict = this->unc_share(delta, x, p, sigma_p, sigmax, jacobian);
-        jac.clear();
-        objGrad.clear();
+//        jac.clear();
+        std::vector<double> obj_tmp(delta.size(),0.0);
+        objGrad = obj_tmp;
         for(int i=0; i< shares_data.size(); ++i){
 //            std::cout<<"here\n";
-            objGrad.push_back(0);
-            
-            for(int j = 0; j< jacobian[i].size(); ++j){
-                jac.push_back(jacobian[i][j]);
+            for(int j=0; j<shares_data.size(); ++j){
+                objGrad[j] += 2*jacobian[i][j]*(share_predict[i] - shares_data[i]);
             }
+            
+//            for(int j = 0; j< jacobian[i].size(); ++j){
+//                jac.push_back(jacobian[i][j]);
+//            }
         }
 	return 0;
     }
-    
-    
-    
-    
+ 
 };
 
 
@@ -168,7 +173,7 @@ inline void print_jacobian(std::vector<std::vector<double> > jac){
         std::cout<<std::endl;
     }
 }
-inline pcm_market_share::pcm_market_share() : KTRProblem(0, 1), dimension(1), shares_data({})  { 
+inline pcm_market_share::pcm_market_share() : KTRProblem(1, 0), dimension(1), shares_data({})  { 
 //    set up grid and weights
     std::vector<double> point;
     point.push_back(0);

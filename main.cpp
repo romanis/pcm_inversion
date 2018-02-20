@@ -64,7 +64,9 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
     std::vector<double> delta, delta_p;
     std::vector<double> p;
     int dim = 3;
-    int num_prod = 20;
+    int num_prod = 50;
+    unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+    std::default_random_engine generator (seed);
       
     std::uniform_real_distribution<double> unif(-1,1);
     std::default_random_engine re;
@@ -74,12 +76,12 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
     for(int i = 0; i< num_prod; i++){
         vector<double> x_tmp;
         for (int j=0; j< dim; ++j){
-            x_tmp.push_back(unif(re));
+            x_tmp.push_back(unif(generator));
         }
         p.push_back(pow((i+1),1));
         delta.push_back(i);
         x.push_back(x_tmp);
-        sch.push_back(unif(re)+2);
+        sch.push_back(unif(generator)+2);
     }
     double sum_sch=1;
     for(int i = 0; i<sch.size(); ++i){
@@ -92,14 +94,14 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
         sch[i] = sch[i]/(1.3*sum_sch);
         cout<<"share " <<sch[i]<<endl;
     }
-    vector<double> sigmax(x[0].size(),0.05);
+    vector<double> sigmax(x[0].size(),1.5);
     cout<<"size of sigmax "<<sigmax.size()<<endl;
     cout<<"size of x[0] "<<x[0].size()<<endl;
     std::vector<vector<double> > jacobian;
     double sigma_p=1;
 
     pcm_market_share share1(sch, x, sigmax, p, sigma_p);
-    share1.set_grid(dim,25);
+    share1.set_grid(dim,15);
       
 //      cond_share(delta,p,sigma_p, jacobian);
 //      vector<double> val1 = share1.unc_share(delta, x, p, sigma_p, sigmax,jacobian);
@@ -119,24 +121,40 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
 //        increase deltas so that all have positive market shares
         cout<<"not all values positive \n";
     }
-    cout<<" value " <<share1.evaluateFC(delta,c,objGrad,jac)<<endl;
+    cout<<" value " <<share1.evaluateFC(share1.initial_guess(),c,objGrad,jac)<<endl;
+//    vector<double> val1 = share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax,jacobian);
+//    delta= share1.initial_guess();
+//    delta[1] += 1e-6;
+//    cout<<" value prime " <<share1.evaluateFC(delta,c,objGrad,jac)<<endl;
+//    vector<double> val2 = share1.unc_share(delta, x, p, sigma_p, sigmax,jacobian);
+//    cout<<"numerical derivative "<< (val2[0] - val1[0])*1e6<<endl;
+//    print_jacobian(jacobian);
+//    share1.evaluateGA(delta,objGrad, jac);
+//    for(auto it : objGrad){
+//        cout<< "derivative " <<it<<endl;
+//    }
+    
+//    return 0;
     share1.evaluateGA(delta, objGrad, jac);
 //    for(auto it: jac){
 //        cout<<it<<" ";
 //    }
     cout<<endl<< "time to calculate "<< omp_get_wtime() - start<<endl;
     share1.setXInitial(share1.initial_guess());
-//    share1.get_traction();
-    cout<<"initial guess ";
+    share1.get_traction();
+    cout<<"initial guess \n";
     for(auto it :share1.initial_guess()){
         cout<< it<<endl;
     }
     knitro::KTRSolver solver(&share1, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
-    solver.setParam(KTR_PARAM_ALG, 3); // 2 = CG algorithm 3 = active set
-    solver.setParam(KTR_PARAM_MAXIT, 30);
-    
+    solver.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
+    solver.setParam(KTR_PARAM_MAXIT, 100);
+    solver.setParam(KTR_PARAM_FTOL, 1e-12);
+    solver.setParam(KTR_PARAM_XTOL, 1e-8);
+    solver.setParam(KTR_PARAM_OPTTOL, 1e-7);
+    solver.setParam(KTR_PARAM_DERIVCHECK, 0);
     int result = solver.solve();
-    while(result != 0){
+    if(result != 0){
         cout<< "point estimate \n";
         std::cout.precision(4);
         std::cout << std::fixed;
@@ -151,9 +169,9 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
         }
         //share1.setXInitial(solver.getXValues());
         
-        share1.decrease_sigma_x();
+//        share1.decrease_sigma_x();
         share1.setXInitial(share1.initial_guess());
-//        share1.get_traction();
+        share1.get_traction();
         cout<< " shares start "<<endl;
         std::cout.precision(4);
         std::cout << std::fixed;
@@ -163,16 +181,22 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
         result = solver.solve();
         share1.setXInitial(solver.getXValues());
 //        share1.increase_sigma_x();
-//        share1.get_traction();
-//        solver.solve();
+        share1.get_traction();
+        solver.solve();
     }
     printSolutionResults(solver, result);
     cout<< " shares at optimum "<<endl;
     std::cout.precision(4);
     std::cout << std::fixed;
+    int i=0;
     for(auto it : share1.unc_share(solver.getXValues(), x, p, sigma_p, sigmax)){
-        cout<<it<<" "<<endl;
+        cout<<it<<" "<<sch[i++]<<endl;
     }
+    share1.evaluateGA(solver.getXValues(),objGrad, jac);
+    cout<< "gradient at solution "<<endl;
+//    for(auto it : objGrad){
+//        cout<<it<<" "<<endl;
+//    }
 //      print_jacobian(jacobian);
       
       

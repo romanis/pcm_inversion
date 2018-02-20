@@ -376,7 +376,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
 //        delta_hat = delta + sigma_x*x*nu(i,:);
         vector<double> delta_cond(delta_bar);
         for(int k=0; k<delta_cond.size(); ++k){
-        for(int j=0; j<x.size(); ++j){
+        for(int j=0; j<x[0].size(); ++j){
             delta_cond[k] += sigma_x[j]*x[k][j]*grid[i][j];
         }
         }
@@ -521,4 +521,39 @@ void pcm_market_share::get_traction(){
         cout<<endl;
     }
     return;
+}
+
+double pcm_market_share::relax_til_solved(std::vector<double> & solution){
+    double factor=1;
+    this->decrease_sigma_x();
+    factor /=2;
+    this->setXInitial(this->initial_guess());
+    this->get_traction();
+    knitro::KTRSolver solver1(this, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
+    solver1.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
+    solver1.setParam(KTR_PARAM_MAXIT, 100);
+    solver1.setParam(KTR_PARAM_FTOL, 1e-12);
+    solver1.setParam(KTR_PARAM_XTOL, 1e-8);
+    solver1.setParam(KTR_PARAM_OPTTOL, 1e-7);
+    solver1.setParam(KTR_PARAM_DERIVCHECK, 0);
+    
+    int result = solver1.solve();
+    solution = solver1.getXValues();
+    while(result != 0){
+        this->decrease_sigma_x();
+        factor /=2;
+        this->setXInitial(this->initial_guess());
+        this->get_traction();
+        knitro::KTRSolver solver(this, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
+        solver.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
+        solver.setParam(KTR_PARAM_MAXIT, 100);
+        solver.setParam(KTR_PARAM_FTOL, 1e-12);
+        solver.setParam(KTR_PARAM_XTOL, 1e-8);
+        solver.setParam(KTR_PARAM_OPTTOL, 1e-7);
+        solver.setParam(KTR_PARAM_DERIVCHECK, 0);
+        result = solver1.solve();
+        solution = solver.getXValues();
+    }
+    
+    return factor;
 }
