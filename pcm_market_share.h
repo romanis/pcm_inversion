@@ -56,6 +56,10 @@ public:
         setConstraintProperties(0);
     }
     
+    std::vector<double> get_sigma_x(){
+        return sigmax;
+    }
+    
     std::vector<double> initial_guess(); // calculates initial guess based on undisturbed model.
     void get_traction(); // pushes initial point up so that each market share if greater than 1e-4;
     bool set_grid(std::vector<std::vector<double> > grid1, std::vector<double> weights1);
@@ -63,19 +67,19 @@ public:
     void set_shares(std::vector<double> sch){
         shares_data = sch;
     }
-    void decrease_sigma_x(){
-        for(auto it : sigmax){
-            it /= 2;
+    void decrease_sigma_x(double factor = 2){
+        for(int it = 0; it<sigmax.size(); ++it){
+            sigmax[it] /= factor;
         }
     }
-    void increase_sigma_x(){
-        for(auto it : sigmax){
-            it *= 2;
+    void increase_sigma_x(double factor = 2){
+        for(int it = 0; it<sigmax.size(); ++it){
+            sigmax[it] *= factor;
         }
     }
     
     
-    double relax_til_solved(std::vector<double> & solution);
+    double relax_til_solved(std::vector<double> & solution, std::vector<double> starting_point);
 //    this function reduces variance of sigma_x until problem solves, reports ratio of final delta to original one
     
     std::vector<double> unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x ); //does the same but does not calculate jacobian

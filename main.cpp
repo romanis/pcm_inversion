@@ -64,7 +64,7 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
     std::vector<double> delta, delta_p;
     std::vector<double> p;
     int dim = 3;
-    int num_prod = 50;
+    int num_prod = 100;
     unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
     std::default_random_engine generator (seed);
       
@@ -148,48 +148,34 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
     }
     knitro::KTRSolver solver(&share1, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
     solver.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
-    solver.setParam(KTR_PARAM_MAXIT, 100);
+    solver.setParam(KTR_PARAM_MAXIT, 200);
     solver.setParam(KTR_PARAM_FTOL, 1e-12);
     solver.setParam(KTR_PARAM_XTOL, 1e-8);
     solver.setParam(KTR_PARAM_OPTTOL, 1e-7);
     solver.setParam(KTR_PARAM_DERIVCHECK, 0);
     int result = solver.solve();
+    vector<double> solution;
+    double factor;
     if(result != 0){
-        cout<< "point estimate \n";
-        std::cout.precision(4);
-        std::cout << std::fixed;
-        for(auto it : solver.getXValues()){
-            cout<<it<<" "<<endl;
-        }
-        cout<< " shares current "<<endl;
-        std::cout.precision(4);
-        std::cout << std::fixed;
-        for(auto it : share1.unc_share(solver.getXValues(), x, p, sigma_p, sigmax)){
-            cout<<it<<" "<<endl;
-        }
-        //share1.setXInitial(solver.getXValues());
         
-//        share1.decrease_sigma_x();
-        share1.setXInitial(share1.initial_guess());
-        share1.get_traction();
-        cout<< " shares start "<<endl;
-        std::cout.precision(4);
-        std::cout << std::fixed;
-        for(auto it : share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax)){
-            cout<<it<<" "<<endl;
-        }
-        result = solver.solve();
-        share1.setXInitial(solver.getXValues());
-//        share1.increase_sigma_x();
-        share1.get_traction();
-        solver.solve();
+        factor = share1.relax_til_solved(solution, solver.getXValues());
+        cout<<"needed to contract " <<factor<<endl;
     }
+    share1.setXInitial(solution);
+    solver.solve();
     printSolutionResults(solver, result);
     cout<< " shares at optimum "<<endl;
     std::cout.precision(4);
     std::cout << std::fixed;
     int i=0;
-    for(auto it : share1.unc_share(solver.getXValues(), x, p, sigma_p, sigmax)){
+    cout<< "final sigma x "<< endl;
+//    share1.decrease_sigma_x(1/factor);
+    for(auto it : share1.get_sigma_x()){
+        cout<< it<<" ";
+    }
+    cout<< endl;
+    
+    for(auto it : share1.unc_share(solution, x, p, sigma_p, sigmax)){
         cout<<it<<" "<<sch[i++]<<endl;
     }
     share1.evaluateGA(solver.getXValues(),objGrad, jac);
