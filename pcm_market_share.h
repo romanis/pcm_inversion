@@ -44,8 +44,12 @@ private:
 public:
     pcm_market_share ();
 //    default constructor
+//            uncomment for minimizing resuduals
     pcm_market_share (std::vector<double> sch, std::vector<std::vector<double>> x, std::vector<double> sigmax, std::vector<double> p, double sigma_p):  
-        KTRProblem(sch.size(), 0), dimension(1), shares_data(sch), x(x), sigmax(sigmax), p(p), sigma_p(sigma_p)  { 
+        KTRProblem(sch.size(), sch.size()), dimension(1), shares_data(sch), x(x), sigmax(sigmax), p(p), sigma_p(sigma_p)  { 
+//        uncomment for minimizing squares of resuduals
+//    pcm_market_share (std::vector<double> sch, std::vector<std::vector<double>> x, std::vector<double> sigmax, std::vector<double> p, double sigma_p):  
+//        KTRProblem(sch.size(), 0), dimension(1), shares_data(sch), x(x), sigmax(sigmax), p(p), sigma_p(sigma_p)  { 
     //    set up grid and weights
         std::vector<double> point;
         point.push_back(0);
@@ -53,7 +57,10 @@ public:
         weights.push_back(1);
         setObjectiveProperties();
         setVariableProperties();
-        setConstraintProperties(0);
+//        uncomment for minimizing squares of resuduals        
+//        setConstraintProperties(0);
+//        uncomment for MPEC
+        setConstraintProperties(sch.size());
     }
     
     std::vector<double> get_sigma_x(){
@@ -82,6 +89,9 @@ public:
     double relax_til_solved(std::vector<double> & solution, std::vector<double> starting_point);
 //    this function reduces variance of sigma_x until problem solves, reports ratio of final delta to original one
     
+    bool solve_for_delta();
+//    solves for delta that equalizes data market shares and predicted ones
+    
     std::vector<double> unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x ); //does the same but does not calculate jacobian
     std::vector<double> unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x, std::vector<std::vector<double> > & jacobian ); //does the same but does not calculate jacobian
     
@@ -107,7 +117,7 @@ public:
         setConLoBnds(0.0);
 
         // set constraint upper bounds
-//        setConUpBnds(0, 0.0);
+        setConUpBnds(0, 0.0);
 //        setConUpBnds(1, KTR_INFBOUND);
     }
     
@@ -136,8 +146,10 @@ public:
         jac.clear();
         c.clear();
         for(int i=0; i<shares_data.size(); ++i){
-//            c.push_back(share_predict[i] - shares_data[i]);
-            obj += (share_predict[i] - shares_data[i])*(share_predict[i] - shares_data[i]);
+//            uncomment for MPEC
+            c.push_back(share_predict[i] - shares_data[i]);
+//            uncomment for minimizing resuduals
+//            obj += (share_predict[i] - shares_data[i])*(share_predict[i] - shares_data[i]);
         }
           // return objective function value
           return obj;
@@ -147,18 +159,20 @@ public:
         std::vector<std::vector<double>> jacobian;
         
         std::vector<double> share_predict = this->unc_share(delta, x, p, sigma_p, sigmax, jacobian);
-//        jac.clear();
+//        comment for minimizing resuduals
+        jac.clear();
         std::vector<double> obj_tmp(delta.size(),0.0);
         objGrad = obj_tmp;
         for(int i=0; i< shares_data.size(); ++i){
-//            std::cout<<"here\n";
-            for(int j=0; j<shares_data.size(); ++j){
-                objGrad[j] += 2*jacobian[i][j]*(share_predict[i] - shares_data[i]);
-            }
-            
-//            for(int j = 0; j< jacobian[i].size(); ++j){
-//                jac.push_back(jacobian[i][j]);
+//            uncomment for miniizing squares of residuals
+//            for(int j=0; j<shares_data.size(); ++j){
+//                objGrad[j] += 2*jacobian[i][j]*(share_predict[i] - shares_data[i]);
 //            }
+            
+//            uncomment for MPEC
+            for(int j = 0; j< jacobian[i].size(); ++j){
+                jac.push_back(jacobian[i][j]);
+            }
         }
 	return 0;
     }

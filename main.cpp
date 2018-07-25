@@ -64,7 +64,7 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
     std::vector<double> delta, delta_p;
     std::vector<double> p;
     int dim = 3;
-    int num_prod = 100;
+    int num_prod = 200;
     unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
     std::default_random_engine generator (seed);
       
@@ -73,6 +73,7 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
     
       
     vector<vector<double>> x;
+//    generate uniformly distributed maket shares and X and P
     for(int i = 0; i< num_prod; i++){
         vector<double> x_tmp;
         for (int j=0; j< dim; ++j){
@@ -83,24 +84,31 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
         x.push_back(x_tmp);
         sch.push_back(unif(generator)+2);
     }
-    double sum_sch=1;
-    for(int i = 0; i<sch.size(); ++i){
-        sum_sch += sch[i];
-//          sch[i] = sch[i]/sum_sch;
-//          cout<<"share " <<sch[i]<<endl;
+    
+//    normalize shares to sum to less than 1
+    {
+        double sum_sch=1;
+        for(int i = 0; i<sch.size(); ++i){
+            sum_sch += sch[i];
+    //          sch[i] = sch[i]/sum_sch;
+    //          cout<<"share " <<sch[i]<<endl;
+        }
+        for(int i = 0; i<sch.size(); ++i){
+    //          sum_sch += sch[i];
+            sch[i] = sch[i]/(1.3*sum_sch);
+            cout<<"share " <<sch[i]<<endl;
+        }
     }
-    for(int i = 0; i<sch.size(); ++i){
-//          sum_sch += sch[i];
-        sch[i] = sch[i]/(1.3*sum_sch);
-        cout<<"share " <<sch[i]<<endl;
-    }
-    vector<double> sigmax(x[0].size(),1.5);
+//    generate vector of std of heterogeneity
+    vector<double> sigmax(x[0].size(),2.5);
     cout<<"size of sigmax "<<sigmax.size()<<endl;
     cout<<"size of x[0] "<<x[0].size()<<endl;
     std::vector<vector<double> > jacobian;
     double sigma_p=1;
 
     pcm_market_share share1(sch, x, sigmax, p, sigma_p);
+    
+//    set grid for integration, 15 points per dimension is usually enough
     share1.set_grid(dim,15);
       
 //      cond_share(delta,p,sigma_p, jacobian);
@@ -121,7 +129,7 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
 //        increase deltas so that all have positive market shares
         cout<<"not all values positive \n";
     }
-    cout<<" value " <<share1.evaluateFC(share1.initial_guess(),c,objGrad,jac)<<endl;
+//    cout<<" value " <<share1.evaluateFC(share1.initial_guess(),c,objGrad,jac)<<endl;
 //    vector<double> val1 = share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax,jacobian);
 //    delta= share1.initial_guess();
 //    delta[1] += 1e-6;
@@ -141,11 +149,34 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
 //    }
     cout<<endl<< "time to calculate "<< omp_get_wtime() - start<<endl;
     share1.setXInitial(share1.initial_guess());
-    share1.get_traction();
-    cout<<"initial guess \n";
-    for(auto it :share1.initial_guess()){
-        cout<< it<<endl;
+//    share1.get_traction();
+//    cout<<"initial guess \n";
+//    for(auto it :share1.initial_guess()){
+//        cout<< it<<endl;
+//    }
+    share1.solve_for_delta();
+    
+    cout<< " shares at optimum "<<endl;
+    std::cout.precision(4);
+    std::cout << std::fixed;
+    int i=0;
+    for(auto it : share1.unc_share(share1.getXInitial(), x, p, sigma_p, sigmax)){
+        cout<<share1.getXInitial()[i]<< " " <<it<<" "<<sch[i++]<<endl;
     }
+    cout<< "final sigma x "<< endl;
+//    share1.decrease_sigma_x(1/factor);
+    for(auto it : share1.get_sigma_x()){
+        cout<< it<<" ";
+    }
+    cout<< endl;
+    return 0;
+    
+    
+    
+    
+    
+    
+    
     knitro::KTRSolver solver(&share1, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
     solver.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
     solver.setParam(KTR_PARAM_MAXIT, 200);
@@ -167,13 +198,8 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
     cout<< " shares at optimum "<<endl;
     std::cout.precision(4);
     std::cout << std::fixed;
-    int i=0;
-    cout<< "final sigma x "<< endl;
-//    share1.decrease_sigma_x(1/factor);
-    for(auto it : share1.get_sigma_x()){
-        cout<< it<<" ";
-    }
-    cout<< endl;
+//    int i=0;
+    
     
     for(auto it : share1.unc_share(solution, x, p, sigma_p, sigmax)){
         cout<<it<<" "<<sch[i++]<<endl;

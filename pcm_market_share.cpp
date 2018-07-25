@@ -502,7 +502,7 @@ void pcm_market_share::get_traction(){
         double min = *(min_element(X.begin(), X.end()));
         for(int i=0; i<shares_data.size(); ++i){
             if(!(sch_start[i]>0)){
-                X[i] += 1e-1;
+                X[i] += 1e-2*(max-min);
             }
         }
 //        update market shares
@@ -557,4 +557,52 @@ double pcm_market_share::relax_til_solved(std::vector<double> & solution, std::v
     }
     
     return factor;
+}
+
+bool pcm_market_share::solve_for_delta(){
+    bool solved = false;
+    double factor = 1.1; // contraction of the grid after each unsuccessful iteration
+    int count = 0; // count number of contractions
+//    set initial guess for 
+    this->setXInitial(this->initial_guess());
+    this->get_traction();
+//    try to solve 
+    knitro::KTRSolver solver1(this, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
+    solver1.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
+    int num_iter = x.size()*5;
+    solver1.setParam(KTR_PARAM_MAXIT, num_iter); // number of iterations 3 times bigger than the number of products.
+    solver1.setParam(KTR_PARAM_FTOL, 1e-12);
+    solver1.setParam(KTR_PARAM_XTOL, 1e-8);
+    solver1.setParam(KTR_PARAM_OPTTOL, 1e-7);
+    solver1.setParam(KTR_PARAM_DERIVCHECK, 0);
+    solver1.setParam(KTR_PARAM_BAR_MURULE, 2); // set murule to adaptive
+    solver1.setParam(KTR_PARAM_PAR_NUMTHREADS, 20);
+    solver1.setParam(KTR_PARAM_LINSOLVER, 6); // intel lin solver
+//    solver1.setParam(KTR_PARAM_PAR_LSNUMTHREADS, 5);
+    solver1.setParam(KTR_PARAM_PAR_BLASNUMTHREADS,5);
+    solver1.setParam(KTR_PARAM_FEASTOL, 1e-10);
+    solver1.setParam(KTR_PARAM_MULTISTART, 0);
+    solver1.setParam(KTR_PARAM_PAR_CONCURRENT_EVALS,1); //concurrent evaluations. wired, but without concurrent evaluations it takes less time
+    
+    
+    int result = solver1.solve();
+    std::vector<double> solution = solver1.getXValues();
+//    decrease the sigma while solution is not found
+    while(result != 0){
+        cout<<"decreasing sigma to solve for easier problem number of times "<<count+1<<endl;
+        this->decrease_sigma_x(factor);
+        this->get_traction();
+        result = solver1.solve();
+        count++;
+    }
+    cout<<"increasing sigma back\n";
+//    increase the sigma back and keep searching for the solution
+    for(count; count>0; --count){
+        this->increase_sigma_x(factor);
+        this->get_traction();
+        result = solver1.solve();
+    }
+    this->setXInitial(solver1.getXValues());
+    
+    return result==0;
 }
