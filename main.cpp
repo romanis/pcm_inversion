@@ -3,13 +3,14 @@
 #include <iostream>
 #include "pcm_market_share.h"
 #include "/storage/home/rji5040/work/Tasmanian_run/include/TasmanianSparseGrid.hpp"
-#include <bits/stdc++.h>
+//#include <bits/stdc++.h>
 #include <random>
 #include <numeric>
 #include <string>
 #include <functional>
 #include <algorithm>    // std::all_of
 #include <array>
+#include <omp.h>
 
 using namespace TasGrid;
 using namespace std;
@@ -54,6 +55,19 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
 
 
   int main(int argc, char *argv[]) {
+      
+    vector<double> tmp;
+    for(int i=0; i<10000000; ++i){
+        tmp.push_back(i);
+    }
+    double start = omp_get_wtime();
+#pragma omp parallel for num_threads(20)
+    for(int i=0; i<10000000; ++i){
+        tmp[i] = exp(i);
+    }
+    cout<<"time " << omp_get_wtime() - start<<endl;
+    return 0;
+      
     vector<double> sch ;//= {0.1, 0.2, 0.1};
       
       
@@ -64,12 +78,14 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
     std::vector<double> delta, delta_p;
     std::vector<double> p;
     int dim = 3;
-    int num_prod = 200;
-    unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+    int num_prod = 100;
+//    unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+    unsigned seed = 1000000;
     std::default_random_engine generator (seed);
       
     std::uniform_real_distribution<double> unif(-1,1);
     std::default_random_engine re;
+    
     
       
     vector<vector<double>> x;
@@ -116,10 +132,12 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
 //      vector<double> val2 = share1.unc_share(delta_p, x, p, sigma_p, sigmax,jacobian);
 //      cout<<"numerical jac " <<(val1[1]-val2[1])*1e4<<endl;
 //    print_jacobian(jacobian);
-    double start = omp_get_wtime();
+    start = omp_get_wtime();
     
     cout<< "shares at start \n";
     vector<double> sch_start = share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax,jacobian);
+    cout<<endl<< "time to calculate "<< omp_get_wtime() - start<<endl;
+    return 0;
 //    share1.setXInitial(share1.initial_guess());
     for(auto it: share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax,jacobian)){
         cout<< it<<endl;

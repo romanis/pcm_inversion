@@ -17,7 +17,7 @@
 #include<vector>
 #include "/storage/home/rji5040/work/Tasmanian_run/include/TasmanianSparseGrid.hpp"
 #include <utility>
-#include <c++/5.3.1/cmath>
+#include <cmath>
 #include <math.h>
 #include <algorithm>    // std::is_sorted, std::prev_permutation
 #include <array>  
@@ -172,6 +172,7 @@ std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p,
 //    put down market shares
 //    cout<<endl<<endpoints[0]<<" " <<delta[0]<< " " <<p[0]<<endl;
     con_share.push_back(boost::math::cdf(lognormDistr,endpoints[0]));
+#pragma omp parallel for schedule num_threads(20) 
     for(int i=1; i< delta.size(); ++i){
 //        push back cdf at new point
 //        cout<<endpoints[i]<<endl;
@@ -206,6 +207,7 @@ std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p,
             jacobian.push_back(dp_0);
 //            cout<< "size of jacobian "<< jacobian.size()<<endl;
 //            all the rest calculate algirithmically
+#pragma omp parallel for  num_threads(20) 
             for(int i=1; i<delta.size()-1; ++i){
                 vector<double> dp_i(delta.size(),0.0);
                 dp_i[i-1]   = -(boost::math::pdf(lognormDistr, endpoints[i]))/(p[i]  -p[i-1]);
@@ -245,6 +247,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
     }
     
 //    loop over all points in the grid
+#pragma omp parallel for schedule (dynamic,1) num_threads(1)
     for(int i=0; i<weights.size(); ++i){
 //        calculate the conditional quality
 //        delta_hat = delta + sigma_x*x*nu(i,:);
@@ -370,7 +373,9 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
         throw runtime_error("size of x is different from size of grid");
     }
     
+//    cout<<"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n";
 //    loop over all points in the grid
+//#pragma omp parallel for schedule (dynamic,1) num_threads(20) 
     for(int i=0; i<weights.size(); ++i){
 //        calculate the conditional quality
 //        delta_hat = delta + sigma_x*x*nu(i,:);
