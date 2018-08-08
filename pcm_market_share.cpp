@@ -152,6 +152,7 @@ std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p,
         throw runtime_error("price vector and delta sizes differ");
     }
     
+    
 //    compute points of being indifferent
     vector<double> endpoints;
 //    first endpoint is delta(0)/p(0)
@@ -160,6 +161,7 @@ std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p,
     for(int i=1; i<delta.size(); ++i){
         endpoints.push_back((delta[i]-delta[i-1])/(p[i]-p[i-1]));
     }
+    
 //    need to check that endpoints are sorted in reverse order
     vector <double> ep_tmp(endpoints);
     reverse(ep_tmp.begin(), ep_tmp.end());
@@ -172,7 +174,8 @@ std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p,
 //    put down market shares
 //    cout<<endl<<endpoints[0]<<" " <<delta[0]<< " " <<p[0]<<endl;
     con_share.push_back(boost::math::cdf(lognormDistr,endpoints[0]));
-#pragma omp parallel for schedule num_threads(20) 
+//#pragma omp parallel for num_threads(1) 
+    
     for(int i=1; i< delta.size(); ++i){
 //        push back cdf at new point
 //        cout<<endpoints[i]<<endl;
@@ -180,7 +183,7 @@ std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p,
 //        subtract from previous point the pushed value
         con_share[i-1] -= con_share[i];
     }
-    
+    cout<<"here"<<endl;
     
 //    cout<<"lognorm cpdf " << endpoints[0]<<" "<< boost::math::pdf(lognormDistr, 1)<<endl;
 //    for(auto it : con_share){
@@ -381,10 +384,11 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
 //        delta_hat = delta + sigma_x*x*nu(i,:);
         vector<double> delta_cond(delta_bar);
         for(int k=0; k<delta_cond.size(); ++k){
-        for(int j=0; j<x[0].size(); ++j){
-            delta_cond[k] += sigma_x[j]*x[k][j]*grid[i][j];
+            for(int j=0; j<x[0].size(); ++j){
+                delta_cond[k] += sigma_x[j]*x[k][j]*grid[i][j];
+            }
         }
-        }
+        
 //        cout<<"node " <<i<<endl;
 //        cout<<"delta"<<endl;
 //        for(auto it: delta_cond){
@@ -437,11 +441,11 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
 //        }
 //        cout<<endl;
 //        if there is a product with positive market share
+        
         if(ind.size() > 0){
 //            pick those deltas and prices that correspond to products with positive market shares
             vector<double> delta_positive, p_positive;
             vector<vector<double>> jacobian_tmp;
-            
             for(auto i_positive : ind){
                 delta_positive.push_back(delta_cond[i_positive]);
                 p_positive.push_back(p[i_positive]);
@@ -464,6 +468,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
                 num_i++;
             }
         }
+        
     }
 //    cout<<"share"<<endl;
 //        for(auto it: un_share){

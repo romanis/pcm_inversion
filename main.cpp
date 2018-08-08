@@ -54,19 +54,10 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
 
 
 
-  int main(int argc, char *argv[]) {
+int main(int argc, char *argv[]) {
       
-    vector<double> tmp;
-    for(int i=0; i<10000000; ++i){
-        tmp.push_back(i);
-    }
     double start = omp_get_wtime();
-#pragma omp parallel for num_threads(20)
-    for(int i=0; i<10000000; ++i){
-        tmp[i] = exp(i);
-    }
-    cout<<"time " << omp_get_wtime() - start<<endl;
-    return 0;
+
       
     vector<double> sch ;//= {0.1, 0.2, 0.1};
       
@@ -237,4 +228,4 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
 //
 //      int solveStatus = solver1.solve();
       return 0;
-  }
+}
