@@ -10,46 +10,12 @@
 #include <functional>
 #include <algorithm>    // std::all_of
 #include <array>
+#include <omp.h>
 
 using namespace TasGrid;
 using namespace std;
 
-inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
-   if (solveStatus != 0) {
-     std::cout << "Failed to solve problem, final status = " << solveStatus << std::endl;
-//     return;
-   }
-   else{
-    std::cout << "---------- Solution found ----------" << std::endl << std::endl;
-   }
 
-   std::cout.precision(4);
-   std::cout << std::fixed;
-
-   // Objective value
-   std::cout << std::right << std::setw(28) << "Objective value = " << solver.getObjValue() << std::endl;
-
-   // Solution point
-   std::cout << std::right << std::setw(29) << "Final point = (";
-   const std::vector<double>& point = solver.getXValues();
-   std::vector<double>::const_iterator it = point.begin();
-   while ( it != point.end()) {
-       std::cout << *it;
-       if (++it != point.end())
-           std::cout << ", ";
-   }
-   std::cout << ")" << std::endl;
-
-   if (!((solver.getProblem())->isMipProblem()))
-   {
-       std::cout << std::right << std::setw(28) << "Feasibility violation = " << solver.getAbsFeasError() << std::      endl;
-       std::cout << std::right << std::setw(28) << "KKT optimality violation = " << solver.getAbsOptError() <<          std::endl;
-   }
-   else {
-       std::cout << std::right << std::setw(28) << "Absolute integrality gap = " << solver.getMipAbsGap() << std::      endl;
-   }
-   std::cout << std::endl;
- }
 
 
 
@@ -63,9 +29,10 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
       
     std::vector<double> delta, delta_p;
     std::vector<double> p;
-    int dim = 3;
-    int num_prod = 200;
+    int dim = 4;
+    int num_prod = 100;
     unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+    seed = 1000000;
     std::default_random_engine generator (seed);
       
     std::uniform_real_distribution<double> unif(-1,1);
@@ -84,6 +51,9 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
         x.push_back(x_tmp);
         sch.push_back(unif(generator)+2);
     }
+    
+//    equate two prices
+    p[0] = p[1];
     
 //    normalize shares to sum to less than 1
     {
@@ -109,7 +79,7 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
     pcm_market_share share1(sch, x, sigmax, p, sigma_p);
     
 //    set grid for integration, 15 points per dimension is usually enough
-    share1.set_grid(dim,15);
+    share1.set_grid(dim,10);
       
 //      cond_share(delta,p,sigma_p, jacobian);
 //      vector<double> val1 = share1.unc_share(delta, x, p, sigma_p, sigmax,jacobian);
@@ -119,7 +89,9 @@ inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
     double start = omp_get_wtime();
     
     cout<< "shares at start \n";
-    vector<double> sch_start = share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax,jacobian);
+    vector<double> sch_start = share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax, jacobian);
+    cout<<endl<< "time to calculate "<< omp_get_wtime() - start<<endl;
+    return 0;
 //    share1.setXInitial(share1.initial_guess());
     for(auto it: share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax,jacobian)){
         cout<< it<<endl;

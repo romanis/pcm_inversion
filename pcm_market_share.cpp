@@ -17,7 +17,7 @@
 #include<vector>
 #include "/storage/home/rji5040/work/Tasmanian_run/include/TasmanianSparseGrid.hpp"
 #include <utility>
-#include <c++/5.3.1/cmath>
+#include <cmath>
 #include <math.h>
 #include <algorithm>    // std::is_sorted, std::prev_permutation
 #include <array>  
@@ -244,7 +244,19 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
         throw runtime_error("size of x is different from size of grid");
     }
     
+//    create vector of locks 
+    vector<omp_lock_t> locks;
+
+    for(int i=0; i< delta_bar.size(); ++i){
+        omp_lock_t writelock;
+        omp_init_lock(&writelock);
+        locks.push_back(writelock);
+    }
+        
+    
+    
 //    loop over all points in the grid
+#pragma omp parallel for num_threads(4) schedule(dynamic,1)
     for(int i=0; i<weights.size(); ++i){
 //        calculate the conditional quality
 //        delta_hat = delta + sigma_x*x*nu(i,:);
@@ -258,45 +270,39 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
             }
         }
         }
-//        cout<<"node " <<i<<endl;
-//        cout<<"delta"<<endl;
-//        for(auto it: delta_cond){
-//            cout<<it<<" ";
-//        }
-//        cout<<endl;
-//        cout<<"price"<<endl;
-//        for(auto it: p){
-//            cout<<it<<" ";
-//        }
-//        cout<<endl;
+
         
 //        determine indexes of goods that have positive market shares
         vector<int> ind;
         for(int j=0; j<delta_bar.size(); ++j){
-//            calculate upper bound on price elasticity of people who will choose peoduct j
+//            calculate upper bound on price elasticity of people who will choose product j
             vector<double> up_alpha;
             for(int k=0; k<j; ++k){
-                up_alpha.push_back((delta_cond[j]-delta_cond[k])/(p[j]-p[k]));
+//                if p[j] != p[k], use simple formula
+                if(p[j] != p[k]){
+                    up_alpha.push_back((delta_cond[j]-delta_cond[k])/(p[j]-p[k]));
+                }
+//                else push back the difference times a big number
+                else{
+                    up_alpha.push_back((delta_cond[j]-delta_cond[k]) * 1e10);
+                }
             }
             up_alpha.push_back(delta_cond[j]/p[j]);
             
 //            create lower bound on price elasticity of those who buy this product
             vector<double> lower_alpha;
             for(int k=delta_cond.size()-1; k>j; --k){
-                lower_alpha.push_back((delta_cond[j]-delta_cond[k])/(p[j]-p[k]));
+                if(p[j] != p[k]){
+                    lower_alpha.push_back((delta_cond[j]-delta_cond[k])/(p[j]-p[k]));
+                }
+//                else, push back a large negative number
+                else{
+                    lower_alpha.push_back((delta_cond[j]-delta_cond[k])*(-1e10));
+                }
             }
             lower_alpha.push_back(0);
             
-//            for(auto it: up_alpha){
-//                cout<<"up alpha "<< it<< " ";
-//            }
-//            cout<<endl;
-//            for(auto it: lower_alpha){
-//                cout<<"low alpha "<< it<< " ";
-//            }
-//            cout<<endl;
-//            cout<<" min element " << *min_element(up_alpha.begin(), up_alpha.end())<<endl;
-//            cout<<" max element " << *max_element(lower_alpha.begin(), lower_alpha.end())<<endl;
+
             
 //            if there is slack between up and lower, it has positive market share
             if(*min_element(up_alpha.begin(), up_alpha.end()) > *max_element(lower_alpha.begin(), lower_alpha.end())){
@@ -304,11 +310,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
             }
             
         }
-//        cout<<"set of positive market share"<<endl;
-//        for(auto it: ind){
-//            cout<< it<<" ";
-//        }
-//        cout<<endl;
+
 //        if there is a product with positive market share
         if(ind.size() > 0){
 //            pick those deltas and prices that correspond to products with positive market shares
@@ -326,9 +328,14 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
 
 //            add shares to corresponding dimensions of un_share
             int num_share=0;
+
+            
             for(auto i_dim : ind){
+                omp_set_lock(&locks[i_dim]);
                 un_share[i_dim]+=weights[i]*shares_tmp[num_share++];
+                omp_unset_lock(&locks[i_dim]);
             }
+            
         }
     }
 //    cout<<"share"<<endl;
@@ -370,7 +377,17 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
         throw runtime_error("size of x is different from size of grid");
     }
     
+    //    create vector of locks 
+    vector<omp_lock_t> locks;
+
+    for(int i=0; i< delta_bar.size(); ++i){
+        omp_lock_t writelock;
+        omp_init_lock(&writelock);
+        locks.push_back(writelock);
+    }
+    
 //    loop over all points in the grid
+#pragma omp parallel for num_threads(4) schedule(dynamic,1)
     for(int i=0; i<weights.size(); ++i){
 //        calculate the conditional quality
 //        delta_hat = delta + sigma_x*x*nu(i,:);
@@ -380,45 +397,39 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
             delta_cond[k] += sigma_x[j]*x[k][j]*grid[i][j];
         }
         }
-//        cout<<"node " <<i<<endl;
-//        cout<<"delta"<<endl;
-//        for(auto it: delta_cond){
-//            cout<<it<<" ";
-//        }
-//        cout<<endl;
-//        cout<<"price"<<endl;
-//        for(auto it: p){
-//            cout<<it<<" ";
-//        }
-//        cout<<endl;
+
         
 //        determine indexes of goods that have positive market shares
         vector<int> ind;
         for(int j=0; j<delta_bar.size(); ++j){
-//            calculate upper bound on price elasticity of people who will choose peoduct j
+//            calculate upper bound on price elasticity of people who will choose product j
             vector<double> up_alpha;
             for(int k=0; k<j; ++k){
-                up_alpha.push_back((delta_cond[j]-delta_cond[k])/(p[j]-p[k]));
+//                if p[j] != p[k], use simple formula
+                if(p[j] != p[k]){
+                    up_alpha.push_back((delta_cond[j]-delta_cond[k])/(p[j]-p[k]));
+                }
+//                else push back the difference times a big number
+                else{
+                    up_alpha.push_back((delta_cond[j]-delta_cond[k]) * 1e10);
+                }
             }
             up_alpha.push_back(delta_cond[j]/p[j]);
             
 //            create lower bound on price elasticity of those who buy this product
             vector<double> lower_alpha;
             for(int k=delta_cond.size()-1; k>j; --k){
-                lower_alpha.push_back((delta_cond[j]-delta_cond[k])/(p[j]-p[k]));
+                if(p[j] != p[k]){
+                    lower_alpha.push_back((delta_cond[j]-delta_cond[k])/(p[j]-p[k]));
+                }
+//                else, push back a large negative number
+                else{
+                    lower_alpha.push_back((delta_cond[j]-delta_cond[k])*(-1e10));
+                }
             }
             lower_alpha.push_back(0);
             
-//            for(auto it: up_alpha){
-//                cout<<"up alpha "<< it<< " ";
-//            }
-//            cout<<endl;
-//            for(auto it: lower_alpha){
-//                cout<<"low alpha "<< it<< " ";
-//            }
-//            cout<<endl;
-//            cout<<" min element " << *min_element(up_alpha.begin(), up_alpha.end())<<endl;
-//            cout<<" max element " << *max_element(lower_alpha.begin(), lower_alpha.end())<<endl;
+
             
 //            if there is slack between up and lower, it has positive market share
             if(*min_element(up_alpha.begin(), up_alpha.end()) > *max_element(lower_alpha.begin(), lower_alpha.end())){
@@ -426,11 +437,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
             }
             
         }
-//        cout<<"set of positive market share"<<endl;
-//        for(auto it: ind){
-//            cout<< it<<" ";
-//        }
-//        cout<<endl;
+
 //        if there is a product with positive market share
         if(ind.size() > 0){
 //            pick those deltas and prices that correspond to products with positive market shares
@@ -445,19 +452,27 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
 
 //            add shares to corresponding dimensions of un_share
             int num_share=0, num_i=0, num_j=0;
+
+            
             for(auto i_dim : ind){
+                omp_set_lock(&locks[i_dim]);
                 un_share[i_dim]+=weights[i]*shares_tmp[num_share++];
+                omp_unset_lock(&locks[i_dim]);
             }
+            
             
 //            add jacobian elements to their positions
             for(auto i_dim :ind){
+                omp_set_lock(&locks[i_dim]);
                 for (auto j_dim : ind){
                     jacobian[i_dim][j_dim] += weights[i]*jacobian_tmp[num_i][num_j];
                     ++num_j;
                 }
+                omp_unset_lock(&locks[i_dim]);
                 num_j = 0;
                 num_i++;
             }
+            
         }
     }
 //    cout<<"share"<<endl;
@@ -579,7 +594,7 @@ bool pcm_market_share::solve_for_delta(){
     solver1.setParam(KTR_PARAM_PAR_NUMTHREADS, 20);
     solver1.setParam(KTR_PARAM_LINSOLVER, 6); // intel lin solver
 //    solver1.setParam(KTR_PARAM_PAR_LSNUMTHREADS, 5);
-    solver1.setParam(KTR_PARAM_PAR_BLASNUMTHREADS,5);
+//    solver1.setParam(KTR_PARAM_PAR_BLASNUMTHREADS,5);
     solver1.setParam(KTR_PARAM_FEASTOL, 1e-10);
     solver1.setParam(KTR_PARAM_MULTISTART, 0);
     solver1.setParam(KTR_PARAM_PAR_CONCURRENT_EVALS,1); //concurrent evaluations. wired, but without concurrent evaluations it takes less time
