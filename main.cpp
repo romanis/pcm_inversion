@@ -19,7 +19,7 @@ using namespace std;
 
 
 
-  int main(int argc, char *argv[]) {
+int main(int argc, char *argv[]) {
     vector<double> sch ;//= {0.1, 0.2, 0.1};
       
       
@@ -53,7 +53,8 @@ using namespace std;
     }
     
 //    equate two prices
-    p[0] = p[1];
+    p[1] = p[0];
+    p[2] = p[0];
     
 //    normalize shares to sum to less than 1
     {
@@ -91,7 +92,12 @@ using namespace std;
     cout<< "shares at start \n";
     vector<double> sch_start = share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax, jacobian);
     cout<<endl<< "time to calculate "<< omp_get_wtime() - start<<endl;
-    return 0;
+    
+    cout<<"share at start\n";
+    for(auto sh: sch_start){
+        cout<< sh<<"\n";
+    }
+//    return 0;
 //    share1.setXInitial(share1.initial_guess());
     for(auto it: share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax,jacobian)){
         cout<< it<<endl;
@@ -191,4 +197,4 @@ using namespace std;
 //
 //      int solveStatus = solver1.solve();
       return 0;
-  }
+}

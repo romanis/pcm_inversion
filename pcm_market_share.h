@@ -85,6 +85,10 @@ public:
         }
     }
     
+/*    TODO: write a routine that identifies the products with exactly the same X characteristics and exactly the same price, these must be merged into one. 
+ *    and one schould keep track of which original products corresponded to those merged products.
+ */
+    
     
     double relax_til_solved(std::vector<double> & solution, std::vector<double> starting_point);
 //    this function reduces variance of sigma_x until problem solves, reports ratio of final delta to original one
