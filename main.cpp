@@ -48,21 +48,37 @@ int main(int argc, char *argv[]) {
     std::uniform_real_distribution<double> unif(-1,1);
     std::default_random_engine re;
     
-    vector<vector<double>> A_inv, A = vector<vector<double > > (3, vector<double>(3,0));
+    vector<vector<double>> A_inv, A = vector<vector<double > > (4, vector<double>(4,0));
+    vector<double> b = vector<double> (4, 1);
     A[0][0] = 2;
     A[0][1] = 2;
     A[0][2] = 1;
+    A[0][3] = 1;
+    A[1][0] = 1;
+    A[1][2] = 3;
     A[1][1] = 2;
     A[2][2] = 2;
+    A[2][0] = 1;
+    A[2][1] = 1;
+    A[3][3] = 2;
+    A[3][1] = 1;
+    A[3][2] = 1;
+    A[3][0] = 2;
     A_inv = inv_det(A);
-    for(int i=0; i<3; ++i){
-        for(int j=0; j<3; ++j)
+    for(int i=0; i<4; ++i){
+        for(int j=0; j<4; ++j)
+            cout<<A[i][j]<<"\t";
+        cout<<endl;
+    }
+    cout<< endl;
+    for(int i=0; i<4; ++i){
+        for(int j=0; j<4; ++j)
             cout<<A_inv[i][j]<<"\t";
         cout<<endl;
     }
     cout<<det(A)<<endl;
-    vector<double> b = A*A[0];
-    for(auto it: b){
+    vector<double> x1 = A_inv*b;
+    for(auto it: x1){
         cout<<it<<" " ;
     }
     cout<<endl;

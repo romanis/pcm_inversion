@@ -86,7 +86,7 @@ vector<vector<double>> inv_det(vector<vector<double>> A){
         for(int j=0; j<n; j++){           
 //            create submatrix without ith row and jth column
             vector<vector<double>> A_ij = A_minus_ij(A,i,j);
-            A_inv[i][j] = det(A_ij)/det_A;
+            A_inv[j][i] = pow(-1, i+j+2)*det(A_ij)/det_A;
         }
     }
     
