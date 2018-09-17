@@ -11,6 +11,8 @@
 #include <algorithm>    // std::all_of
 #include <array>
 #include <omp.h>
+//#include <mkl.h>
+#include "matrix_inverse.h"
 
 using namespace TasGrid;
 using namespace std;
@@ -37,6 +39,21 @@ int main(int argc, char *argv[]) {
       
     std::uniform_real_distribution<double> unif(-1,1);
     std::default_random_engine re;
+    
+    vector<vector<double>> A_inv, A = vector<vector<double > > (3, vector<double>(3,0));
+    A[0][0] = 2;
+    A[0][1] = 2;
+    A[0][2] = 1;
+    A[1][1] = 2;
+    A[2][2] = 2;
+    A_inv = inv_det(A);
+    for(int i=0; i<3; ++i){
+        for(int j=0; j<3; ++j)
+            cout<<A_inv[i][j]<<"\t";
+        cout<<endl;
+    }
+    cout<<det(A)<<endl;
+    return 0;
     
       
     vector<vector<double>> x;
