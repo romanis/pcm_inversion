@@ -17,7 +17,15 @@
 using namespace TasGrid;
 using namespace std;
 
-
+std::vector<double> operator * (std::vector<std::vector<double>> A, std::vector<double> x){
+    std::vector<double> result = std::vector<double>(A.size(), 0);
+    for(int i=0; i<A.size(); ++i){
+        for(int j=0; j< A[0].size(); ++j){
+            result[i] += A[i][j]*x[j];
+        }
+    }
+    return result;
+}
 
 
 
@@ -53,6 +61,11 @@ int main(int argc, char *argv[]) {
         cout<<endl;
     }
     cout<<det(A)<<endl;
+    vector<double> b = A*A[0];
+    for(auto it: b){
+        cout<<it<<" " ;
+    }
+    cout<<endl;
     return 0;
     
       
