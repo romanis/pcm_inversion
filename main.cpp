@@ -11,6 +11,7 @@
 #include <algorithm>    // std::all_of
 #include <array>
 #include <omp.h>
+#include <math.h>
 //#include <mkl.h>
 #include "matrix_inverse.h"
 
@@ -27,6 +28,16 @@ std::vector<double> operator * (std::vector<std::vector<double>> A, std::vector<
     return result;
 }
 
+std::vector<double> operator - (std::vector<double> x1, std::vector<double> x2){
+    std::vector<double> result = std::vector<double>(x1.size(), 0);
+   
+    for(int j=0; j< x1.size(); ++j){
+        result[j] += x1[j]-x2[j];
+    }
+
+    return result;
+}
+
 
 
 int main(int argc, char *argv[]) {
@@ -40,7 +51,7 @@ int main(int argc, char *argv[]) {
     std::vector<double> delta, delta_p;
     std::vector<double> p;
     int dim = 4;
-    int num_prod = 100;
+    int num_prod = 10;
     unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
     seed = 1000000;
     std::default_random_engine generator (seed);
@@ -48,41 +59,39 @@ int main(int argc, char *argv[]) {
     std::uniform_real_distribution<double> unif(-1,1);
     std::default_random_engine re;
     
-    vector<vector<double>> A_inv, A = vector<vector<double > > (4, vector<double>(4,0));
-    vector<double> b = vector<double> (4, 1);
-    A[0][0] = 2;
-    A[0][1] = 2;
-    A[0][2] = 1;
-    A[0][3] = 1;
-    A[1][0] = 1;
-    A[1][2] = 3;
-    A[1][1] = 2;
-    A[2][2] = 2;
-    A[2][0] = 1;
-    A[2][1] = 1;
-    A[3][3] = 2;
-    A[3][1] = 1;
-    A[3][2] = 1;
-    A[3][0] = 2;
-    A_inv = inv_det(A);
-    for(int i=0; i<4; ++i){
-        for(int j=0; j<4; ++j)
-            cout<<A[i][j]<<"\t";
-        cout<<endl;
-    }
-    cout<< endl;
-    for(int i=0; i<4; ++i){
-        for(int j=0; j<4; ++j)
-            cout<<A_inv[i][j]<<"\t";
-        cout<<endl;
-    }
-    cout<<det(A)<<endl;
-    vector<double> x1 = A_inv*b;
-    for(auto it: x1){
-        cout<<it<<" " ;
-    }
-    cout<<endl;
-    return 0;
+//    vector<vector<double>> A_inv, A = vector<vector<double > > (3, vector<double>(3,0));
+//    vector<double> b = vector<double> (4, 1);
+//    A[0][0] = 3;
+//    A[0][1] = 1;
+//    A[0][2] = 1.5;
+//    A[1][0] = 2;
+//    A[1][1] = 5;
+//    A[1][2] = 4;
+//    A[2][2] = 10;
+//    A[2][0] = 1;
+//    A[2][1] = 2;
+//    A_inv = inv_det(A);
+//    vector<double> x_solution = A_inv_b_iter(A,b);
+//    for(int i=0; i<3; ++i){
+//        for(int j=0; j<3; ++j)
+//            cout<<A[i][j]<<"\t";
+//        cout<<endl;
+//    }
+////    cout<< endl;
+//    cout<<"A inverted\n";
+//    for(int i=0; i<3; ++i){
+//        for(int j=0; j<3; ++j)
+//            cout<<A_inv[i][j]<<"\t";
+//        cout<<endl;
+//    }
+////    cout<<det(A)<<endl;
+//    cout<<" solution Ainv b\n";
+////    vector<double> x1 = A_inv*b;
+//    for(auto it: x_solution){
+//        cout<<it<<endl;
+//    }
+////    cout<<endl;
+//    return 0;
     
       
     vector<vector<double>> x;
@@ -99,8 +108,8 @@ int main(int argc, char *argv[]) {
     }
     
 //    equate two prices
-    p[1] = p[0];
-    p[2] = p[0];
+//    p[1] = p[0];
+//    p[2] = p[0];
     
 //    normalize shares to sum to less than 1
     {
@@ -117,7 +126,7 @@ int main(int argc, char *argv[]) {
         }
     }
 //    generate vector of std of heterogeneity
-    vector<double> sigmax(x[0].size(),2.5);
+    vector<double> sigmax(x[0].size(),1.5);
     cout<<"size of sigmax "<<sigmax.size()<<endl;
     cout<<"size of x[0] "<<x[0].size()<<endl;
     std::vector<vector<double> > jacobian;
@@ -126,7 +135,7 @@ int main(int argc, char *argv[]) {
     pcm_market_share share1(sch, x, sigmax, p, sigma_p);
     
 //    set grid for integration, 15 points per dimension is usually enough
-    share1.set_grid(dim,10);
+    share1.set_grid(dim, 10);
       
 //      cond_share(delta,p,sigma_p, jacobian);
 //      vector<double> val1 = share1.unc_share(delta, x, p, sigma_p, sigmax,jacobian);
@@ -139,19 +148,57 @@ int main(int argc, char *argv[]) {
     vector<double> sch_start = share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax, jacobian);
     cout<<endl<< "time to calculate "<< omp_get_wtime() - start<<endl;
     
-    cout<<"share at start\n";
-    for(auto sh: sch_start){
-        cout<< sh<<"\n";
+    cout<<"sh at start;\t sh in data\n";
+    double distrepancy = 0;
+    for(int sh = 0; sh< sch_start.size(); ++sh){
+        cout<< sch_start[sh]<<" \t" <<sch[sh]  <<"\n";
+        distrepancy += abs(sch_start[sh] - sch[sh]);
     }
+    cout<< "discrepancy " << distrepancy<<endl;
+    
+//    make one step of newtons method
+//    evaluate constraints
+    vector<double> delta_start = share1.initial_guess();
+    while(distrepancy > 1e-10){
+        share1.evaluateFC(delta_start,c,objGrad,jac);
+        share1.evaluateGA(delta_start, objGrad, jac);
+    //    repack jacobian
+        vector<vector<double>> jacobian_square;
+        {
+    //        create a head of a new vector
+        int head = 0;
+        for(int i=0; i<c.size(); ++i){
+            vector<double> j_i(&jac[head], &jac[head+c.size()]);
+            jacobian_square.push_back(j_i);
+            head+=c.size();
+        }
+        }
+    //    compute difference with next newton iteration
+//        delta_start = delta_start - inv_det(jacobian_square)*c;
+
+//        solve system jacobian*x = c
+        delta_start = delta_start - A_inv_b_iter(jacobian_square, c, delta_start);
+
+        sch_start = share1.unc_share(delta_start, x, p, sigma_p, sigmax, jacobian);
+        distrepancy = 0;
+        for(int sh = 0; sh< sch_start.size(); ++sh){
+            cout<< sch_start[sh]<<" \t" <<sch[sh]  <<"\n";
+            distrepancy += abs(sch_start[sh] - sch[sh]);
+        }
+        cout<< "discrepancy " << distrepancy<<endl;
+    }
+    return 0;
+    
 //    return 0;
 //    share1.setXInitial(share1.initial_guess());
-    for(auto it: share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax,jacobian)){
-        cout<< it<<endl;
-    }
+//    for(auto it: share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax,jacobian)){
+//        cout<< it<<endl;
+//    }
 //    if not all of initial shares greater than zero 
     if(!all_of(sch_start.begin(), sch_start.end(), [](double it){return it>1e-4;})){
 //        increase deltas so that all have positive market shares
-        cout<<"not all values positive \n";
+        cout<<"not all values are above 1e-4 \n";
+//        share1.get_traction();
     }
 //    cout<<" value " <<share1.evaluateFC(share1.initial_guess(),c,objGrad,jac)<<endl;
 //    vector<double> val1 = share1.unc_share(share1.initial_guess(), x, p, sigma_p, sigmax,jacobian);
@@ -172,7 +219,7 @@ int main(int argc, char *argv[]) {
 //        cout<<it<<" ";
 //    }
     cout<<endl<< "time to calculate "<< omp_get_wtime() - start<<endl;
-    share1.setXInitial(share1.initial_guess());
+//    share1.setXInitial(share1.initial_guess());
 //    share1.get_traction();
 //    cout<<"initial guess \n";
 //    for(auto it :share1.initial_guess()){

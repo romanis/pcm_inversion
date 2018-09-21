@@ -580,6 +580,7 @@ bool pcm_market_share::solve_for_delta(){
     int count = 0; // count number of contractions
 //    set initial guess for 
     this->setXInitial(this->initial_guess());
+//    increase deltas of products with zero market share until all products have positive market share
     this->get_traction();
 //    try to solve 
     knitro::KTRSolver solver1(this, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);

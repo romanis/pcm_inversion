@@ -147,7 +147,7 @@ public:
 //        std::cout<<"here"<<std::endl;
         double obj=0;
           // constraints
-        jac.clear();
+//        jac.clear();
         c.clear();
         for(int i=0; i<shares_data.size(); ++i){
 //            uncomment for MPEC

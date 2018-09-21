@@ -92,3 +92,45 @@ vector<vector<double>> inv_det(vector<vector<double>> A){
     
     return A_inv;
 }
+
+std::vector<double> A_inv_b_iter(std::vector<std::vector<double>> A, std::vector<double> b, vector<double> x){
+//    run intil convergence solving each linear equality at a time. 
+    double discrepancy = 1;
+    int iter_num = 0;
+//    if x was not supplied, make it a vector of zeros
+    if(x.size() == 0){
+        x = vector<double> (A.size(), 1);
+    }
+//    for gauss jacobi use x_old
+    vector<double> x_old = x;
+    while (discrepancy > 1e-12 & iter_num++ < 1000){
+//        create a local measure of max discreapancy 
+        double max_discrepancy = 0;
+//        at each iteration loop over rows of A and at each subiteration solve for x_i conitional on all other x_{-i}
+        for(int i=0; i<A.size(); ++i){
+//            assume that A[i][i] != 0
+//            compute b[i] - sum(a[ij]*x[j] j!=i
+            double rhs = b[i];
+            for(int j=0; j<A.size(); ++j){
+                if(j==i){
+                    continue;
+                }
+                else{
+                    rhs -= A[i][j] * x[j];
+                }
+            }
+//            if discrepancy between A[i][i]*x[i] and rhs is greater than max discrepancy, replace the max discrepancy 
+            if(abs(A[i][i]*x[i] - rhs) > max_discrepancy){
+                max_discrepancy = abs(A[i][i]*x[i] - rhs);
+            }
+//            update x[i]
+            x[i] = rhs / A[i][i];
+        }
+//        update discrepancy 
+        discrepancy = max_discrepancy;
+        x_old = x;
+//        cout<< "max discrepancy is " << discrepancy<<endl;
+    }
+    
+    return x;
+}

@@ -19,7 +19,8 @@ std::vector<std::vector<double>> A_minus_ij(std::vector<std::vector<double>> A, 
 // routine to compute the inverse of a matrix with det(A_r)/det(A)
 std::vector<std::vector<double>> inv_det(std::vector<std::vector<double>> A);
 
-
+// routine to solve Ax=b iteratively with gauss jacobi
+std::vector<double> A_inv_b_iter(std::vector<std::vector<double>> A, std::vector<double> b, std::vector<double> x = std::vector<double>(0, 0));
 
 
 
