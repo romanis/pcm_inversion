@@ -5,7 +5,7 @@ KIDIR1	 = /opt/aci/sw/knitro/10.2.1/include
 KIDIR2	 = /opt/aci/sw/knitro/10.2.1/examples/C++/include/
 EIGEN	 = .#/storage/home/rji5040/work/eigen/
 BOOSTI	 = .#/storage/work/rji5040/boost_1_65_1/
-BOOSTL	 = /storage/work/rji5040/boost_1_65_1/stage/lib
+
 TASMANIANL = /storage/home/rji5040/work/Tasmanian_run/lib
 TASMANIANI = /storage/home/rji5040/work/Tasmanian_run/include/
 # parameters for gurobi
@@ -20,7 +20,7 @@ MKL_FLAGS= -L"/opt/intel/compilers_and_libraries_2016.3.210/linux/tbb/lib/intel6
 #CXXFLAGS = -O2  -c -I$(SDIR) -I$(IDIR) -I$(KIDIR1) -I$(KIDIR2) -I$(EIGEN) -std=c++0x
 CXXFLAGS = -O3 -std=c++14  -c -I$(SDIR)  -I$(KIDIR1) -I$(KIDIR2) -I$(EIGEN) -I. -I$(BOOSTI) -I$(INC) $(CARGS) -I$(TASMANIANI)   -fopenmp #-funroll-all-loops
 #LDFLAGS  = -lm -L$(LDIR) -lscl   -fopenmp -rdynamic /opt/aci/sw/knitro/10.2.1/lib/libknitro.so -ldl -Wl,-rpath,/opt/aci/sw/knitro/10.2.1/lib
-LDFLAGS  = -lm $(CPPLIB)  -L$(BOOSTL) $(BOOSTL)/libboost_serialization.a -fopenmp -rdynamic /opt/aci/sw/knitro/10.2.1/lib/libknitro.so.10.2.1 $(TASMANIANL)/libtasmaniansparsegrid.a -ldl -Wl,-rpath,/opt/aci/sw/knitro/10.2.1/lib #$(MKL_FLAGS) 
+LDFLAGS  = -lm $(CPPLIB)   -fopenmp -rdynamic /opt/aci/sw/knitro/10.2.1/lib/libknitro.so.10.2.1 $(TASMANIANL)/libtasmaniansparsegrid.a -ldl -Wl,-rpath,/opt/aci/sw/knitro/10.2.1/lib #$(MKL_FLAGS) 
 #LDFLAGS  = -lm $(CPPLIB) -L$(BOOSTL) $(BOOSTL)/libboost_serialization.a -fopenmp -rdynamic 
 
 main : main.o pcm_market_share.o matrix_inverse.o

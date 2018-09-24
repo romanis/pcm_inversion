@@ -212,7 +212,7 @@ int main(int argc, char *argv[]) {
     delta_start = share1.initial_guess();
     double start_direct = omp_get_wtime();
     distrepancy = 1;
-    while(distrepancy > 1e-10 and false){
+    while(distrepancy > 1e-10){
         share1.evaluateFC(delta_start,c,objGrad,jac);
         share1.evaluateGA(delta_start, objGrad, jac);
     //    repack jacobian
