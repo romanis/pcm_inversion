@@ -16,6 +16,7 @@
 #include<iostream>
 #include<math.h>
 #include<stdio.h>
+#include <algorithm>
 
 using namespace std;
 
@@ -31,6 +32,10 @@ double det(vector<vector<double> > A)
     {
         return( (A[0][0] * A[1][1]) - (A[0][1] * A[1][0]));
     }
+//    also write manually for 3x3 minor
+    else if(n ==3){
+        return(A[0][0]*A[1][1]*A[2][2]+A[0][2]*A[1][0]*A[2][1] + A[0][1]*A[1][2]*A[2][0] - A[0][2]*A[1][1]*A[2][0] - A[0][1]*A[1][0]*A[2][2] - A[0][0]*A[1][2]*A[2][1]);
+    }
 //    else, create a sub-matrix and use determinant on it
     else
     {  
@@ -43,6 +48,66 @@ double det(vector<vector<double> > A)
         }
     }
     return d;
+}
+
+double det_permutations(std::vector<std::vector<double> > A){
+//    loop over all permutations and multiply the elements of A
+    double d = 0;
+    vector<int> row_index;
+//    create row and column indexes, then permute column index with std::next_permutation(.,.)
+    for(int i=0; i<A.size(); ++i){
+        row_index.push_back(i);
+    }
+    vector<int> col_index = row_index;
+//    create +-1 factor, next_permutation changes it every two permutations
+    
+    int count_permutations = 0;
+//    until there exists next permutation 
+    do{
+//        determine the signature of permutation
+//        int num_permutations =0;
+//        for(int i = 0; i< col_index.size()-1; ++i){
+//            for(int j=i+1; j<col_index.size(); ++j){
+//                if(col_index[j]<col_index[i]){
+//                    count_permutations++;
+//                }
+//            }
+//        }
+//        int factor = ((count_permutations % 2 == 0) ? 1 : -1);
+        int factor = sign_permutation(col_index);
+//        walk over all col and row indexes and multiply elements of A, factor changes every two iterations
+        double element = 1;
+//        compute this element of product
+        for(int i=0; i< row_index.size(); i++){
+            element *= A[row_index[i]][col_index[i]];
+        }
+//        add element to determinant
+        d += element*factor;
+        
+    }while(next_permutation(col_index.begin(), col_index.end()));
+    return d;
+}
+
+
+int sign_permutation(std::vector<int> b){
+    vector<bool> visited(b.size(), false); 
+    int sign =1;
+    for(int i=0; i<b.size(); ++i){
+        if(visited[i] == false){
+            int next = i;
+            int L=0;
+            while(!visited[next]){
+                L++;
+                visited[next] =  true;
+                next = b[next];
+            }
+            if(L % 2 == 0){
+                sign *= -1;
+            }
+        }
+    }
+    
+    return sign;
 }
 
 vector<vector<double>>  A_minus_ij(vector<vector<double>> A, int i_m, int j_m){
@@ -93,13 +158,37 @@ vector<vector<double>> inv_det(vector<vector<double>> A){
     return A_inv;
 }
 
+vector<vector<double>> inv_det_permute(vector<vector<double>> A){
+    int n = A.size();
+//    create an empty matrix 
+    vector<vector<double>> A_inv =  vector<vector<double> > (n, vector<double>(n, 0)); 
+//    compute determinant of A
+    double det_A = det_permutations(A);
+//    loop over all coefficients of inverse matrix and compute determinants of matrix without that row and column
+    for(int i=0; i<n; i++){
+        for(int j=0; j<n; j++){           
+//            create submatrix without ith row and jth column
+            vector<vector<double>> A_ij = A_minus_ij(A,i,j);
+            A_inv[j][i] = pow(-1, i+j+2)*det_permutations(A_ij)/det_A;
+        }
+    }
+    
+    return A_inv;
+}
+
 std::vector<double> A_inv_b_iter(std::vector<std::vector<double>> A, std::vector<double> b, vector<double> x){
 //    run intil convergence solving each linear equality at a time. 
     double discrepancy = 1;
     int iter_num = 0;
 //    if x was not supplied, make it a vector of zeros
+//    if(x.size() == 0){
+//        x = vector<double> (A.size(), 1);
+//    }
+//    random filling
     if(x.size() == 0){
-        x = vector<double> (A.size(), 1);
+        for(int i=0; i<A.size(); ++i){
+            x.push_back((double)rand() / RAND_MAX);
+        }
     }
 //    for gauss jacobi use x_old
     vector<double> x_old = x;

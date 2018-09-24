@@ -59,37 +59,48 @@ int main(int argc, char *argv[]) {
     std::uniform_real_distribution<double> unif(-1,1);
     std::default_random_engine re;
     
-//    vector<vector<double>> A_inv, A = vector<vector<double > > (3, vector<double>(3,0));
+//    vector<vector<double>> A_inv, A = vector<vector<double > > (4, vector<double>(4,0));
 //    vector<double> b = vector<double> (4, 1);
-//    A[0][0] = 3;
-//    A[0][1] = 1;
-//    A[0][2] = 1.5;
-//    A[1][0] = 2;
-//    A[1][1] = 5;
-//    A[1][2] = 4;
-//    A[2][2] = 10;
+//    A[0][0] = 1;
+//    A[0][1] = 0;
+//    A[0][2] = 3;
+//    A[1][0] = M_PI;
+//    A[1][1] = 4;
+//    A[1][2] = 0;
+//    A[2][2] = 1;
 //    A[2][0] = 1;
-//    A[2][1] = 2;
+//    A[2][1] = 0;
+//    A[3][3] = 2;
+//    A[3][0] = 4;
+//    cout<< "determinant of A "<<det_permutations(A) << " " << det(A)<<endl;
 //    A_inv = inv_det(A);
-//    vector<double> x_solution = A_inv_b_iter(A,b);
-//    for(int i=0; i<3; ++i){
-//        for(int j=0; j<3; ++j)
-//            cout<<A[i][j]<<"\t";
-//        cout<<endl;
-//    }
+////    vector<double> x_solution = A_inv_b_iter(A,b);
+////    for(int i=0; i<3; ++i){
+////        for(int j=0; j<3; ++j)
+////            cout<<A[i][j]<<"\t";
+////        cout<<endl;
+////    }
 ////    cout<< endl;
 //    cout<<"A inverted\n";
-//    for(int i=0; i<3; ++i){
-//        for(int j=0; j<3; ++j)
+//    for(int i=0; i<4; ++i){
+//        for(int j=0; j<4; ++j)
+//            cout<<A_inv[i][j]<<"\t";
+//        cout<<endl;
+//    }
+//    
+//    A_inv = inv_det_permute(A);
+//    cout<<"A inverted with permutations \n";
+//    for(int i=0; i<4; ++i){
+//        for(int j=0; j<4; ++j)
 //            cout<<A_inv[i][j]<<"\t";
 //        cout<<endl;
 //    }
 ////    cout<<det(A)<<endl;
 //    cout<<" solution Ainv b\n";
 ////    vector<double> x1 = A_inv*b;
-//    for(auto it: x_solution){
-//        cout<<it<<endl;
-//    }
+////    for(auto it: x_solution){
+////        cout<<it<<endl;
+////    }
 ////    cout<<endl;
 //    return 0;
     
@@ -156,9 +167,14 @@ int main(int argc, char *argv[]) {
     }
     cout<< "discrepancy " << distrepancy<<endl;
     
-//    make one step of newtons method
+//    solve system of equations with newton method
+//    stat variables
+    double discrepancy_direct, discrepancy_iter;
+    int num_iter_direct=0, num_iter_iter=0;
 //    evaluate constraints
     vector<double> delta_start = share1.initial_guess();
+//    vector<double> delta_backup = delta_start;
+    double start_iterative = omp_get_wtime();
     while(distrepancy > 1e-10){
         share1.evaluateFC(delta_start,c,objGrad,jac);
         share1.evaluateGA(delta_start, objGrad, jac);
@@ -177,7 +193,7 @@ int main(int argc, char *argv[]) {
 //        delta_start = delta_start - inv_det(jacobian_square)*c;
 
 //        solve system jacobian*x = c
-        delta_start = delta_start - A_inv_b_iter(jacobian_square, c, delta_start);
+        delta_start = delta_start - A_inv_b_iter(jacobian_square, c);
 
         sch_start = share1.unc_share(delta_start, x, p, sigma_p, sigmax, jacobian);
         distrepancy = 0;
@@ -186,7 +202,52 @@ int main(int argc, char *argv[]) {
             distrepancy += abs(sch_start[sh] - sch[sh]);
         }
         cout<< "discrepancy " << distrepancy<<endl;
+        num_iter_iter++;
+        discrepancy_iter = distrepancy;
     }
+    double time_iterative = omp_get_wtime() - start_iterative;
+    
+    
+//    do the same thing with direct method
+    delta_start = share1.initial_guess();
+    double start_direct = omp_get_wtime();
+    distrepancy = 1;
+    while(distrepancy > 1e-10 and false){
+        share1.evaluateFC(delta_start,c,objGrad,jac);
+        share1.evaluateGA(delta_start, objGrad, jac);
+    //    repack jacobian
+        vector<vector<double>> jacobian_square;
+        {
+    //        create a head of a new vector
+        int head = 0;
+        for(int i=0; i<c.size(); ++i){
+            vector<double> j_i(&jac[head], &jac[head+c.size()]);
+            jacobian_square.push_back(j_i);
+            head+=c.size();
+        }
+        }
+    //    compute difference with next newton iteration
+        delta_start = delta_start - inv_det_permute(jacobian_square)*c;
+
+//        solve system jacobian*x = c
+//        delta_start = delta_start - A_inv_b_iter(jacobian_square, c, delta_start);
+
+        sch_start = share1.unc_share(delta_start, x, p, sigma_p, sigmax, jacobian);
+        distrepancy = 0;
+        for(int sh = 0; sh< sch_start.size(); ++sh){
+            cout<< sch_start[sh]<<" \t" <<sch[sh]  <<"\n";
+            distrepancy += abs(sch_start[sh] - sch[sh]);
+        }
+        cout<< "discrepancy " << distrepancy<<endl;
+        num_iter_direct++;
+        discrepancy_direct = distrepancy;
+    }
+    double time_direct = omp_get_wtime() - start_direct;
+    
+    cout<< "\t Direct \t iterative\n";
+    cout<<"time\t" << time_direct<<"\t" <<time_iterative<<endl;
+    cout<<"# iter\t" << num_iter_direct<<"\t" << num_iter_iter<<endl;
+    cout<<"final\t"<< discrepancy_direct<< "\t" << discrepancy_iter<<endl;
     return 0;
     
 //    return 0;
