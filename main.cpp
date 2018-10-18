@@ -175,6 +175,7 @@ int main(int argc, char *argv[]) {
     vector<double> delta_start = share1.initial_guess();
 //    vector<double> delta_backup = delta_start;
     double start_iterative = omp_get_wtime();
+    return 0;
     while(distrepancy > 1e-10){
         share1.evaluateFC(delta_start,c,objGrad,jac);
         share1.evaluateGA(delta_start, objGrad, jac);
