@@ -222,7 +222,7 @@ std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p,
     return con_share;
 }
 
-std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x ){
+std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar){
 /*
  * delta_bar is average quality of each good size Nx1 N- number of products
  * x - values of heterogeneity size Kx1 K - number of characteristics of horizontal differentiation 
@@ -232,7 +232,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
  */
     vector<double> un_share(delta_bar.size(), 0.0);
 //    check that vector x[0] and sigma_x are the same dimension
-    if(x[0].size() != sigma_x.size()){
+    if(x[0].size() != sigmax.size()){
         throw runtime_error("size of x[0] is different from size of sigma_x");
     }
 //    check that all x vectors have the same length
@@ -256,17 +256,17 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
     
     
 //    loop over all points in the grid
-#pragma omp parallel for num_threads(4) schedule(dynamic,1)
+//#pragma omp parallel for num_threads(4) schedule(dynamic,1)
     for(int i=0; i<weights.size(); ++i){
 //        calculate the conditional quality
 //        delta_hat = delta + sigma_x*x*nu(i,:);
         vector<double> delta_cond(delta_bar);
         for(int k=0; k<delta_cond.size(); ++k){
         for(int j=0; j<x[0].size(); ++j){
-            delta_cond[k] += sigma_x[j]*x[k][j]*grid[i][j];
+            delta_cond[k] += sigmax[j]*x[k][j]*grid[i][j];
             if(delta_cond[k] > 1e5){
                 cout<<std::scientific;
-                cout<<"too large delta " << delta_cond[k]<< " delta bar "<< delta_bar[k]<< " sigma x "<<sigma_x[j]<< " x " <<x[k][j] << " grid " <<grid[i][j]<<endl;
+                cout<<"too large delta " << delta_cond[k]<< " delta bar "<< delta_bar[k]<< " sigma x "<<sigmax[j]<< " x " <<x[k][j] << " grid " <<grid[i][j]<<endl;
             }
         }
         }
@@ -346,7 +346,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
 }
 
 
-std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x, std::vector<std::vector<double> > & jacobian){
+std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, std::vector<std::vector<double> > & jacobian){
 /*
  * delta_bar is average quality of each good size Nx1 N- number of products
  * x - values of heterogeneity size NxK K - number of characteristics of horizontal differentiation 
@@ -365,7 +365,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
     }
     
 //    check that vector x[0] and sigma_x are the same dimension
-    if(x[0].size() != sigma_x.size()){
+    if(x[0].size() != sigmax.size()){
         throw runtime_error("size of x[0] is different from size of sigma_x");
     }
 //    check that all x vectors have the same length
@@ -378,23 +378,23 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
     }
     
     //    create vector of locks 
-    vector<omp_lock_t> locks;
-
-    for(int i=0; i< delta_bar.size(); ++i){
-        omp_lock_t writelock;
-        omp_init_lock(&writelock);
-        locks.push_back(writelock);
-    }
+//    vector<omp_lock_t> locks;
+//
+//    for(int i=0; i< delta_bar.size(); ++i){
+//        omp_lock_t writelock;
+//        omp_init_lock(&writelock);
+//        locks.push_back(writelock);
+//    }
     
 //    loop over all points in the grid
-#pragma omp parallel for num_threads(4) schedule(dynamic,1)
+//#pragma omp parallel for num_threads(4) schedule(dynamic,1)
     for(int i=0; i<weights.size(); ++i){
 //        calculate the conditional quality
 //        delta_hat = delta + sigma_x*x*nu(i,:);
         vector<double> delta_cond(delta_bar);
         for(int k=0; k<delta_cond.size(); ++k){
         for(int j=0; j<x[0].size(); ++j){
-            delta_cond[k] += sigma_x[j]*x[k][j]*grid[i][j];
+            delta_cond[k] += sigmax[j]*x[k][j]*grid[i][j];
         }
         }
 
@@ -455,20 +455,20 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
 
             
             for(auto i_dim : ind){
-                omp_set_lock(&locks[i_dim]);
+//                omp_set_lock(&locks[i_dim]);
                 un_share[i_dim]+=weights[i]*shares_tmp[num_share++];
-                omp_unset_lock(&locks[i_dim]);
+//                omp_unset_lock(&locks[i_dim]);
             }
             
             
 //            add jacobian elements to their positions
             for(auto i_dim :ind){
-                omp_set_lock(&locks[i_dim]);
+//                omp_set_lock(&locks[i_dim]);
                 for (auto j_dim : ind){
                     jacobian[i_dim][j_dim] += weights[i]*jacobian_tmp[num_i][num_j];
                     ++num_j;
                 }
-                omp_unset_lock(&locks[i_dim]);
+//                omp_unset_lock(&locks[i_dim]);
                 num_j = 0;
                 num_i++;
             }
@@ -504,121 +504,121 @@ std::vector<double> pcm_market_share::initial_guess(){
 }
 
 void pcm_market_share::get_traction(){
-    vector<double> sch_start = this->unc_share(this->getXInitial(), x, p, sigma_p, sigmax);
-//    if all of market shares are greater than 1e-4, return
-    if(all_of(sch_start.begin(), sch_start.end(),[](double it){return it > 0;})){
-        return;
-    }
-    
-    while(!(all_of(sch_start.begin(), sch_start.end(),[](double it){return it > 0;}))){
-//        increase all coordinates that have zero market share
-        vector<double> X = this->getXInitial();
-        double max = *(max_element(X.begin(), X.end()));
-        double min = *(min_element(X.begin(), X.end()));
-        for(int i=0; i<shares_data.size(); ++i){
-            if(!(sch_start[i]>0)){
-                X[i] += 1e-2*(max-min);
-            }
-        }
-//        update market shares
-        this->setXInitial(X);
-        sch_start = this->unc_share(X, x, p, sigma_p, sigmax);
-        cout<< "_____________________________"<<endl;
-        std::cout.precision(4);
-        std::cout << std::fixed;
-        for(auto it : sch_start){
-            cout<<it << " ";
-        }
-        cout<<endl;
-        for(auto it : X){
-            cout<<it << " ";
-        }
-        cout<<endl;
-    }
+//    vector<double> sch_start = this->unc_share(this->getXInitial());
+////    if all of market shares are greater than 1e-4, return
+//    if(all_of(sch_start.begin(), sch_start.end(),[](double it){return it > 0;})){
+//        return;
+//    }
+//    
+//    while(!(all_of(sch_start.begin(), sch_start.end(),[](double it){return it > 0;}))){
+////        increase all coordinates that have zero market share
+//        vector<double> X = this->getXInitial();
+//        double max = *(max_element(X.begin(), X.end()));
+//        double min = *(min_element(X.begin(), X.end()));
+//        for(int i=0; i<shares_data.size(); ++i){
+//            if(!(sch_start[i]>0)){
+//                X[i] += 1e-2*(max-min);
+//            }
+//        }
+////        update market shares
+//        this->setXInitial(X);
+//        sch_start = this->unc_share(X, x, p, sigma_p, sigmax);
+//        cout<< "_____________________________"<<endl;
+//        std::cout.precision(4);
+//        std::cout << std::fixed;
+//        for(auto it : sch_start){
+//            cout<<it << " ";
+//        }
+//        cout<<endl;
+//        for(auto it : X){
+//            cout<<it << " ";
+//        }
+//        cout<<endl;
+//    }
     return;
 }
 
-double pcm_market_share::relax_til_solved(std::vector<double> & solution, std::vector<double> starting_point){
-    double factor=1;
-    this->decrease_sigma_x(1.1);
-    factor /=1.1;
-    this->setXInitial(this->initial_guess());
-    this->get_traction();
-    this->setXInitial(starting_point);
-    knitro::KTRSolver solver1(this, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
-    solver1.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
-    solver1.setParam(KTR_PARAM_MAXIT, 300);
-    solver1.setParam(KTR_PARAM_FTOL, 1e-12);
-    solver1.setParam(KTR_PARAM_XTOL, 1e-8);
-    solver1.setParam(KTR_PARAM_OPTTOL, 1e-7);
-    solver1.setParam(KTR_PARAM_DERIVCHECK, 0);
-    
-    int result = solver1.solve();
-    solution = solver1.getXValues();
-    while(result != 0){
-        this->decrease_sigma_x(1.1);
-        factor /=1.1;
-        this->setXInitial(solution);
-        this->get_traction();
-//        knitro::KTRSolver solver(this, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
-        solver1.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
-        solver1.setParam(KTR_PARAM_MAXIT, 300);
-        solver1.setParam(KTR_PARAM_FTOL, 1e-12);
-        solver1.setParam(KTR_PARAM_XTOL, 1e-8);
-        solver1.setParam(KTR_PARAM_OPTTOL, 1e-7);
-        solver1.setParam(KTR_PARAM_DERIVCHECK, 0);
-        result = solver1.solve();
-        solution = solver1.getXValues();
-    }
-    
-    return factor;
-}
-
-bool pcm_market_share::solve_for_delta(){
-    bool solved = false;
-    double factor = 1.1; // contraction of the grid after each unsuccessful iteration
-    int count = 0; // count number of contractions
-//    set initial guess for 
-    this->setXInitial(this->initial_guess());
-//    increase deltas of products with zero market share until all products have positive market share
-    this->get_traction();
-//    try to solve 
-    knitro::KTRSolver solver1(this, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
-    solver1.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
-    int num_iter = x.size()*5;
-    solver1.setParam(KTR_PARAM_MAXIT, num_iter); // number of iterations 3 times bigger than the number of products.
-    solver1.setParam(KTR_PARAM_FTOL, 1e-12);
-    solver1.setParam(KTR_PARAM_XTOL, 1e-8);
-    solver1.setParam(KTR_PARAM_OPTTOL, 1e-7);
-    solver1.setParam(KTR_PARAM_DERIVCHECK, 0);
-    solver1.setParam(KTR_PARAM_BAR_MURULE, 2); // set murule to adaptive
-    solver1.setParam(KTR_PARAM_PAR_NUMTHREADS, 20);
-    solver1.setParam(KTR_PARAM_LINSOLVER, 6); // intel lin solver
-//    solver1.setParam(KTR_PARAM_PAR_LSNUMTHREADS, 5);
-//    solver1.setParam(KTR_PARAM_PAR_BLASNUMTHREADS,5);
-    solver1.setParam(KTR_PARAM_FEASTOL, 1e-10);
-    solver1.setParam(KTR_PARAM_MULTISTART, 0);
-    solver1.setParam(KTR_PARAM_PAR_CONCURRENT_EVALS,1); //concurrent evaluations. wired, but without concurrent evaluations it takes less time
-    
-    
-    int result = solver1.solve();
-    std::vector<double> solution = solver1.getXValues();
-//    decrease the sigma while solution is not found
-    while(result != 0){
-        cout<<"decreasing sigma to solve for easier problem number of times "<<count+1<<endl;
-        this->decrease_sigma_x(factor);
-        this->get_traction();
-        result = solver1.solve();
-        count++;
-    }
-    cout<<"increasing sigma back\n";
-//    increase the sigma back and keep searching for the solution
-    for(count; count>0; --count){
-        this->increase_sigma_x(factor);
-        this->get_traction();
-        result = solver1.solve();
-    }
-    this->setXInitial(solver1.getXValues());
-    
-    return result==0;
-}
+//double pcm_market_share::relax_til_solved(std::vector<double> & solution, std::vector<double> starting_point){
+//    double factor=1;
+//    this->decrease_sigma_x(1.1);
+//    factor /=1.1;
+//    this->setXInitial(this->initial_guess());
+//    this->get_traction();
+//    this->setXInitial(starting_point);
+//    knitro::KTRSolver solver1(this, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
+//    solver1.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
+//    solver1.setParam(KTR_PARAM_MAXIT, 300);
+//    solver1.setParam(KTR_PARAM_FTOL, 1e-12);
+//    solver1.setParam(KTR_PARAM_XTOL, 1e-8);
+//    solver1.setParam(KTR_PARAM_OPTTOL, 1e-7);
+//    solver1.setParam(KTR_PARAM_DERIVCHECK, 0);
+//    
+//    int result = solver1.solve();
+//    solution = solver1.getXValues();
+//    while(result != 0){
+//        this->decrease_sigma_x(1.1);
+//        factor /=1.1;
+//        this->setXInitial(solution);
+//        this->get_traction();
+////        knitro::KTRSolver solver(this, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
+//        solver1.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
+//        solver1.setParam(KTR_PARAM_MAXIT, 300);
+//        solver1.setParam(KTR_PARAM_FTOL, 1e-12);
+//        solver1.setParam(KTR_PARAM_XTOL, 1e-8);
+//        solver1.setParam(KTR_PARAM_OPTTOL, 1e-7);
+//        solver1.setParam(KTR_PARAM_DERIVCHECK, 0);
+//        result = solver1.solve();
+//        solution = solver1.getXValues();
+//    }
+//    
+//    return factor;
+//}
+//
+//bool pcm_market_share::solve_for_delta(){
+//    bool solved = false;
+//    double factor = 1.1; // contraction of the grid after each unsuccessful iteration
+//    int count = 0; // count number of contractions
+////    set initial guess for 
+//    this->setXInitial(this->initial_guess());
+////    increase deltas of products with zero market share until all products have positive market share
+//    this->get_traction();
+////    try to solve 
+//    knitro::KTRSolver solver1(this, KTR_GRADOPT_EXACT, KTR_HESSOPT_BFGS);
+//    solver1.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
+//    int num_iter = x.size()*5;
+//    solver1.setParam(KTR_PARAM_MAXIT, num_iter); // number of iterations 3 times bigger than the number of products.
+//    solver1.setParam(KTR_PARAM_FTOL, 1e-12);
+//    solver1.setParam(KTR_PARAM_XTOL, 1e-8);
+//    solver1.setParam(KTR_PARAM_OPTTOL, 1e-7);
+//    solver1.setParam(KTR_PARAM_DERIVCHECK, 0);
+//    solver1.setParam(KTR_PARAM_BAR_MURULE, 2); // set murule to adaptive
+//    solver1.setParam(KTR_PARAM_PAR_NUMTHREADS, 20);
+//    solver1.setParam(KTR_PARAM_LINSOLVER, 6); // intel lin solver
+////    solver1.setParam(KTR_PARAM_PAR_LSNUMTHREADS, 5);
+////    solver1.setParam(KTR_PARAM_PAR_BLASNUMTHREADS,5);
+//    solver1.setParam(KTR_PARAM_FEASTOL, 1e-10);
+//    solver1.setParam(KTR_PARAM_MULTISTART, 0);
+//    solver1.setParam(KTR_PARAM_PAR_CONCURRENT_EVALS,1); //concurrent evaluations. wired, but without concurrent evaluations it takes less time
+//    
+//    
+//    int result = solver1.solve();
+//    std::vector<double> solution = solver1.getXValues();
+////    decrease the sigma while solution is not found
+//    while(result != 0){
+//        cout<<"decreasing sigma to solve for easier problem number of times "<<count+1<<endl;
+//        this->decrease_sigma_x(factor);
+//        this->get_traction();
+//        result = solver1.solve();
+//        count++;
+//    }
+//    cout<<"increasing sigma back\n";
+////    increase the sigma back and keep searching for the solution
+//    for(count; count>0; --count){
+//        this->increase_sigma_x(factor);
+//        this->get_traction();
+//        result = solver1.solve();
+//    }
+//    this->setXInitial(solver1.getXValues());
+//    
+//    return result==0;
+//}

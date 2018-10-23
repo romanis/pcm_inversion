@@ -21,7 +21,7 @@
 #include "KTRSolver.h"
 #include "KTRProblem.h"
 
-class pcm_market_share : public knitro::KTRProblem{
+class pcm_market_share /*: public knitro::KTRProblem*/{
 private:
     int dimension;
 //    dimension - the dimension of heterogeneity. size D
@@ -46,7 +46,7 @@ public:
 //    default constructor
 //            uncomment for minimizing resuduals
     pcm_market_share (std::vector<double> sch, std::vector<std::vector<double>> x, std::vector<double> sigmax, std::vector<double> p, double sigma_p):  
-        KTRProblem(sch.size(), sch.size()), dimension(1), shares_data(sch), x(x), sigmax(sigmax), p(p), sigma_p(sigma_p)  { 
+        /*KTRProblem(sch.size(), sch.size()),*/ dimension(1), shares_data(sch), x(x), sigmax(sigmax), p(p), sigma_p(sigma_p)  { 
 //        uncomment for minimizing squares of resuduals
 //    pcm_market_share (std::vector<double> sch, std::vector<std::vector<double>> x, std::vector<double> sigmax, std::vector<double> p, double sigma_p):  
 //        KTRProblem(sch.size(), 0), dimension(1), shares_data(sch), x(x), sigmax(sigmax), p(p), sigma_p(sigma_p)  { 
@@ -55,12 +55,14 @@ public:
         point.push_back(0);
         grid.push_back(point);
         weights.push_back(1);
-        setObjectiveProperties();
-        setVariableProperties();
+//        setObjectiveProperties();
+//        setVariableProperties();
+        
+        
 //        uncomment for minimizing squares of resuduals        
 //        setConstraintProperties(0);
 //        uncomment for MPEC
-        setConstraintProperties(sch.size());
+//        setConstraintProperties(sch.size());
     }
     
     std::vector<double> get_sigma_x(){
@@ -96,90 +98,90 @@ public:
     bool solve_for_delta();
 //    solves for delta that equalizes data market shares and predicted ones
     
-    std::vector<double> unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x ); //does the same but does not calculate jacobian
-    std::vector<double> unc_share(std::vector<double> delta_bar, std::vector<std::vector<double>> x, std::vector<double> p, double sigma_p, std::vector<double> sigma_x, std::vector<std::vector<double> > & jacobian ); //does the same but does not calculate jacobian
+    std::vector<double> unc_share(std::vector<double> delta_bar); //does the same but does not calculate jacobian
+    std::vector<double> unc_share(std::vector<double> delta_bar, std::vector<std::vector<double> > & jacobian ); //does the same but does not calculate jacobian
     
 //    knitro initialization
-    void setObjectiveProperties() {
-        setObjType(knitro::KTREnums::ObjectiveType::ObjGeneral);
-        setObjGoal(knitro::KTREnums::ObjectiveGoal::Minimize);
-    }
-
-    // variable bounds. All variables 0 <= x.
-    void setVariableProperties() {
-        setVarLoBnds(-KTR_INFBOUND);
-        setVarUpBnds( KTR_INFBOUND);
-    }
-
-    // constraint properties
-    void setConstraintProperties() {
-        // set constraint types
-//        setConTypes(0, knitro::KTREnums::ConstraintType::ConGeneral);
-//        setConTypes(1, knitro::KTREnums::ConstraintType::ConGeneral);
-
-        // set constraint lower bounds to zero for all variables
-        setConLoBnds(0.0);
-
-        // set constraint upper bounds
-        setConUpBnds(0, 0.0);
-//        setConUpBnds(1, KTR_INFBOUND);
-    }
-    
-    // constraint properties when know how many constrains
-    void setConstraintProperties(int num_constr) {
-        // set constraint types
-        for(int i = 0; i< num_constr;++i){
-            setConTypes(i, knitro::KTREnums::ConstraintType::ConGeneral);
-        }
-
-        // set constraint lower bounds to zero for all variables
-        setConLoBnds(0.0);
-
-        // set constraint upper bounds
-        setConUpBnds(0.0);
-    }
-    
-    double evaluateFC(const std::vector<double>& delta,  std::vector<double>& c,  std::vector<double>& objGrad, std::vector<double>& jac){//, std::vector<double> & p, std::vector<std::vector<double>> x, double sigma_p, std::vector<double> sigma_x) {
-        std::vector<std::vector<double>> jacobian;
-
-//        compute market share predicted by model
-        std::vector<double> share_predict = this->unc_share(delta, x, p, sigma_p, sigmax, jacobian);
-//        std::cout<<"here"<<std::endl;
-        double obj=0;
-          // constraints
+//    void setObjectiveProperties() {
+//        setObjType(knitro::KTREnums::ObjectiveType::ObjGeneral);
+//        setObjGoal(knitro::KTREnums::ObjectiveGoal::Minimize);
+//    }
+//
+//    // variable bounds. All variables 0 <= x.
+//    void setVariableProperties() {
+//        setVarLoBnds(-KTR_INFBOUND);
+//        setVarUpBnds( KTR_INFBOUND);
+//    }
+//
+//    // constraint properties
+//    void setConstraintProperties() {
+//        // set constraint types
+////        setConTypes(0, knitro::KTREnums::ConstraintType::ConGeneral);
+////        setConTypes(1, knitro::KTREnums::ConstraintType::ConGeneral);
+//
+//        // set constraint lower bounds to zero for all variables
+//        setConLoBnds(0.0);
+//
+//        // set constraint upper bounds
+//        setConUpBnds(0, 0.0);
+////        setConUpBnds(1, KTR_INFBOUND);
+//    }
+//    
+//    // constraint properties when know how many constrains
+//    void setConstraintProperties(int num_constr) {
+//        // set constraint types
+//        for(int i = 0; i< num_constr;++i){
+//            setConTypes(i, knitro::KTREnums::ConstraintType::ConGeneral);
+//        }
+//
+//        // set constraint lower bounds to zero for all variables
+//        setConLoBnds(0.0);
+//
+//        // set constraint upper bounds
+//        setConUpBnds(0.0);
+//    }
+//    
+//    double evaluateFC(const std::vector<double>& delta,  std::vector<double>& c,  std::vector<double>& objGrad, std::vector<double>& jac){//, std::vector<double> & p, std::vector<std::vector<double>> x, double sigma_p, std::vector<double> sigma_x) {
+//        std::vector<std::vector<double>> jacobian;
+//
+////        compute market share predicted by model
+//        std::vector<double> share_predict = this->unc_share(delta, x, p, sigma_p, sigmax, jacobian);
+////        std::cout<<"here"<<std::endl;
+//        double obj=0;
+//          // constraints
+////        jac.clear();
+//        c.clear();
+//        for(int i=0; i<shares_data.size(); ++i){
+////            uncomment for MPEC
+//            c.push_back(share_predict[i] - shares_data[i]);
+////            uncomment for minimizing resuduals
+////            obj += (share_predict[i] - shares_data[i])*(share_predict[i] - shares_data[i]);
+//        }
+//          // return objective function value
+//          return obj;
+//      }
+//    
+//    int evaluateGA(const std::vector<double>& delta, std::vector<double>& objGrad, std::vector<double>& jac) {
+//        std::vector<std::vector<double>> jacobian;
+//        
+//        std::vector<double> share_predict = this->unc_share(delta, x, p, sigma_p, sigmax, jacobian);
+////        comment for minimizing resuduals
 //        jac.clear();
-        c.clear();
-        for(int i=0; i<shares_data.size(); ++i){
-//            uncomment for MPEC
-            c.push_back(share_predict[i] - shares_data[i]);
-//            uncomment for minimizing resuduals
-//            obj += (share_predict[i] - shares_data[i])*(share_predict[i] - shares_data[i]);
-        }
-          // return objective function value
-          return obj;
-      }
-    
-    int evaluateGA(const std::vector<double>& delta, std::vector<double>& objGrad, std::vector<double>& jac) {
-        std::vector<std::vector<double>> jacobian;
-        
-        std::vector<double> share_predict = this->unc_share(delta, x, p, sigma_p, sigmax, jacobian);
-//        comment for minimizing resuduals
-        jac.clear();
-        std::vector<double> obj_tmp(delta.size(),0.0);
-        objGrad = obj_tmp;
-        for(int i=0; i< shares_data.size(); ++i){
-//            uncomment for miniizing squares of residuals
-//            for(int j=0; j<shares_data.size(); ++j){
-//                objGrad[j] += 2*jacobian[i][j]*(share_predict[i] - shares_data[i]);
+//        std::vector<double> obj_tmp(delta.size(),0.0);
+//        objGrad = obj_tmp;
+//        for(int i=0; i< shares_data.size(); ++i){
+////            uncomment for miniizing squares of residuals
+////            for(int j=0; j<shares_data.size(); ++j){
+////                objGrad[j] += 2*jacobian[i][j]*(share_predict[i] - shares_data[i]);
+////            }
+//            
+////            uncomment for MPEC
+//            for(int j = 0; j< jacobian[i].size(); ++j){
+//                jac.push_back(jacobian[i][j]);
 //            }
-            
-//            uncomment for MPEC
-            for(int j = 0; j< jacobian[i].size(); ++j){
-                jac.push_back(jacobian[i][j]);
-            }
-        }
-	return 0;
-    }
+//        }
+//	return 0;
+//    }
  
 };
 
@@ -195,53 +197,53 @@ inline void print_jacobian(std::vector<std::vector<double> > jac){
         std::cout<<std::endl;
     }
 }
-inline pcm_market_share::pcm_market_share() : KTRProblem(1, 0), dimension(1), shares_data({})  { 
+inline pcm_market_share::pcm_market_share() : /*KTRProblem(1, 0),*/ dimension(1), shares_data({})  { 
 //    set up grid and weights
     std::vector<double> point;
     point.push_back(0);
     grid.push_back(point);
     weights.push_back(1);
-    setObjectiveProperties();
-    setVariableProperties();
-    setConstraintProperties();
+//    setObjectiveProperties();
+//    setVariableProperties();
+//    setConstraintProperties();
 }
 
-inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
-   if (solveStatus != 0) {
-     std::cout << "Failed to solve problem, final status = " << solveStatus << std::endl;
-//     return;
-   }
-   else{
-    std::cout << "---------- Solution found ----------" << std::endl << std::endl;
-   }
-
-   std::cout.precision(4);
-   std::cout << std::fixed;
-
-   // Objective value
-   std::cout << std::right << std::setw(28) << "Objective value = " << solver.getObjValue() << std::endl;
-
-   // Solution point
-   std::cout << std::right << std::setw(29) << "Final point = (";
-   const std::vector<double>& point = solver.getXValues();
-   std::vector<double>::const_iterator it = point.begin();
-   while ( it != point.end()) {
-       std::cout << *it;
-       if (++it != point.end())
-           std::cout << ", ";
-   }
-   std::cout << ")" << std::endl;
-
-   if (!((solver.getProblem())->isMipProblem()))
-   {
-       std::cout << std::right << std::setw(28) << "Feasibility violation = " << solver.getAbsFeasError() << std::      endl;
-       std::cout << std::right << std::setw(28) << "KKT optimality violation = " << solver.getAbsOptError() <<          std::endl;
-   }
-   else {
-       std::cout << std::right << std::setw(28) << "Absolute integrality gap = " << solver.getMipAbsGap() << std::      endl;
-   }
-   std::cout << std::endl;
- }
+//inline void printSolutionResults(knitro::KTRISolver & solver, int solveStatus) {
+//   if (solveStatus != 0) {
+//     std::cout << "Failed to solve problem, final status = " << solveStatus << std::endl;
+////     return;
+//   }
+//   else{
+//    std::cout << "---------- Solution found ----------" << std::endl << std::endl;
+//   }
+//
+//   std::cout.precision(4);
+//   std::cout << std::fixed;
+//
+//   // Objective value
+//   std::cout << std::right << std::setw(28) << "Objective value = " << solver.getObjValue() << std::endl;
+//
+//   // Solution point
+//   std::cout << std::right << std::setw(29) << "Final point = (";
+//   const std::vector<double>& point = solver.getXValues();
+//   std::vector<double>::const_iterator it = point.begin();
+//   while ( it != point.end()) {
+//       std::cout << *it;
+//       if (++it != point.end())
+//           std::cout << ", ";
+//   }
+//   std::cout << ")" << std::endl;
+//
+//   if (!((solver.getProblem())->isMipProblem()))
+//   {
+//       std::cout << std::right << std::setw(28) << "Feasibility violation = " << solver.getAbsFeasError() << std::      endl;
+//       std::cout << std::right << std::setw(28) << "KKT optimality violation = " << solver.getAbsOptError() <<          std::endl;
+//   }
+//   else {
+//       std::cout << std::right << std::setw(28) << "Absolute integrality gap = " << solver.getMipAbsGap() << std::      endl;
+//   }
+//   std::cout << std::endl;
+// }
 
 #endif /* PCM_MARKET_SHARE_H */
 
