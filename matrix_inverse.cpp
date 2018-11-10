@@ -65,7 +65,7 @@ double det_permutations(std::vector<std::vector<double> > A, std::vector<std::ve
     
     int count_permutations = 0;
 //    until there exists next permutation 
-#pragma omp parallel for num_threads(2) schedule(dynamic,100) reduction(+:d)
+#pragma omp parallel for num_threads(4) schedule(dynamic,100) reduction(+:d)
     for(int i = 0; i<permutations.size(); ++i){
         vector<int> col_index = permutations[i];
 //        determine the signature of permutation
