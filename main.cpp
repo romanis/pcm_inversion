@@ -50,10 +50,10 @@ int main(int argc, char *argv[]) {
       
     std::vector<double> delta, delta_p;
     std::vector<double> p;
-    int dim = 5;
-    int num_prod = 10;
+    int dim = 7;
+    int num_prod = 30;
     unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
-    seed = 1000000;
+    seed = 1000001;
     std::default_random_engine generator (seed);
       
     std::uniform_real_distribution<double> unif(-1,1);
@@ -186,7 +186,7 @@ int main(int argc, char *argv[]) {
         vector<vector<double>> jacobian_square;
         
         vector<double> sh_pred = share1.unc_share(delta_start, jacobian_square);
-        sh_pred = share1.unc_share(delta_start);
+//        sh_pred = share1.unc_share(delta_start);
         c.clear();
         for(int i=0; i< sh_pred.size(); ++i){
             c.push_back(sh_pred[i] - sch[i]);
