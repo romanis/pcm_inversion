@@ -256,7 +256,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar){
     
     
 //    loop over all points in the grid
-//#pragma omp parallel for num_threads(4) schedule(dynamic,1)
+//#pragma omp parallel for num_threads(4) schedule(dynamic,1000)
     for(int i=0; i<weights.size(); ++i){
 //        calculate the conditional quality
 //        delta_hat = delta + sigma_x*x*nu(i,:);
@@ -387,7 +387,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
 //    }
     
 //    loop over all points in the grid
-//#pragma omp parallel for num_threads(4) schedule(dynamic,1)
+//#pragma omp parallel for num_threads(4) schedule(dynamic,1000)
     for(int i=0; i<weights.size(); ++i){
 //        calculate the conditional quality
 //        delta_hat = delta + sigma_x*x*nu(i,:);

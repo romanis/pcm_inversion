@@ -1,5 +1,6 @@
 #CXX      = /opt/rh/devtoolset-7/root/usr/bin/g++
 CXX	= tau_cxx.sh
+#CXX	= icpc
 SDIR     = .
 KIDIR1	 = /opt/aci/sw/knitro/10.2.1/include
 KIDIR2	 = /opt/aci/sw/knitro/10.2.1/examples/C++/include/

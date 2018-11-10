@@ -196,6 +196,7 @@ std::vector<double> A_inv_b_iter(std::vector<std::vector<double>> A, std::vector
 //        create a local measure of max discreapancy 
         double max_discrepancy = 0;
 //        at each iteration loop over rows of A and at each subiteration solve for x_i conitional on all other x_{-i}
+#pragma omp parallel for reduction(max : discrepancy) num_threads(1)
         for(int i=0; i<A.size(); ++i){
 //            assume that A[i][i] != 0
 //            compute b[i] - sum(a[ij]*x[j] j!=i
@@ -205,7 +206,7 @@ std::vector<double> A_inv_b_iter(std::vector<std::vector<double>> A, std::vector
                     continue;
                 }
                 else{
-                    rhs -= A[i][j] * x[j];
+                    rhs -= A[i][j] * x_old[j];
                 }
             }
 //            if discrepancy between A[i][i]*x[i] and rhs is greater than max discrepancy, replace the max discrepancy 

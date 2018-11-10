@@ -51,7 +51,7 @@ int main(int argc, char *argv[]) {
     std::vector<double> delta, delta_p;
     std::vector<double> p;
     int dim = 5;
-    int num_prod = 20;
+    int num_prod = 10;
     unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
     seed = 1000000;
     std::default_random_engine generator (seed);
@@ -146,7 +146,7 @@ int main(int argc, char *argv[]) {
     pcm_market_share share1(sch, x, sigmax, p, sigma_p);
     
 //    set grid for integration, 15 points per dimension is usually enough
-    share1.set_grid(dim, 7);
+    share1.set_grid(dim, 3);
       
 //      cond_share(delta,p,sigma_p, jacobian);
 //      vector<double> val1 = share1.unc_share(delta, x, p, sigma_p, sigmax,jacobian);
@@ -176,7 +176,12 @@ int main(int argc, char *argv[]) {
 //    vector<double> delta_backup = delta_start;
     double start_iterative = omp_get_wtime();
 //    return 0;
-    while(distrepancy > 1e-10){
+    
+//    ################################
+//    parameter controling direct of interative solver
+    bool direct = false;
+    
+    while(distrepancy > 1e-10 & !direct){
 
         vector<vector<double>> jacobian_square;
         
@@ -204,13 +209,13 @@ int main(int argc, char *argv[]) {
         discrepancy_iter = distrepancy;
     }
     double time_iterative = omp_get_wtime() - start_iterative;
-    
-    return 0;
+    cout<< "time " << time_iterative<<endl;
+//    return 0;
 //    do the same thing with direct method
     delta_start = share1.initial_guess();
     double start_direct = omp_get_wtime();
     distrepancy = 1;
-    while(distrepancy > 1e-10){
+    while(distrepancy > 1e-10 & direct){
 
         vector<vector<double>> jacobian_square;
         
@@ -233,8 +238,8 @@ int main(int argc, char *argv[]) {
             distrepancy += abs(sch_start[sh] - sch[sh]);
         }
         cout<< "discrepancy " << distrepancy<<endl;
-        num_iter_iter++;
-        discrepancy_iter = distrepancy;
+        num_iter_direct++;
+        discrepancy_direct = distrepancy;
     }
     double time_direct = omp_get_wtime() - start_direct;
     
