@@ -17,6 +17,7 @@
 #include<math.h>
 #include<stdio.h>
 #include <algorithm>
+#include <omp.h>
 
 using namespace std;
 
@@ -59,11 +60,21 @@ double det_permutations(std::vector<std::vector<double> > A){
         row_index.push_back(i);
     }
     vector<int> col_index = row_index;
+//    pre-compute permutations and store them
+    vector<vector<int>> indexes;
+    indexes.push_back(col_index);
+//    double start = omp_get_wtime();
+    while(next_permutation(col_index.begin(), col_index.end())){
+        indexes.push_back(col_index);
+    }
+//    cout<< "time to pre-compute permutations " << omp_get_wtime() - start<<endl;
 //    create +-1 factor, next_permutation changes it every two permutations
     
     int count_permutations = 0;
 //    until there exists next permutation 
-    do{
+#pragma omp parallel for num_threads(1) reduction(+:d)
+    for(int i = 0; i<indexes.size(); ++i){
+        vector<int> col_index = indexes[i];
 //        determine the signature of permutation
 //        int num_permutations =0;
 //        for(int i = 0; i< col_index.size()-1; ++i){
@@ -84,7 +95,7 @@ double det_permutations(std::vector<std::vector<double> > A){
 //        add element to determinant
         d += element*factor;
         
-    }while(next_permutation(col_index.begin(), col_index.end()));
+    }
     return d;
 }
 
