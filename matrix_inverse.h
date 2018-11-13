@@ -12,7 +12,7 @@
 
 // routine to compute determinant of matrix
 double det(std::vector<std::vector<double>>  A);
-double det_permutations(std::vector<std::vector<double>> A, std::vector<std::vector<int>> & permutations);
+double det_permutations(std::vector<std::vector<double>> A, std::vector<std::vector<int>> & permutations, std::vector<int> signs);
 
 // routine returns matrix without i row and j column
 std::vector<std::vector<double>> A_minus_ij(std::vector<std::vector<double>> A, int i, int j);

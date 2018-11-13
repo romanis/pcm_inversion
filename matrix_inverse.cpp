@@ -51,7 +51,7 @@ double det(vector<vector<double> > A)
     return d;
 }
 
-double det_permutations(std::vector<std::vector<double> > A, std::vector<std::vector<int>> & permutations){
+double det_permutations(std::vector<std::vector<double> > A, std::vector<std::vector<int>> & permutations, vector<int> signs){
 //    loop over all permutations and multiply the elements of A
     double d = 0;
     vector<int> row_index;
@@ -65,9 +65,9 @@ double det_permutations(std::vector<std::vector<double> > A, std::vector<std::ve
     
     int count_permutations = 0;
 //    until there exists next permutation 
-#pragma omp parallel for num_threads(16) schedule(dynamic,10) reduction(+:d)
+#pragma omp parallel for // num_threads(1) schedule(dynamic,100) reduction(+:d)
     for(int i = 0; i<permutations.size(); ++i){
-        vector<int> col_index = permutations[i];
+//        vector<int> col_index = permutations[i];
 //        determine the signature of permutation
 //        int num_permutations =0;
 //        for(int i = 0; i< col_index.size()-1; ++i){
@@ -78,12 +78,12 @@ double det_permutations(std::vector<std::vector<double> > A, std::vector<std::ve
 //            }
 //        }
 //        int factor = ((count_permutations % 2 == 0) ? 1 : -1);
-        int factor = sign_permutation(col_index);
+        int factor = signs[i];
 //        walk over all col and row indexes and multiply elements of A, factor changes every two iterations
         double element = 1;
 //        compute this element of product
-        for(int i=0; i< row_index.size(); i++){
-            element *= A[row_index[i]][col_index[i]];
+        for(int k=0; k< row_index.size(); k++){
+            element *= A[row_index[k]][permutations[i][k]];
         }
 //        add element to determinant
         d += element*factor;
@@ -180,6 +180,12 @@ vector<vector<double>> inv_det_permute(vector<vector<double>> A){
     while(next_permutation(col_index.begin(), col_index.end())){
         indexes.push_back(col_index);
     }
+//    pre-compute siggns of permutations
+    vector<int> signs;
+    for(auto col : indexes){
+        signs.push_back(sign_permutation(col));
+    }
+    
 //    pre-compute permutations for submatrixes
     vector<int> col_index_sub;
 //    create row and column indexes, then permute column index with std::next_permutation(.,.)
@@ -193,16 +199,20 @@ vector<vector<double>> inv_det_permute(vector<vector<double>> A){
     while(next_permutation(col_index_sub.begin(), col_index_sub.end())){
         indexes_sub.push_back(col_index_sub);
     }
-    
+//    pre-compute siggns of permutations
+    vector<int> signs_sub;
+    for(auto col : indexes_sub){
+        signs_sub.push_back(sign_permutation(col));
+    }    
     
 //    compute determinant of A
-    double det_A = det_permutations(A, indexes);
+    double det_A = det_permutations(A, indexes, signs);
 //    loop over all coefficients of inverse matrix and compute determinants of matrix without that row and column
     for(int i=0; i<n; i++){
         for(int j=0; j<n; j++){           
 //            create submatrix without ith row and jth column
             vector<vector<double>> A_ij = A_minus_ij(A,i,j);
-            A_inv[j][i] = pow(-1, i+j+2)*det_permutations(A_ij, indexes_sub)/det_A;
+            A_inv[j][i] = pow(-1, i+j+2)*det_permutations(A_ij, indexes_sub, signs_sub)/det_A;
         }
     }
     
