@@ -196,7 +196,7 @@ int main(int argc, char *argv[]) {
 //        delta_start = delta_start - inv_det(jacobian_square)*c;
 
 //        solve system jacobian*x = c
-        delta_start = delta_start - A_inv_b_iter(jacobian_square, c);
+        delta_start = delta_start - A_inv_b_mkl(jacobian_square, c);
 
         sch_start = sh_pred;
         distrepancy = 0;

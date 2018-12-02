@@ -268,3 +268,28 @@ std::vector<double> A_inv_b_iter(std::vector<std::vector<double>> A, std::vector
     
     return x;
 }
+
+
+std::vector<double> A_inv_b_mkl(std::vector<std::vector<double>> & A, std::vector<double> & b){
+
+    
+//    make vectorized copy of A
+    double  a[A.size()*A[0].size()];
+    
+    int index_a = 0;
+    for(auto row: A)
+        for(auto element : row)
+            a[index_a++] = element;
+//    convert b to double *
+    double * B = &b[0];
+    int n = A.size(), nrhs = 1, lda = A.size(), ldb = b.size(), info;
+    int ipiv[A.size()];
+//    solve system with mkl
+    dgesv( &n, &nrhs, a, &lda, ipiv, B, &ldb, &info );
+    
+//    copy solution to x
+    vector<double> x;
+    for(int i = 0; i<b.size(); ++i)
+        x.push_back(B[i]);
+    return x;
+}

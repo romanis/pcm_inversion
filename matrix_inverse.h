@@ -29,6 +29,10 @@ int sign_permutation(std::vector<int>  b);
 // routine to solve Ax=b iteratively with gauss jacobi
 std::vector<double> A_inv_b_iter(std::vector<std::vector<double>> A, std::vector<double> b, std::vector<double> x = std::vector<double>(0, 0));
 
+// routine to solve Ax=b with mkl library routine
+std::vector<double> A_inv_b_mkl(std::vector<std::vector<double>> & A, std::vector<double> & b);
+
+
 
 
 #endif /* MATRIX_INVERSE_H */
