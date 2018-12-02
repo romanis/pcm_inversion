@@ -179,7 +179,7 @@ int main(int argc, char *argv[]) {
     
 //    ################################
 //    parameter controling direct of interative solver
-    bool direct = true;
+    bool direct = false;
     
     while(distrepancy > 1e-10 & !direct){
 
