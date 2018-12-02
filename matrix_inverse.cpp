@@ -18,6 +18,7 @@
 #include<stdio.h>
 #include <algorithm>
 #include <omp.h>
+#include <mkl.h>
 
 using namespace std;
 
