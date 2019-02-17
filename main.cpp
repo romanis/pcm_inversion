@@ -51,7 +51,7 @@ int main(int argc, char *argv[]) {
     std::vector<double> delta, delta_p;
     std::vector<double> p;
     int dim = 7;
-    int num_prod = 10;
+    int num_prod = 20;
     unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
     seed = 1000001;
     std::default_random_engine generator (seed);
