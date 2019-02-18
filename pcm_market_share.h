@@ -75,6 +75,17 @@ public:
         shares_data.clear();
         shares_data = sch;
     }
+    
+    std::vector<double> get_shares(){
+        return shares_data;
+    }
+    std::vector<double> get_prices(){
+        return p;
+    }
+    
+    bool set_prices(std::vector<double> pr){
+        p = pr;
+    }
     void decrease_sigma_x(double factor = 2){
         for(int it = 0; it<sigmax.size(); ++it){
             sigmax[it] /= factor;

@@ -58,7 +58,7 @@ vector<double> random_shares(int num_prod){
     std::vector<double> delta, delta_p;
     std::vector<double> p;
     int dim = 4;
-    int num_prod = 100;
+    int num_prod = 50;
     unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
 //    seed = 1000000;
     std::default_random_engine generator (seed);
@@ -87,6 +87,109 @@ vector<double> random_shares(int num_prod){
     vector<double> sch1 = random_shares(num_prod);
     pcm_market_share share1(sch1, x, sigmax, p, sigma_p);
     share1.set_grid(dim,10);
+    
+//    adjust prices so that all products heve non vanishing market shares
+    if(true){
+        for(int tt = 0;tt<1000; ++tt){
+//            prepare prices and x
+            x.clear();
+            for(int i = 0; i< num_prod; i++){
+                vector<double> x_tmp;
+                for (int j=0; j< dim; ++j){
+                    x_tmp.push_back(unif(generator));
+                }
+                x.push_back(x_tmp);
+//                sch.push_back(unif(generator)+2);
+            }
+
+//            equate two prices
+            p[0] = p[1];
+            double sigma_p=1;
+            pcm_market_share share2(sch1, x, sigmax, p, sigma_p);
+            share2.set_grid(dim,8);
+//            generate vector of qualities 1:num_prod
+            vector<double> dlt;
+            for(int i=1; i<=num_prod; ++i){
+                dlt.push_back((double) i);
+            }
+    //        cout<<"here 1"<<endl;
+            vector<double> sch_start = share2.unc_share(dlt, x, p, sigma_p, sigmax);
+    //        cout<< "_____________________________"<<endl;
+    //        std::cout.precision(5);
+    //        std::cout << std::fixed;
+    //        for(auto it : sch_start){
+    //            cout<<it << "\t";
+    //        }
+    //        cout<<endl;
+    //        for(auto it : sch_start){
+    //            cout<<it << "\t";
+    //        }
+    //        cout<<endl;
+    //        cout<<"here 2"<<endl;
+    //        adjust prices until all market shares are high enoygh
+            while(!(all_of(sch_start.begin(), sch_start.end(),[](double it){return it > 1e-5;}))){
+        //        increase all coordinates that have zero market share
+                vector<double> p_tmp = share2.get_prices();
+    //            reduce prices of those products with small market shares
+                for(int i=0; i<sch_start.size(); ++i){
+                    if(!(sch_start[i]>1e-3) & i>0 & i<p_tmp.size()-1){
+                        p_tmp[i] -= 5e-1*abs(p_tmp[i-1]-p_tmp[i]);
+                    }
+
+                    if(!(sch_start[i]>1e-3) & i==0 ){
+                        p_tmp[i] -= 5e-1*abs(p_tmp[i]-p_tmp[i+1]);
+                    }
+
+                    if(!(sch_start[i]>1e-3) & i==p_tmp.size()-1){
+                        p_tmp[i] -= 5e-1*abs(p_tmp[i-1]-p_tmp[i]);
+                    }
+                    if(sch_start[i] > 1e-2){
+                        p_tmp[i] += 0.5;
+                    }
+                }
+        //        update market shares
+                share2.set_prices(p_tmp);
+                sch_start = share2.unc_share(dlt, x, p_tmp, sigma_p, sigmax);
+    //            cout<< "_____________________________"<<endl;
+    //            std::cout.precision(5);
+    //            std::cout << std::fixed;
+    //            for(auto it : sch_start){
+    //                cout<<it << " ";
+    //            }
+    //            cout<<endl;
+    //            for(auto it : sch_start){
+    //                cout<<it << " ";
+    //            }
+    //            cout<<endl;
+
+            }
+    //        cout<<"adjusted market shares\n";
+            share2.set_shares(sch_start);
+    //        solve for delta
+            share2.setXInitial(share2.initial_guess());
+            share2.solve_for_delta();
+            int i=0;
+            double max_dev = 0;
+            sch_start = share2.get_shares();
+            for(auto it : share2.unc_share(share2.getXInitial(), x, share2.get_prices(), sigma_p, sigmax)){
+                if(abs(share2.getXInitial()[i]-(i+1)) > max_dev){
+                    max_dev = abs(share2.getXInitial()[i]-(i+1));
+                }
+    //            cout<<share1.getXInitial()[i]<< " " <<it<<" "<<sch_start[i]<<endl;
+                i++;
+            }
+    //        cout<< "final sigma x "<< endl;
+        //    share1.decrease_sigma_x(1/factor);
+            for(auto it : share2.get_sigma_x()){
+    //            cout<< it<<" ";
+            }
+    //        std::cout.precision(20);
+            std::cout<<std::scientific;
+            cout<<"max deviation\t"<<max_dev<<endl;
+        }
+            return 0;
+    }
+    
     for(int k=0; k< 1000; ++k){
     //    normalize shares to sum to less than 1
         vector<double> sch = random_shares(num_prod);

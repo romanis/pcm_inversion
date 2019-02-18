@@ -269,7 +269,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
         throw runtime_error("size of x[0] is different from size of grid");
     }
     if (x.size() != delta_bar.size()){
-        throw runtime_error("size of x is different from size of grid");
+        throw runtime_error("size of x is different from size of delta");
     }
     
 //    create vector of locks 
