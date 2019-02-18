@@ -72,6 +72,7 @@ public:
     bool set_grid(std::vector<std::vector<double> > grid1, std::vector<double> weights1);
     bool set_grid(int dim, int n); // sets up a grid to integrate with respect to standard normal measure gauss hermite quadrature with dimension and number of points in each dimension
     void set_shares(std::vector<double> sch){
+        shares_data.clear();
         shares_data = sch;
     }
     void decrease_sigma_x(double factor = 2){

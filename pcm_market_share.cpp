@@ -111,7 +111,21 @@ std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p,
     vector <double> ep_tmp(endpoints);
     reverse(ep_tmp.begin(), ep_tmp.end());
     if(!is_sorted(ep_tmp.begin(), ep_tmp.end())){
-        throw runtime_error("endpoints are not sorted poperly. check which goods go to conditional market share");
+        cout<<"endpoints, deltas and prices\n";
+        
+        for(auto t : ep_tmp){
+            cout<< t << "\t";
+        }
+        cout<<"\ndeltas\n";
+        for(auto t: delta){
+            cout<<t<<"\t";
+        }
+        cout<<"\nprices\n";
+        for(auto t: p){
+            cout<<t<<"\t";
+        }
+        cout<<endl;
+        throw runtime_error("endpoints are not sorted properly. check which goods go to conditional market share");
     }
     
 //    creadte lognormal distr
@@ -164,6 +178,20 @@ std::vector<double> cond_share(std::vector<double> delta, std::vector<double> p,
     vector <double> ep_tmp(endpoints);
     reverse(ep_tmp.begin(), ep_tmp.end());
     if(!is_sorted(ep_tmp.begin(), ep_tmp.end())){
+        cout<<"endpoints, deltas and prices\n";
+        
+        for(auto t : ep_tmp){
+            cout<< t << "\t";
+        }
+        cout<<"\ndeltas\n";
+        for(auto t: delta){
+            cout<<t<<"\t";
+        }
+        cout<<"\nprices\n";
+        for(auto t: p){
+            cout<<t<<"\t";
+        }
+        cout<<endl;
         throw runtime_error("endpoints are not sorted poperly. check which goods go to conditional market share");
     }
     
@@ -284,7 +312,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
                 }
 //                else push back the difference times a big number
                 else{
-                    up_alpha.push_back((delta_cond[j]-delta_cond[k]) * 1e10);
+                    up_alpha.push_back((delta_cond[j]-delta_cond[k]) * 1e20);
                 }
             }
             up_alpha.push_back(delta_cond[j]/p[j]);
@@ -297,7 +325,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
                 }
 //                else, push back a large negative number
                 else{
-                    lower_alpha.push_back((delta_cond[j]-delta_cond[k])*(-1e10));
+                    lower_alpha.push_back((delta_cond[j]-delta_cond[k])*(-1e20));
                 }
             }
             lower_alpha.push_back(0);
@@ -411,7 +439,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
                 }
 //                else push back the difference times a big number
                 else{
-                    up_alpha.push_back((delta_cond[j]-delta_cond[k]) * 1e10);
+                    up_alpha.push_back((delta_cond[j]-delta_cond[k]) * 1e20);
                 }
             }
             up_alpha.push_back(delta_cond[j]/p[j]);
@@ -424,7 +452,7 @@ std::vector<double> pcm_market_share::unc_share(std::vector<double> delta_bar, s
                 }
 //                else, push back a large negative number
                 else{
-                    lower_alpha.push_back((delta_cond[j]-delta_cond[k])*(-1e10));
+                    lower_alpha.push_back((delta_cond[j]-delta_cond[k])*(-1e20));
                 }
             }
             lower_alpha.push_back(0);
@@ -523,17 +551,17 @@ void pcm_market_share::get_traction(){
 //        update market shares
         this->setXInitial(X);
         sch_start = this->unc_share(X, x, p, sigma_p, sigmax);
-        cout<< "_____________________________"<<endl;
-        std::cout.precision(4);
-        std::cout << std::fixed;
-        for(auto it : sch_start){
-            cout<<it << " ";
-        }
-        cout<<endl;
-        for(auto it : X){
-            cout<<it << " ";
-        }
-        cout<<endl;
+//        cout<< "_____________________________"<<endl;
+//        std::cout.precision(4);
+//        std::cout << std::fixed;
+//        for(auto it : sch_start){
+//            cout<<it << " ";
+//        }
+//        cout<<endl;
+//        for(auto it : X){
+//            cout<<it << " ";
+//        }
+//        cout<<endl;
     }
     return;
 }
@@ -576,7 +604,7 @@ double pcm_market_share::relax_til_solved(std::vector<double> & solution, std::v
 
 bool pcm_market_share::solve_for_delta(){
     bool solved = false;
-    double factor = 1.1; // contraction of the grid after each unsuccessful iteration
+    double factor = 1.5; // contraction of the grid after each unsuccessful iteration
     int count = 0; // count number of contractions
 //    set initial guess for 
     this->setXInitial(this->initial_guess());
@@ -586,8 +614,8 @@ bool pcm_market_share::solve_for_delta(){
     solver1.setParam(KTR_PARAM_ALG, 2); // 2 = CG algorithm 3 = active set
     int num_iter = x.size()*5;
     solver1.setParam(KTR_PARAM_MAXIT, num_iter); // number of iterations 3 times bigger than the number of products.
-    solver1.setParam(KTR_PARAM_FTOL, 1e-12);
-    solver1.setParam(KTR_PARAM_XTOL, 1e-8);
+    solver1.setParam(KTR_PARAM_FTOL, 1e-10);
+    solver1.setParam(KTR_PARAM_XTOL, 1e-12);
     solver1.setParam(KTR_PARAM_OPTTOL, 1e-7);
     solver1.setParam(KTR_PARAM_DERIVCHECK, 0);
     solver1.setParam(KTR_PARAM_BAR_MURULE, 2); // set murule to adaptive
@@ -598,22 +626,23 @@ bool pcm_market_share::solve_for_delta(){
     solver1.setParam(KTR_PARAM_FEASTOL, 1e-10);
     solver1.setParam(KTR_PARAM_MULTISTART, 0);
     solver1.setParam(KTR_PARAM_PAR_CONCURRENT_EVALS,1); //concurrent evaluations. wired, but without concurrent evaluations it takes less time
-    
+    solver1.setParam(KTR_PARAM_OUTLEV, 0); // suppress output
     
     int result = solver1.solve();
     std::vector<double> solution = solver1.getXValues();
 //    decrease the sigma while solution is not found
     while(result != 0){
-        cout<<"decreasing sigma to solve for easier problem number of times "<<count+1<<endl;
-        this->decrease_sigma_x(factor);
+//        cout<<"decreasing sigma to solve for easier problem number of times "<<count+1;
+        this->decrease_sigma_x(1/factor);
+//        cout<<"sigma [0] is now\t" << sigmax[0]<<"\t tolerance violation is " <<endl;
         this->get_traction();
         result = solver1.solve();
         count++;
     }
-    cout<<"increasing sigma back\n";
+//    cout<<"increasing sigma back\n";
 //    increase the sigma back and keep searching for the solution
     for(count; count>0; --count){
-        this->increase_sigma_x(factor);
+        this->increase_sigma_x(1/factor);
         this->get_traction();
         result = solver1.solve();
     }
