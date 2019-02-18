@@ -74,7 +74,7 @@ vector<double> random_shares(int num_prod){
         for (int j=0; j< dim; ++j){
             x_tmp.push_back(unif(generator));
         }
-        p.push_back(pow((i+1),1));
+        p.push_back(pow((i+1),1.5));
         delta.push_back(i);
         x.push_back(x_tmp);
 //        sch.push_back(unif(generator)+2);

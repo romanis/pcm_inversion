@@ -631,7 +631,7 @@ bool pcm_market_share::solve_for_delta(){
     int result = solver1.solve();
     std::vector<double> solution = solver1.getXValues();
 //    decrease the sigma while solution is not found
-    while(result != 0){
+    while(result != 0 & count<7){
 //        cout<<"decreasing sigma to solve for easier problem number of times "<<count+1;
         this->decrease_sigma_x(1/factor);
 //        cout<<"sigma [0] is now\t" << sigmax[0]<<"\t tolerance violation is " <<endl;
