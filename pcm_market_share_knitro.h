@@ -15,9 +15,9 @@
 #define PCM_MARKET_SHARE_H
 #include <vector>
 #include <map>
-#include "/storage/home/rji5040/work/Tasmanian_run/include/TasmanianSparseGrid.hpp"
+#include "TasmanianSparseGrid.hpp"
 #include <omp.h>
-#include "/opt/aci/sw/knitro/10.2.1/include/knitro.h"
+#include "knitro.h"
 #include "KTRSolver.h"
 #include "KTRProblem.h"
 

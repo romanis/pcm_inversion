@@ -1,8 +1,5 @@
-#include "/opt/aci/sw/knitro/10.2.1/examples/C++/include/KTRSolver.h"
-#include "/opt/aci/sw/knitro/10.2.1/examples/C++/include/KTRProblem.h"
 #include <iostream>
-#include "pcm_market_share.h"
-#include "/storage/home/rji5040/work/Tasmanian_run/include/TasmanianSparseGrid.hpp"
+#include "pcm_market_share_knitro.h"
 #include <bits/stdc++.h>
 #include <random>
 #include <numeric>
