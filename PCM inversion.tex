@@ -1,0 +1,188 @@
+\documentclass[12pt,letterpaper]{article}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{pdfpages}
+\usepackage{epstopdf}
+%\epstopdfsetup{outdir=./}
+\usepackage{lscape}
+\usepackage[utf8x]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{multirow}
+\usepackage{lscape}
+\usepackage{geometry}
+\usepackage{bbm}
+\usepackage{dsfont}
+
+\usepackage{siunitx} % tables allignment by commas
+
+\usepackage{indentfirst}
+
+%\usepackage[numbers]{natbib}
+%\bibliographystyle{plainnat}
+%\setcitestyle{authoryear,open={(},close={)}}
+
+\usepackage[american]{babel}                
+\usepackage[colorlinks, linkcolor = black, citecolor = black, filecolor = black, urlcolor = black, pdfborder ={0 0 0}, pdfstartview={FitH}, bookmarksopenlevel=1]{hyperref}  
+\hypersetup{colorlinks=true, linkcolor=black}       
+\usepackage[natbibapa]{apacite}
+\bibliographystyle{apacite}
+\providecommand{\keywords}[1]{\textbf{\textit{Key words---}} #1}
+
+\author{Roman Istomin \\ Pennsylvania State University \\  \href{mailto:rji5040@psu.edu}{rji5040@psu.edu} }
+
+
+\title{Numerical algorithm for inverting the Pure Characteristics model of demand}
+
+\begin{document}
+	\maketitle
+	
+	\begin{abstract}
+	I have provided an algorithm to invert market shares in pure characteristics model with arbitrary number of random coefficients by using first order information of direct mapping from structural parameters to market shares (Jacobian matrix). I have used it in series of MC-simulations. I find that this algorithm inverts market shares for small number of products with hight accuracy even starting at random initial point. I also provide an algorithm to calculate "good" initial guess based on an undisturbed model.
+	Increasing number of products to 100 is possible, but the problem of zero market share during solving routine arises. I have provided algorithmic remedy for it so that I am able to invert market shares consistently even for a number of products as high as 100 with high accuracy. I find that using sparse grids that have negative weights on some nodes makes the problem non-monotone and unstable. I also showed that using the quadrature integration rules is valid in this setting. I believe this set of algorithms may be useful in empirical work and be incorporated into estimation procedures that estimate structural models with random coefficients based on pure characteristics model.
+	\end{abstract}
+	
+	\keywords{Pure Characteristics Model, Demand estimation, Market shares inversion}
+	
+	\section{Introduction}
+	\cite{berry2007pure} proposed a demand model that did not have an embedded love for variety in a form of i.i.d. shock with an infinite support. That as they argued was helping to overcome limitations of logit-type models such as unrealistically high welfare gains from new product introduction. \cite{mcfadden1978modeling} and \cite{nevo2000practitioner} argue that a flexible random coefficients logit model would fit any substitution pattern arbitrarily close. But on the other hand \cite{berry2007pure} argue that in presence of the unlimited support product-specific shock consumer's welfare grows without limit as we add products to his choice set no matter how close a substitute the products are. 
+	
+	\cite{berry2007pure} used the following specification of conditional utility that consumer $i$ gets from product $j$ 
+	\begin{align}
+	u_{ij} = \underbrace{\beta_0 + \beta_x\cdot x+ \xi_j}_{\bar \delta_j} + \sigma_x \cdot \nu_{ix} \cdot x_j - \alpha_i\cdot p_j
+	\label{eq:utility1}
+	\end{align}
+	Where $\beta_x$ was the average utility form a characteristic $x$, $\nu$ was a drawn from normal distribution, $\sigma_x$ was a variance of utility from the characteristic $x$, $\alpha_i$ was a consumer-specific marginal utility of income distributed log-normally with mean and standard deviation of log of $\alpha_i$ equal to respectively $\bar{\alpha},\, \sigma_p$. This model is so-called two random coefficients model because coefficients on $x$ and $p$ are random. Without randomness on $x$ it would have been purely vertical quality model similar to the one in \cite{bresnahan1990entry}. I will call $\beta_0 + \beta_x\cdot x+ \xi_j$ average utility $\bar \delta_j$
+	
+	The main challenge of the \cite{berry2007pure} was to invert the system of market shares equations to back out the $\bar\delta$ that would make market share predicted by \ref{eq:utility1} to be exactly equal to some observed vector of market shares conditional on the value of nonlinear parameters $\bar{\alpha},\, \sigma_p,\, \sigma_x$. They used a combination of algorithms the main being applying the weak contraction mapping they used to prove uniqueness of the $\bar \delta$ vector.
+	
+	This model was not widely used because the need to invert mapping from structural parameters to market shares to get $\xi_j$ conditional on $\beta, \sigma_x, \sigma_\alpha$, which as \cite{berry2007pure} claim is a hard problem. Their proposed solution was a combination of 3 techniques: 
+	\begin{itemize}
+	\item Scale down logit shock to get the desired model in the limit, which has a flaw that a term of the order of $1/\sigma$ where $\sigma$ is scale of Gumbel distribution appears under exponentiation which blows up the calculation as $\sigma \to 0$.
+	\item Recursive application of by-product numerical inversion operator, which is showed to be weak contraction mapping. Although they did not give their by-element algorithm explicitly, it is easy to make a guess that it does not use first order derivative information. 
+	\item Homotopy technique to approach solution of by-element inverse mapping via series of perturbed system solutions. This was guaranteed do converge in theory, but proved to be slow numerically.
+	\end{itemize}
+	
+	
+	\cite{song2007measuring} showed that the difference in welfare implications of these models may be large. Indicating that welfare calculations done using logit model should be checked against PC (Pure characteristics) model. He had used the combination of market share inversion routines proposed by \cite{berry2007pure}.
+	
+	I will be solving a more complicated problem which will have random coefficients on more than two variables. I will show how to use the structure of the mapping from the structural parameters to the market shares in combination with a good initial guess and Newton equation solving routine to solve for $\bar \delta$ fast and accurate without having to do it equation by equation or resorting to any kind of homotopy technique proposed by the original paper \cite{berry2007pure}.
+	
+	In this paper I am going to provide closed form expression for Jacobian of mapping from structural parameters to market shares $\bar S(\bar \delta,\sigma,X,P)$ where $\bar S$ is vector of market shares, $\bar \delta$ is vector of average utilities, $\sigma$ is vector of variances of marginal utilities, $X$ is vector of characteristics $x_j$, $P$ is vector of prices. Given that first order information one may use Newton method to solve for inverse $\delta$ that equates predicted and observed market shares
+	
+	\begin{align}
+	\hat\delta|\sigma:\; \bar S(\hat\delta,\sigma,X,P) = \bar s \label{eq:share}
+	\end{align}
+	Where $\bar s$ is a vector of observed shares
+	
+	Additional benefit of this approach would be that one can use it as a part of MPEC-type estimator treating equation \ref{eq:share} as constraint with known Jacobian as in \cite{dube2012improving}. That will utilize an  advantage of knowing derivative with respect to nonlinear parameters and could avoid problems with non-convexity of a problem.
+	
+	\section{Market share calculation algorithm}
+	
+	I want to start with description of market share calculation algorithm (direct mapping) so that it is easier to understand the details of calculating derivative of it. Algorithm uses analytical integration over one dimension of heterogeneity (price) conditional on draw of other heterogeneity and integrates that conditional market shares in the same fashion that mixed logit model integrates heterogeneity of $\beta_i$ (numerically). The difference of pure characteristics model (PCM) with mixed logit is that heterogeneity that admits analytical integration conditional on all other parameters is iid Gumbel shock in mixed logit and price elasticity in PM model. 
+	
+	It is easy to see if one looks at equation \ref{eq:utility1} conditional on draw of $\boldsymbol\nu_{ix}$ (to stress it is a draw I write in bold). It becomes
+	\begin{align}
+	u_{ij} = {\bar \delta_j} + \sigma_x \cdot \boldsymbol{\nu}_{ix} \cdot x_j - \alpha_i\cdot p_j
+	\label{eq:utility}
+	\end{align}
+	
+	Now everything except price elasticity is fixed for all products and we  calling ${\bar \delta_j} + \sigma_x \cdot \boldsymbol{\nu}_{ix} \cdot x_j$ an conditional quality of product $j$ we are in a setting of \cite{bresnahan1990entry} purely vertical model. Denote 
+	\begin{align}
+	\hat \delta_j = {\bar \delta_j} + \sigma_x \cdot \boldsymbol{\nu}_{ix} \cdot x_j
+	\label{eq:delta}
+	\end{align}
+	
+	This makes purely vertical model introduced in empirical literature by \cite{bresnahan1990entry}. \cite{song2007measuring} on page 12 shows that market shares of purely vertical model can be obtained as
+	\begin{align}
+	s_1(\hat \delta, P,F) &= F\left(\frac{\hat\delta_1 - \hat\delta_0}{p_1}\right) - F\left(\frac{\hat\delta_2 - \hat\delta_1}{p_2 - p_1}\right)\label{eq:s1}\\	
+	s_j(\hat \delta, P,F) &= F\left(\frac{\hat\delta_j - \hat\delta_{j-1}}{p_j - p_{j-1}}\right) - F\left(\frac{\hat\delta_{j+1} - \hat\delta_{j}}{p_{j+1} - p_{j}}\right)\label{eq:sk}\\	
+	s_J(\hat \delta, P,F) &= F\left(\frac{\hat\delta_J - \hat\delta_{J-1}}{p_J - p_{J-1}}\right)\label{eq:sJ}\\
+	\frac{\hat\delta_J - \hat\delta_{J-1}}{p_J - p_{J-1}} &<\cdots \frac{\hat\delta_k - \hat\delta_{k-1}}{p_k - p_{k-1}}<\cdots\frac{\hat\delta_1 - \hat\delta_{0}}{p_1}
+	\end{align}
+	Where all products that have positive market shares are ordered in ascending price, so product 1 is the cheapest having positive market share and product $J$ is the most expensive having positive market share. $F(\cdot)$ is a CDF of price elasticity distribution.  
+	
+	One can see that every product's market share only depends on qualities of its two neighbors that have positive market share: one more expensive and one less expensive. The crucial part here is positive market share. It may be that given some draw of $\nu_{ix}$ some product $k$ have smaller $\hat \delta_k$ than its less expensive competitor $\delta_{k-1}$. That automatically means that product $k$ has zero conditional market share and now products $k-1$ and $k+1$ are adjacent competitors. In other words, products $k_1$ and $k_2>k_1$ may be competing conditionally on a draw of $\nu$ only if all products between them have zero market share. But given a draw $\nu$ it is easy to determine which products will have positive market shares and calculate those shares according to equations \ref{eq:s1} - \ref{eq:sJ}. \cite{berry2007pure} showed how to do it by comparing increments in $\delta$ with increments in price.
+	
+	Aggregated market shares are weighted sums of conditional market shares over draws of $\boldsymbol{\nu}_{ix}$. Thus derivatives of each aggregated market share with respect to $\hat\delta$ will be the weighted sum of conditional derivatives of that market share with respect to $\hat \delta$. So, I am going to concentrate on computing the derivative of conditional market share given by equations \ref{eq:s1} - \ref{eq:sJ} with respect to $\hat{\delta}$.
+	
+	I am going to use the knowledge of which product competes with which to get analytic expression for conditional market share with respect to $\hat\delta$. 
+	
+	If conditional on draw $\nu$ product $k$ has zero market share, its derivative is also zero. Otherwise we locate two products with positive market shares that are next more expensive and next less expensive than $k$. Abusing notation call them $k-1$ and $k+1$ (assuming they are next more expensive and next less expensive) and from \ref{eq:sk} get
+	
+	\begin{align}
+	\frac{\partial s_k}{\partial \hat \delta_k} &= f\left(\frac{\hat\delta_k - \hat\delta_{k-1}}{p_k - p_{k-1}}\right)\cdot \frac 1{p_k - p_{k-1}} + f\left(\frac{\hat\delta_{k+1} - \hat\delta_{k}}{p_{k+1} - p_{k}}\right)\cdot \frac 1{p_{k+1} - p_{k}} \\
+	\frac{\partial s_k}{\partial \hat \delta_{k-1}} &= -f\left(\frac{\hat\delta_k - \hat\delta_{k-1}}{p_k - p_{k-1}}\right)\cdot \frac 1{p_k - p_{k-1}} \\
+	\frac{\partial s_k}{\partial \hat \delta_{k+1}} &= -f\left(\frac{\hat\delta_{k+1} - \hat\delta_{k}}{p_{k+1} - p_{k}}\right) \cdot \frac 1{p_{k+1} - p_{k}}
+	\end{align}
+	
+	Where $f(\cdot)$ is a PDF of price elasticity distribution.
+	
+	Derivatives with respect to $\sigma_{x}$ if needed may be obtained via chain rule having derivatives with respect to $\hat{\delta}$ and having $\hat \delta_j = {\bar \delta_j} + \sigma_x \cdot \boldsymbol{\nu}_{ix} \cdot x_j$. 
+	
+	Thus we have obtained the derivatives of conditional market shares with respect to average utilities $\hat \delta$ of each product utilizing knowledge of which product competes with which conditional on each draw of heterogeneity $\nu_{ik}$. As aggregate market share is just a weighted sum of conditional market shares over the draws of heterogeneity, the derivative of aggregate market share is just weighted sum of derivatives with the same weights. 
+	
+	Thus it is possible to get Jacobian of direct mapping from structural parameters to market shares with almost no additional computational burden compared to calculation of market share. One can use that information for Newton algorithm solving system of equations 
+	\begin{align}
+	\bar S(\delta,\sigma,X,P) = \bar s
+	\end{align}
+	Or to use it for MPEC-type estimate of the whole model without doing inversion on every iteration like \cite{Fox2011}.
+	
+	\section{Simulation results}
+	
+	In this section I am going to follow \cite{berry2007pure} simulation procedure to verify my method successfully inverts market shares. I will use random utility as in equation \ref{eq:utility}
+	
+	\begin{align}
+		u_{ij} = {\bar \delta_j} + \sigma_x \cdot \boldsymbol{\nu}_{ix} \cdot x_j - \alpha_i\cdot p_j
+	\end{align}
+	I will assume that $\alpha_i$ is distributed log-normally and fix the mean and variance of $\log(\alpha_i)$ to be 0 and 1 respectively. I will vary the number of products. There will be simulation for "small" number which I choose to be 10 and "large" number which I choose to be 100. The number of characteristics except for price (the dimension of $x_j$) with random tastes will be 4. (In \cite{berry2007pure} there were only 1 additional random characteristic to price). Each characteristic's random taste $\nu_{ix}$ will be distributed normally with zero mean and variance $\sigma_x$ which will be the same across characteristics. To approximate the integral I will use the Kronecker product of one-dimensional Gauss-Hermite quadrature rule\footnote{I also tried to use sparse grid, but it introduced non-monotonicity of some market shares due to negative weights of some nodes}. To show that an inversion algorithm does not introduce any numerical error I will use the same grid for market share inversion that I used for the calculation of market shares. To show the quadrature grid is consistent with normally distributed heterogeneity in this model I will then compute market shares using a grid of 1e7 points drawn using Monte-Carlo technique from 4-dimensional normal distribution and invert that market shares using the quadrature grid. I will draw  each $x_j$ from uniform on 4-dimensional cube $[0; 1]^4$ distribution. 
+	
+	In the first set of numerical experiments I will generate market shares corresponding to a set of mean utilities of 10 products with $\bar\delta_i = i$ with 4 random coefficients except price (5 random coefficients in total), choose prices for products so that they all have positive market shares $p_i = \bar \delta_i^2/10$ and simulate market shares by integrating equations \ref{eq:s1} - \ref{eq:sJ} over Gaussian quadrature rules grid with standard deviation of $\sigma_x=1$ for all variables. I will then feed the simulated market shares to fsolve Matlab routine to solve for $\bar\delta^*$ that equates predicted market share to the given one. I use randomly generated starting value with the caveat that at the starting value all products have positive aggregated market shares otherwise solver cannot continue due to zero derivative of those products that have zero market share. To achieve that all market shares are positive at initial guess of $\delta$ I increase $\delta_j$ for products that have zero market share in a loop while there is at least one product with zero market share. I use "true" value of $\sigma_x, \sigma_p$. True means the same used for simulation. I also use the true grid i.e. the same grid I used to simulate market shares. I set the first order optimality tolerance to $10^{-12}$ (the 'TolFun' parameter of fsolve). I run 100 different estimates starting from 100 different starting points with the same true $\bar \delta$ and the same characteristics $x$.
+	
+	The results of estimation is drawn in table \ref{tab:est-small1}. The estimates between different simulations do not differ practically because the standard deviation is in the order of 1e-11. When starting from random initial point the algorithm has converged 100 times out of 100, average number of steps it takes to reach solution was 7, I am using a grid that is a Kronecker product of 7 point unidimensional Gauss-Hermite grid that makes $7^4 = 2401$ points and it takes on average 6 seconds to reach the solution. The low deviation of estimated quality of the products from the true one proves that the algorithm introduces no numerical error at least in case of small number of products.
+	
+	
+	
+	\begin{table}
+	\caption{Results of market share inversion from random point. Estimation from random starting point was performed 100 times. Number of times algorithm converged is 100. $\hat{\delta}$ only calculated for those simulations when algorithm has converged. Average inversion time 6 seconds for grid of 2401 nodes. } \label{tab:est-small1}. 
+	\centering
+	\begin{tabular}{c|c|c}
+		True $\delta$ & $\hat\delta$ & stdev $\hat\delta$ \\
+		\hline
+		1	& 1.0000	&0.1362 E-10 \\
+		2	& 2.0000	&0.1215 E-10 \\
+		3	& 3.0000	&0.1179 E-10 \\
+		4	& 4.0000	&0.1199 E-10 \\
+		5	& 5.0000	&0.1200 E-10 \\
+		6	& 6.0000	&0.1192 E-10 \\
+		7	& 7.0000	&0.1255 E-10 \\
+		8	& 8.0000	&0.1236 E-10 \\
+		9	& 9.0000	&0.1229 E-10 \\
+		10	& 10.0000	&0.1226 E-10 \\
+	\end{tabular}
+	\end{table}
+	
+
+	I then provide a method of picking a good starting guess instead of a random one.  I am using the fact that if price is the only characteristic with random taste, the inversion can be done in closed form as shown in \cite{song2007measuring}. I use that undisturbed closed form solution as starting value for inversion with 4 random coefficients and 100 products. I set product's average quality $\hat \delta_j = j$ and I set price the same way I did for small number of products $p_i = \delta_i^2/10$ I do change price after that by decreasing the prices of products that have market share less than 1e-4 until there is no product with the market share lower than 1e-4. I do it to avoid too small aggregate market shares that create a problem of zero aggregate market share during inversion routine. I repeat the estimation 100 times each time drawing new set of products' heterogeneity $x$ holding fixed the grid and the variance of price and heterogeneity to 1.
+	
+	The algorithm converged successfully 90 times out of 100 and the maximum discrepancy from any component of the true $\delta$ among that 90 successful inversions was 5.5e-7. The median number of iterations it tales to reach the solution is 7, on average it takes 35 seconds with the same 2401 points 4-dimensional grid.
+	
+	I examined the cases when algorithm could not invert the system of market share equations and found that most of the time algorithm gets stuck it happens because aggregate market share of some product became zero during the routine or it became too large and could not be decreased. I see two ways out: first, I take an output of unsuccessful run, and  increase $\bar\delta_j$ of those products that have zero aggregate market share until they have it positive and then restart the equation solver from that point. If the problem was that some product have too large market share, I decrease the delta until the market share falls 10 times and restart solver. Another approach is to increase the number of points in the grid. I find that the more points in the grid I have the less frequently does the algorithm get stuck due to zero market share, but increasing the number of points does not seem to  eliminate the problem of too large market share while greatly increasing the evaluation time. Whereas changing the components of $\delta$ and restarting the solver seem to work in almost all cases.
+	
+	In the third round of numerical experiments I am showing that using Gauss-Hermite quadrature rules is justifiable in this model. I set the number of products to 100, keep the standard deviation of log of price and $x$ to be 1 and use 1e7 points to calculate the market shares, so that the grid I use to invert the market share, which is the Gauss-Hermite quadrature points and weights is not the true, but only approximating the true integral. I pre-calculate 100 different market shares for 100 different draws of heterogeneity $x$ and the same set of average quality $\delta_j = j$. I then invert market shares using Gauss-Hermite quadrature rules to integrate the heterogeneity. I also use the algorithmic remedy of increasing (or decreasing the $\delta_j$) whenever the algorithm fails to converge during 25 iterations due to zero aggregate market share or too large aggregate market share. It takes the same median of 7 iteration and average of 38 seconds to converge, the maximum deviation of any dimension of estimated $\delta_j$ from the true was 0.05 for all the iterations. That proves that the use of quadrature rules is justified in this case.
+	
+	\section{Conclusion}
+	
+	I have provided an algorithm to invert market shares in pure characteristics model with arbitrary number of random coefficients by using first order information of direct mapping from structural parameters to market shares (Jacobian matrix). I have coded that algorithm, checked that it correctly calculates Jacobian and used it in series of MC-simulations. I find that this algorithm inverts market shares for small number of products exactly all the time if I give it a good guess and it successfully inverts market share from random starting point 100 percent of the time. 
+	
+	Increasing number of products to 100 is possible, but the problem of zero market share during solving routine arises, but I have provided algorithmic remedy for it so that I am able to invert market shares even for number of products as high as 100. I used the combination of good initial guess that is a solution to undisturbed problem and changing the $\delta_j$ for products that appeared to have zero market share during the solution routine. Combining these techniques was allowed me to successfully invert market shares in all cases.
+	
+	I find that using sparse grids that have negative weights on some nodes makes the problem non-monotone and unstable.
+	
+	I also showed that using the quadrature integration rules is valid in this setting.
+	
+	I think this set of algorithms may be useful in empirical work and be incorporated into estimation procedures that estimate structural models with random coefficients based on pure characteristics model.
+	
+	\bibliography{MyCollection.bib}
+\end{document}
