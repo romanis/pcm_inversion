@@ -18,9 +18,9 @@ using namespace Eigen;
 using Eigen::indexing::last;
 
 namespace pcm_share{
-    Eigen::VectorXd unc_share(const VectorXd& delta_bar, const MatrixXd& x, const VectorXd& p, double sigma_p, const ArrayXd& sigma_x, const ArrayXXd& grid, const VectorXd & weights, MatrixXd & jacobian)
+    Eigen::ArrayXd unc_share(const ArrayXd& delta_bar, const ArrayXXd& x, const ArrayXd& p, double sigma_p, const ArrayXd& sigma_x, const ArrayXXd& grid, const ArrayXd & weights, MatrixXd & jacobian)
     {
-        Eigen::VectorXd un_share = VectorXd::Zero(delta_bar.size());
+        Eigen::ArrayXd un_share = ArrayXd::Zero(delta_bar.size());
         // set jacobian to zero matrix
         jacobian = MatrixXd::Zero(delta_bar.size(), delta_bar.size());
     
@@ -51,26 +51,14 @@ namespace pcm_share{
     for(int draw=0; draw<weights.size(); ++draw){
 //        calculate the conditional quality
 //        delta_hat = delta + sigma_x*x*nu(i,:);
-        VectorXd delta_cond = delta_bar + x*(sigma_x.transpose()*grid.row(draw)).matrix();
-        
-
+        ArrayXd delta_cond = delta_bar + (x.matrix()*(sigma_x.transpose()*grid.row(draw)).matrix()).array();
         
 //        determine indexes of goods that have positive market shares
         vector<int> ind;
         for(int j=0; j<delta_bar.size(); ++j){
 //            calculate upper bound on price elasticity of people who will choose product j
-            vector<double> up_alpha;
-            for(int k=0; k<j; ++k){
-//                if p[j] != p[k], use simple formula
-                if(p[j] != p[k]){
-                    up_alpha.push_back((delta_cond[j]-delta_cond[k])/(p[j]-p[k]));
-                }
-//                else push back the difference times a big number
-                else{
-                    up_alpha.push_back((delta_cond[j]-delta_cond[k]) * 1e10);
-                }
-            }
-            up_alpha.push_back(delta_cond[j]/p[j]);
+            ArrayXd u_alpha = (delta_cond[j] - delta_cond(seq(0, j-1))) / (p[j] - p(seq(0, j-1)));
+            double min_upper = std::min(u_alpha.minCoeff(), delta_cond[j]/p[j]);
             
 //            create lower bound on price elasticity of those who buy this product
             vector<double> lower_alpha;
@@ -84,11 +72,11 @@ namespace pcm_share{
                 }
             }
             lower_alpha.push_back(0);
-            
-
+            ArrayXd l_alpha = (delta_cond[j] - delta_cond(seq(j+1, last))) / (p[j] - p(seq(j+1, last)));
+            double max_lower = std::max(l_alpha.maxCoeff(), 0.0);
             
 //            if there is slack between up and lower, it has positive market share
-            if(*min_element(up_alpha.begin(), up_alpha.end()) > *max_element(lower_alpha.begin(), lower_alpha.end())){
+            if(min_upper > max_lower){
                 ind.push_back(j);
             }
             
@@ -97,37 +85,19 @@ namespace pcm_share{
 //        if there is a product with positive market share
         if(ind.size() > 0){
 //            pick those deltas and prices that correspond to products with positive market shares
-            vector<double> delta_positive, p_positive;
-            vector<vector<double>> jacobian_tmp;
+            MatrixXd jacobian_tmp;
+            ArrayXd delta_positive = delta_cond(ind);
+            ArrayXd p_positive = p(ind);
             
-            for(auto i_positive : ind){
-                delta_positive.push_back(delta_cond[i_positive]);
-                p_positive.push_back(p[i_positive]);
-            }
-            vector<double> shares_tmp; // = cond_share(delta_positive,p_positive, sigma_p, jacobian_tmp);
+            
+            ArrayXd shares_tmp = cond_share(delta_positive,p_positive, sigma_p, jacobian_tmp);
 
 //            add shares to corresponding dimensions of un_share
             int num_share=0, num_i=0, num_j=0;
 
+            un_share(ind) += shares_tmp*weights[draw];
             
-            for(auto i_dim : ind){
-                omp_set_lock(&locks[i_dim]);
-                un_share[i_dim]+=weights[draw]*shares_tmp[num_share++];
-                omp_unset_lock(&locks[i_dim]);
-            }
-            
-            
-//            add jacobian elements to their positions
-            for(auto i_dim :ind){
-                omp_set_lock(&locks[i_dim]);
-                for (auto j_dim : ind){
-                    // jacobian[i_dim][j_dim] += weights[draw]*jacobian_tmp[num_i][num_j];
-                    ++num_j;
-                }
-                omp_unset_lock(&locks[i_dim]);
-                num_j = 0;
-                num_i++;
-            }
+            jacobian(ind, ind) += jacobian_tmp;
             
         }
     }
@@ -176,15 +146,10 @@ namespace pcm_share{
             previous_cdf = current_cdf;
         }
         
-        
-    //    cout<<"lognorm cpdf " << endpoints[0]<<" "<< boost::math::pdf(lognormDistr, 1)<<endl;
-    //    for(auto it : con_share){
-    //        cout<<it<<endl;
-    //    }
-        
     //    calculate jacobian
 
-        {  
+        {
+            jacobian = MatrixXd::Zero(delta.size(), delta.size());
     //        if only one product, simple
             if(delta.size() == 1){
                 jacobian(0,0) = (boost::math::pdf(lognormDistr, endpoints[0]))/p[0];
@@ -194,17 +159,16 @@ namespace pcm_share{
             else{
                 
     //            hardcode derivatives of 1,1 1,2 and end,end-1 and end,end
-                jacobian(0,0) = (boost::math::pdf(lognormDistr, endpoints[0]))/p[0] + (boost::math::pdf(lognormDistr, endpoints[1]))/(p[1]-p[0]);
-                jacobian(0,1) = -(boost::math::pdf(lognormDistr, endpoints[1]))/(p[1]-p[0]);
+                jacobian(0,0) = (boost::math::pdf(lognormDistr, endpoints[0]))/p[0];
     //            cout<< "size of jacobian "<< jacobian.size()<<endl;
     //            all the rest calculate algirithmically
-                for(int i=1; i<delta.size()-1; ++i){
-                    jacobian(i,i-1) = -(boost::math::pdf(lognormDistr, endpoints[i]))/(p[i]  -p[i-1]);
-                    jacobian(i,i  ) = (boost::math::pdf(lognormDistr, endpoints[i]))/(p[i]  -p[i-1]) + (boost::math::pdf(lognormDistr, endpoints[i+1]))/(p[i+1]-p[i]);
-                    jacobian(i,i+1) =                                                                - (boost::math::pdf(lognormDistr, endpoints[i+1]))/(p[i+1]-p[i]);
+                for(int i=1; i<delta.size(); ++i){
+                    double val = (boost::math::pdf(lognormDistr, endpoints[i]))/(p[i]  -p[i-1]);
+                    jacobian(i,i-1) -= val;
+                    jacobian(i-1,i) -= val;
+                    jacobian(i,i)   += val;
+                    jacobian(i-1, i-1) += val;
                 }
-                jacobian(delta.size()-1, delta.size()-2) = -(boost::math::pdf(lognormDistr, endpoints[delta.size()-1]))/(p[delta.size()-1]-p[delta.size()-2]);
-                jacobian(delta.size()-1, delta.size()-1) =  (boost::math::pdf(lognormDistr, endpoints[delta.size()-1]))/(p[delta.size()-1]-p[delta.size()-2]);
             }
         }
         return con_share;
