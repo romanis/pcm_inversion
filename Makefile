@@ -42,7 +42,7 @@ matrix_inverse.o: matrix_inverse.h matrix_inverse.cpp
 test_pcm.o: pcm_market_share.so test_pcm.cpp
 	$(CXX) -o test_pcm.o -c test_pcm.cpp $(CXXFLAGS) 
 
-test_pcm: test_pcm.o
+test_pcm: test_pcm.o pcm_market_share.so
 	$(CXX) -o test_pcm test_pcm.o  -L. -lpcm_market_share -fopenmp
 
 clean :

@@ -97,14 +97,14 @@ namespace pcm_share{
 
             un_share(ind) += shares_tmp*weights[draw];
             
-            jacobian(ind, ind) += jacobian_tmp;
+            jacobian(ind, ind) += jacobian_tmp*weights[draw];
             
         }
     }
-    cout<<"share"<<endl;
-       for(auto it: un_share){
-           cout<< it<<endl;
-       }
+    // cout<<"share"<<endl;
+    //    for(auto it: un_share){
+    //        cout<< it<<endl;
+    //    }
     return un_share;
     }
 
