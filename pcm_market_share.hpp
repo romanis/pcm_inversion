@@ -4,6 +4,7 @@
 #include <vector>
 #include <Dense>
 
+
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
 
@@ -21,10 +22,9 @@ namespace pcm_share{
      * @param weights weights of each point in  grid size K 
      * @return std::vector<double> 
      */
-    Eigen::VectorXd unc_share(const Eigen::ArrayXd& delta_bar, const Eigen::ArrayXXd& x, const Eigen::ArrayXd& p, 
+    Eigen::ArrayXd unc_share(const Eigen::ArrayXd& delta_bar, const Eigen::ArrayXXd& x, const Eigen::ArrayXd& p, 
                                     double sigma_p, const Eigen::ArrayXd& sigma_x, const Eigen::ArrayXXd& grid, 
-                                    const Eigen::VectorXd & weights, Eigen::MatrixXd & jacobian);
-
+                                    const Eigen::ArrayXd & weights, Eigen::MatrixXd & jacobian);
 
     /**
      * @brief computes market share of vertical model conditional on draw of heterogeneity. 
@@ -36,6 +36,8 @@ namespace pcm_share{
      * @return std::vector<double> 
      */
     Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p, Eigen::MatrixXd & jacobian ); 
+
+    void generate_tasmanian_global_grid(int dim, int n, Eigen::ArrayXXd& grid, Eigen::ArrayXd & weights);
 
 
 }

@@ -2,7 +2,7 @@
 #include<iostream>
 #include<map>
 #include<vector>
-// #include "TasmanianSparseGrid.hpp"
+#include "TasmanianSparseGrid.hpp"
 #include <utility>
 #include <cmath>
 #include <math.h>
@@ -16,6 +16,7 @@
 using namespace std;
 using namespace Eigen;
 using Eigen::indexing::last;
+using namespace TasGrid;
 
 namespace pcm_share{
     Eigen::ArrayXd unc_share(const ArrayXd& delta_bar, const ArrayXXd& x, const ArrayXd& p, double sigma_p, const ArrayXd& sigma_x, const ArrayXXd& grid, const ArrayXd & weights, MatrixXd & jacobian)
@@ -37,17 +38,8 @@ namespace pcm_share{
         throw runtime_error("number of rows in x is different from the number of elements in delta_bar");
     }
     
-    //    create vector of locks 
-    vector<omp_lock_t> locks;
-
-    for(int draw=0; draw< delta_bar.size(); ++draw){
-        omp_lock_t writelock;
-        omp_init_lock(&writelock);
-        locks.push_back(writelock);
-    }
     
 //    loop over all points in the grid
-#pragma omp parallel for num_threads(4) schedule(dynamic,1)
     for(int draw=0; draw<weights.size(); ++draw){
 //        calculate the conditional quality
 //        delta_hat = delta + sigma_x*x*nu(i,:);
@@ -173,5 +165,27 @@ namespace pcm_share{
         }
         return con_share;
     }
+
+    void generate_tasmanian_global_grid(int dim, int n, ArrayXXd& grid, ArrayXd & weights){
+//    use tasmanian to calculate points and weights
+    TasmanianSparseGrid tgr;
+
+    
+    tgr.makeGlobalGrid(dim,1,n,type_tensor,rule_gausshermite);
+    vector<double> weights1 = tgr.getQuadratureWeights();
+    vector<double> coordinates = tgr.getPoints();
+    grid = ArrayXXd::Zero(tgr.getNumPoints(), dim);
+    weights = ArrayXd::Zero(tgr.getNumPoints());
+    int i = 0;
+//    cout<<"num points " <<pow(n+1,dim)<<endl;
+//    there are (n+1)^dim points it is stacked in points vector
+    for(int point_number = 0; point_number < tgr.getNumPoints(); ++point_number){
+        weights[point_number] = weights1[point_number]/pow(std::sqrt(M_PI),dim);
+        for(int j = 0; j < dim; j++){
+            grid(point_number, j) = coordinates[j + dim*point_number]*M_SQRT2;
+        }
+    }
+
+}
 
 }

@@ -43,7 +43,7 @@ test_pcm.o: pcm_market_share.so test_pcm.cpp
 	$(CXX) -o test_pcm.o -c test_pcm.cpp $(CXXFLAGS) 
 
 test_pcm: test_pcm.o pcm_market_share.so
-	$(CXX) -o test_pcm test_pcm.o  -L. -lpcm_market_share -fopenmp
+	$(CXX) -o test_pcm test_pcm.o pcm_market_share.o -L. -lpcm_market_share -fopenmp -L$(TASMANIANL) -ltasmaniansparsegrid 
 
 clean :
 	rm -f *.o
