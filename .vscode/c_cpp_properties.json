@@ -5,12 +5,13 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "~/Documents/eigen/Eigen",
-                "/home/romanistomin/Documents/eigen"
+                "/home/romanistomin/Documents/eigen/Eigen",
+                "/opt/TASMANIAN/include"
             ],
             "defines": [],
-            "compilerPath": "/usr/bin/gcc",
+            "compilerPath": "/usr/bin/g++",
             "cStandard": "gnu17",
-            "cppStandard": "gnu++14",
+            "cppStandard": "gnu++17",
             "intelliSenseMode": "linux-gcc-x64"
         }
     ],

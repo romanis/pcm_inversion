@@ -43,6 +43,7 @@ namespace pcm_share{
     
     
     //    loop over all points in the grid
+    #pragma omp parallel for schedule(dynamic, 10)
         for(int draw=0; draw<weights.size(); ++draw){
     //        calculate the conditional quality
     //        delta_hat = delta + sigma_x*x*nu(i,:);
