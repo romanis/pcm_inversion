@@ -22,7 +22,7 @@ namespace pcm_share{
      * @param weights weights of each point in  grid size K 
      * @return std::vector<double> 
      */
-    Eigen::ArrayXd unc_share(const Eigen::ArrayXd& delta_bar, const Eigen::ArrayXXd& x, const Eigen::ArrayXd& p, 
+    Eigen::ArrayXd unc_share(const Eigen::ArrayXd& delta_bar, const Eigen::MatrixXd& x, const Eigen::ArrayXd& p, 
                                     double sigma_p, const Eigen::ArrayXd& sigma_x, const Eigen::ArrayXXd& grid, 
                                     const Eigen::ArrayXd & weights, Eigen::MatrixXd & jacobian);
 
