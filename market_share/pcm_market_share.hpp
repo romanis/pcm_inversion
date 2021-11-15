@@ -2,7 +2,7 @@
 #define __PCM_MARKET_SHARE_H__
 
 #include <vector>
-#include <Dense>
+#include <Eigen/Dense>
 
 
 using Eigen::MatrixXd;
@@ -27,6 +27,22 @@ namespace pcm_share{
                                     const Eigen::ArrayXd & weights, Eigen::MatrixXd & jacobian);
 
     /**
+     * @brief Computes unconditional marker share of each product without computing jacobian
+     * 
+     * @param delta_bar average quality of each good size Nx1 N - number of products
+     * @param x values of heterogeneity size NxK K - number of characteristics of horizontal differentiation
+     * @param p vector of prices size Nx1
+     * @param sigma_p standard deviation of log of price sensitivity
+     * @param sigma_x vector of standard deviation of each horizontal differentiation size K.
+     * @param grid the grid to integrate with respect to draws of heterogeneity. size DxK where D is the size of the number of draws 
+     * @param weights weights of each point in  grid size K 
+     * @return std::vector<double> 
+     */
+    Eigen::ArrayXd unc_share(const Eigen::ArrayXd& delta_bar, const Eigen::MatrixXd& x, const Eigen::ArrayXd& p, 
+                                    double sigma_p, const Eigen::ArrayXd& sigma_x, const Eigen::ArrayXXd& grid, 
+                                    const Eigen::ArrayXd & weights);
+
+    /**
      * @brief computes market share of vertical model conditional on draw of heterogeneity. 
      * 
      * @param delta vertical qualities of the products
@@ -36,6 +52,16 @@ namespace pcm_share{
      * @return std::vector<double> 
      */
     Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p, Eigen::MatrixXd & jacobian ); 
+
+    /**
+     * @brief computes market share of vertical model conditional on draw of heterogeneity without jacobian
+     * 
+     * @param delta vertical qualities of the products
+     * @param p prices of products
+     * @param sigma_p standard deviation of the price coefficient
+     * @return std::vector<double> 
+     */
+    Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p); 
 
     void generate_tasmanian_global_grid(int dim, int n, Eigen::ArrayXXd& grid, Eigen::ArrayXd & weights);
 

@@ -3,11 +3,10 @@ CXX	= g++
 SDIR     = .
 NLOPTI 	 = /opt/NLopt/include/
 NLOPTL   = /opt/NLopt/lib/
-EIGEN	 = /home/romanistomin/Documents/eigen/Eigen
-BOOSTI	 = .#/storage/work/rji5040/boost_1_65_1/
+EIGEN	 = /usr/include/eigen3/
 
-TASMANIANL = /opt/TASMANIAN/lib
-TASMANIANI = /opt/TASMANIAN/include/
+TASMANIANL = /usr/local/TASMANIAN/lib
+TASMANIANI = /usr/local/TASMANIAN/include/
 # parameters for gurobi
 INC      = /usr/include/
 CARGS    = -m64 -g
@@ -43,7 +42,7 @@ test_pcm.o: pcm_market_share.so test_pcm.cpp
 	$(CXX) -o test_pcm.o -c test_pcm.cpp $(CXXFLAGS) 
 
 test_pcm: test_pcm.o pcm_market_share.so
-	$(CXX) -o test_pcm test_pcm.o pcm_market_share.o -L. -lpcm_market_share -fopenmp -L$(TASMANIANL) -ltasmaniansparsegrid 
+	$(CXX) -o test_pcm test_pcm.o -L. -lpcm_market_share -fopenmp -L$(TASMANIANL) -ltasmaniansparsegrid 
 
 clean :
 	rm -f *.o
