@@ -7,8 +7,8 @@
 #include "Eigen/Dense"
 
 // struct that is going to take cara of the pcm computations
-
-typedef struct {
+using namespace Eigen;
+struct pcm_parameters{
     Eigen::MatrixXd x;
     Eigen::ArrayXd p;
     double sigma_p;
@@ -16,7 +16,10 @@ typedef struct {
     Eigen::ArrayXXd grid;
     Eigen::ArrayXd weights;
     Eigen::ArrayXd data_shares;
-} pcm_parameters;
+
+    pcm_parameters(MatrixXd& x, ArrayXd &p, double sigma_p, ArrayXd &sigma_x, ArrayXXd& grid, ArrayXd& weights, ArrayXd& data_shares) :
+    x(x), p(p), sigma_x(sigma_x), sigma_p(sigma_p), grid(grid), weights(weights), data_shares(data_shares) {};
+} ;
 
 /**
  * @brief Computes the positive and negative constraints that all predicted shares are equal to data shares
@@ -34,55 +37,82 @@ void c(unsigned m, double *result, unsigned n, const double* deltas, double* gra
     // map deltas to eigen array 
     Eigen::Map<const Eigen::ArrayXd> eigen_deltas(deltas, n); 
     Eigen::ArrayXd u_share = pcm_share::unc_share(eigen_deltas, params->x, params->p, params->sigma_p, params->sigma_x, params->grid, params->weights, jacobian);
+    u_share -= params->data_shares;
+    
+    // copy D into result
+    for(int i=0; i<=n; ++i){
+        result[i] = u_share[i];
+        result[i+n]= -1*u_share[i];
+    }
+
+    if(!grad) return;
+
+    // reshape jacobian
+    Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> M2(jacobian);
+    Map<RowVectorXd> v2(M2.data(), M2.size());
+    /// copy jacobian
+    for(int i=0; i<v2.size(); ++i){
+        grad[i] = v2[i];
+        grad[i+v2.size()] = -v2[i];
+    }
 }
 
 
-double myfunc(unsigned n, const double *x, double *grad, void *my_func_data)
+double myfunc(const std::vector<double> &x, std::vector<double> &grad, void *my_func_data)
 {
-    if (grad) {
-        grad[0] = 0.0;
-        grad[1] = 0.5 / sqrt(x[1]);
+    if (!grad.empty()) {
+        for(int i=0; i < x.size() ; ++i){
+          grad[i] = 0;
+        }
     }
-    return sqrt(x[1]);
+    return 0;
 }
 
-typedef struct {
-    double a, b;
-} my_constraint_data;
-
-double myconstraint(unsigned n, const double *x, double *grad, void *data)
-{
-    my_constraint_data *d = (my_constraint_data *) data;
-    double a = d->a, b = d->b;
-    if (grad) {
-        grad[0] = 3 * a * (a*x[0] + b) * (a*x[0] + b);
-        grad[1] = -1.0;
-    }
-    return ((a*x[0] + b) * (a*x[0] + b) * (a*x[0] + b) - x[1]);
- }
 
 
 int main(){
-  nlopt::opt opt(nlopt::LD_MMA, 2);
-  std::vector<double> lb(2);
-  lb[0] = -HUGE_VAL; lb[1] = 0;
-  opt.set_lower_bounds(lb);
-  opt.set_min_objective(myfunc, NULL);
-  my_constraint_data data[2] = { {2,0}, {-1,1} };
-  opt.add_inequality_constraint(myconstraint, &data[0], 1e-8);
-  opt.add_inequality_constraint(myconstraint, &data[1], 1e-8);
-  opt.set_xtol_rel(1e-4);
-  std::vector<double> x(2);
-  x[0] = 1.234; x[1] = 5.678;
-  double minf;
 
-  try{
-      nlopt::result result = opt.optimize(x, minf);
-      std::cout <<"result " << result<< " found minimum at f(" << x[0] << "," << x[1] << ") = "
-          << std::setprecision(10) << minf << std::endl;
-  }
-  catch(std::exception &e) {
-      std::cout << "nlopt failed: " << e.what() << std::endl;
-  }
-  return 0;
+    int num_prod = 5, num_x_dim = 3;
+    nlopt::opt opt(nlopt::LD_MMA, num_prod);
+    opt.set_min_objective(myfunc, NULL);
+    
+    Eigen::ArrayXd delta_bar = Eigen::ArrayXd::Zero(num_prod);
+    Eigen::ArrayXd p(num_prod);
+    Eigen::MatrixXd jacobian;
+
+    for(int i = 0; i< num_prod; ++i){
+        delta_bar[i] = i+1;
+        p[i]=pow(i+1, 1.2);
+    }
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_x_dim);
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_x_dim);
+    Eigen::ArrayXd weights;
+    Eigen::ArrayXXd grid;
+    pcm_share::generate_tasmanian_global_grid(num_x_dim, 6, grid, weights);
+    auto un_sh = pcm_share::unc_share(delta_bar, x, p, 1, sigma_x, grid, weights, jacobian);
+    pcm_parameters param(x, p, 1.0, sigma_x, grid, weights, un_sh);
+    pcm_parameters params[1] = {param};
+    std::vector<double> tols(2*num_prod, 1e-8);
+
+    opt.add_inequality_mconstraint(c, &params[0], tols);
+    opt.set_xtol_rel(1e-4);
+    std::vector<double> x_initial(num_prod, 0);
+    for(int i = 0; i<num_prod; ++i){
+        x_initial[i] = std::pow(1.0*i, 1.0);
+    }
+    double minf;
+
+    try{
+        nlopt::result result = opt.optimize(x_initial, minf);
+        std::cout <<"result " << result<< " found minimum at f(" ;
+        for(int i = 0; i<x_initial.size(); ++i){
+            std::cout<<x_initial[i]<<"\t";
+        }
+        std::cout << ") = "
+            << std::setprecision(10) << minf << std::endl;
+    }
+    catch(std::exception &e) {
+        std::cout << "nlopt failed: " << e.what() << std::endl;
+    }
+    return 0;
 }
