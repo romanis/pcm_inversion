@@ -42,7 +42,6 @@ void c(unsigned m, double *result, unsigned n, const double* deltas, double* gra
     // copy D into result
     for(int i=0; i<=n; ++i){
         result[i] = u_share[i];
-        result[i+n]= -1*u_share[i];
     }
 
     if(!grad) return;
@@ -53,7 +52,6 @@ void c(unsigned m, double *result, unsigned n, const double* deltas, double* gra
     /// copy jacobian
     for(int i=0; i<v2.size(); ++i){
         grad[i] = v2[i];
-        grad[i+v2.size()] = -v2[i];
     }
 }
 
@@ -72,8 +70,8 @@ double myfunc(const std::vector<double> &x, std::vector<double> &grad, void *my_
 
 int main(){
 
-    int num_prod = 5, num_x_dim = 3;
-    nlopt::opt opt(nlopt::LD_MMA, num_prod);
+    int num_prod = 10, num_x_dim = 4;
+    nlopt::opt opt(nlopt::LD_SLSQP, num_prod);
     opt.set_min_objective(myfunc, NULL);
     
     Eigen::ArrayXd delta_bar = Eigen::ArrayXd::Zero(num_prod);
@@ -92,13 +90,13 @@ int main(){
     auto un_sh = pcm_share::unc_share(delta_bar, x, p, 1, sigma_x, grid, weights, jacobian);
     pcm_parameters param(x, p, 1.0, sigma_x, grid, weights, un_sh);
     pcm_parameters params[1] = {param};
-    std::vector<double> tols(2*num_prod, 1e-8);
+    std::vector<double> tols(num_prod, 1e-8);
 
-    opt.add_inequality_mconstraint(c, &params[0], tols);
+    opt.add_equality_mconstraint(c, &params[0], tols);
     opt.set_xtol_rel(1e-4);
     std::vector<double> x_initial(num_prod, 0);
     for(int i = 0; i<num_prod; ++i){
-        x_initial[i] = std::pow(1.0*i, 1.0);
+        x_initial[i] = std::pow(1.0*i, 1.5) + std::rand()/INT_MAX;
     }
     double minf;
 
