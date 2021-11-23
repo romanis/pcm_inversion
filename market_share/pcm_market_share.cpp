@@ -308,6 +308,25 @@ namespace pcm_share{
         }
     }
 
-}
+    }
+
+    Eigen::ArrayXd initial_guess(const Eigen::ArrayXd& shares_data, const Eigen::ArrayXd& p, double sigma_p){
+        ArrayXd guess(p.size());
+    //    calculate initial guess based on undisturbed model
+    //    delta_0(1) = p_sim(1) * logninv(sum(share),0,sigma_p);
+        double sum_share=shares_data.sum();
+        
+        //    creadte lognormal distr
+        boost::math::lognormal lognormDistr(0, sigma_p);
+    //    cout<<boost::math::quantile(lognormDistr, sum_share)<<endl;
+    //    compute the first delta guess
+        guess[0] = (p[0]*boost::math::quantile(lognormDistr, sum_share));
+    //    compute the rest guesses
+        for(int i=1; i<p.size(); ++i){
+            sum_share -= shares_data[i-1];
+            guess[i] = (guess[i-1] + (p[i] - p[i-1])*boost::math::quantile(lognormDistr, sum_share));
+        }
+        return guess;
+    }
 
 }

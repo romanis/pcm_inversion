@@ -65,6 +65,8 @@ namespace pcm_share{
 
     void generate_tasmanian_global_grid(int dim, int n, Eigen::ArrayXXd& grid, Eigen::ArrayXd & weights);
 
+    Eigen::ArrayXd initial_guess(const Eigen::ArrayXd& shares_data, const Eigen::ArrayXd& p, double sigma_p);
+
 
 }
 #endif // __PCM_MARKET_SHARE_H__
