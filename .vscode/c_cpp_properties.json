@@ -7,7 +7,9 @@
                 "~/Documents/eigen/Eigen",
                 "/usr/local/eigen3/include/eigen3/",
                 "/usr/local/TASMANIAN/include",
-                "/"
+                "/",
+                "/usr/include/eigen3",
+                "/usr/include/eigen3"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/g++",
