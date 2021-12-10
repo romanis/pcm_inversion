@@ -19,5 +19,5 @@ ENDIF()
 message("install lib ${CMAKE_INSTALL_LIBDIR}, include ${CMAKE_INSTALL_INCLUDEDIR}")
 
 install(TARGETS market_inversion pcm_market_share
-    LIBRARY DESTINATION /usr/local/lib
-    PUBLIC_HEADER DESTINATION /usr/local/include)
+    LIBRARY DESTINATION "${CMAKE_INSTALL_PREFIX}/lib"
+    PUBLIC_HEADER DESTINATION "${CMAKE_INSTALL_PREFIX}/include")
