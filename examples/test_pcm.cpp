@@ -5,6 +5,7 @@
 #include <nlopt.hpp>
 #include "pcm_market_share.hpp"
 #include "market_inversion.hpp"
+#include "grid_generator.hpp"
 #include "Eigen/Dense"
 #include "Eigen/Core"
 
@@ -28,7 +29,7 @@ int main(){
     Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_x_dim);
     Eigen::ArrayXd weights;
     Eigen::ArrayXXd grid;
-    pcm_share::generate_tasmanian_global_grid(num_x_dim, 6, grid, weights);
+    generate_tasmanian_global_grid(num_x_dim, 6, grid, weights);
     auto un_sh = pcm_share::unc_share(delta_bar, x, p, sigma_p, sigma_x, grid, weights, jacobian);
     while((un_sh < min_asmissible_share).any()){
         for(int i=0; i< num_prod; ++i){

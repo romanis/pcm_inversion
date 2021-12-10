@@ -63,7 +63,6 @@ namespace pcm_share{
      */
     Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p); 
 
-    void generate_tasmanian_global_grid(int dim, int n, Eigen::ArrayXXd& grid, Eigen::ArrayXd & weights);
 
     Eigen::ArrayXd initial_guess(const Eigen::ArrayXd& shares_data, const Eigen::ArrayXd& p, double sigma_p);
 

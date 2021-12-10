@@ -9,7 +9,7 @@
                 "/usr/local/TASMANIAN/include",
                 "/",
                 "/usr/include/eigen3",
-                "/usr/include/eigen3"
+                "${workspaceFolder}/market_share"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/g++",

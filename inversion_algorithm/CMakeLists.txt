@@ -5,7 +5,7 @@ find_package (Eigen3 3.4 REQUIRED NO_MODULE)
 find_package("NLopt")
 
 add_library(market_inversion SHARED ./market_inversion.cpp)
-set_target_properties(market_inversion PROPERTIES PUBLIC_HEADER ./market_inversion.hpp)
+set_target_properties(market_inversion PROPERTIES PUBLIC_HEADER "${ROOT}/inversion_algorithm/market_inversion.hpp")
 
 message("adding target include directory ${ROOT}/market_share")
 
