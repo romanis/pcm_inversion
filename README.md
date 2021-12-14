@@ -69,26 +69,26 @@ unc_share(
 (there is also same names function with a signature without the last argument, which would skip Jacobian computation)
 
 The inputs are:
-- delta_bar - Eigen array of average over population vertical qualities of each product. Has size `N`
-- x - Eigen matrix that has `N` rows, each row containing vlaues of `K` numerical horizontal 
+- `delta_bar` - Eigen array of average over population vertical qualities of each product. Has size `N`
+- `x` - Eigen matrix that has `N` rows, each row containing vlaues of `K` numerical horizontal 
 characteristics of the products (e.g. volume, horsepower, CPU clock, 
 battery of dummies for the manufacturer etc.)
-- p - Eigen array of prices of each product. Has size `N`. It is important that products are sorted 
+- `p` - Eigen array of prices of each product. Has size `N`. It is important that products are sorted 
 in ascending order by their price. It is also important that 
 products with the same price do have hotizontal differences.
-- sigma_p - standard deviation of (log of) price sensitivity. Log of price sensitivity is assumed to be 
+- `sigma_p` - standard deviation of (log of) price sensitivity. Log of price sensitivity is assumed to be 
 distributed normally with zero mean and standard deviation of sigma_p
-- sigma_x - Eigen array of standard deviations of the ideosyncratic preferences for each 
+- `sigma_x` - Eigen array of standard deviations of the ideosyncratic preferences for each 
 horizontal characteristic in population. Has size `K`. Marginal indirect utility (or preference) 
 for horizontal characteristic `i` is assumed to have some distribution parameterized 
 by only scale parameter `sigma_x[i]`. E.g. each horizontal characteristic's preference 
 in population may have normal distribution with mean zero and std  `sigma_x[i]`.
-- grid - Eigen 2 dimensional array that contains draws that numerically 
+- `grid` - Eigen 2 dimensional array that contains draws that numerically 
 integrate out the distribution of ideosyncratic preferences. 
 Has the size `[D; K]` where `D` is the number of draws. One can use any grid generation technique, but
 I recomment Tasmanian Sparse Grids.
-- weights - Eigen array of size `D` that contains the weights of draws in the grid
-- jacobian - Eigen matrix containing the jacobian of predicted matket shares with respect to delta_bar
+- `weights` - Eigen array of size `D` that contains the weights of draws in the grid
+- `jacobian` - Eigen matrix containing the jacobian of predicted matket shares with respect to delta_bar
 
 The output of the function is an Eigen Array that corresponds to the predicted shares of every product.
 
