@@ -60,7 +60,7 @@ unc_share(const Eigen::ArrayXd& delta_bar, const Eigen::MatrixXd& x, const Eigen
 (there is also same names function with a signature without the last argument, which would skip Jacobian computation)
 
 The inputs are:
-- delta_bar - Eigen Array of average over population vertical qualities of each product. Has size ``N_{products}``
+- delta_bar - Eigen Array of average over population vertical qualities of each product. Has size $`N_{products}`$
 
 The output of the function is an Eigen Array that corresponds to the predicted shares of every product.
 
