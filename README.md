@@ -76,6 +76,8 @@ battery of dummies for the manufacturer etc.)
 - p - Eigen array of prices of each product. Has size `N`. It is important that products are sorted 
 in ascending order by their price. It is also important that 
 products with the same price do have hotizontal differences.
+- sigma_p - standard deviation of (log of) price sensitivity. Log of price sensitivity is assumed to be 
+distributed normally with zero mean and standard deviation of sigma_p
 - sigma_x - Eigen array of standard deviations of the ideosyncratic preferences for each 
 horizontal characteristic in population. Has size `K`. Marginal indirect utility (or preference) 
 for horizontal characteristic `i` is assumed to have some distribution parameterized 
