@@ -45,7 +45,7 @@ sudo make install
 If you had Tasmanian library installed, you also have built the example folder `pcm_inversion/example/test_pcm.cpp`. Executable of it is in `pcm_inversion/build/examples/test_pcm`. 
 
 # Quick user guide
-There are two essential libraries that are built by this code: one that computes market shares (along with jecobians)
+There are two essential libraries that are built by this code: one that computes market shares (along with jacobians)
 conditional on structural parameters, the other uses these computations in conjunction with NLopt solver
 to solve MPEC style feasibility problem trying to equate observed market shares and the predicted ones.
 ## Market share computation library
