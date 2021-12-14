@@ -1,5 +1,5 @@
 # What does this code do?
-This code implements methods that compute and invert Pure Charactetistics Model. 
+This code implements methods that compute and invert [Pure Charactetistics Model](https://onlinelibrary.wiley.com/doi/abs/10.1111/j.1468-2354.2007.00459.x). 
 
 # Prerequisites
 ## Software that is essential for the library to compile
@@ -45,6 +45,25 @@ sudo make install
 If you had Tasmanian library installed, you also have built the example folder `pcm_inversion/example/test_pcm.cpp`. Executable of it is in `pcm_inversion/build/examples/test_pcm`. 
 
 # Quick user guide
+There are two essential libraries that are built by this code: one that computes market shares (along with jecobians)
+conditional on structural parameters, the other uses these computations in conjunction with NLopt solver
+to solve MPEC style feasibility problem trying to equate observed market shares and the predicted ones.
+## Market share computation library
+The source is located at `pcm_inversion/market_share`. All functions are put in `pcm_share::` scope and the main function to call is `pcm_share::unc_share` that computes PCM shares conditional on structural parameters. Here is the signature:
+
+```
+Eigen::ArrayXd 
+unc_share(const Eigen::ArrayXd& delta_bar, const Eigen::MatrixXd& x, const Eigen::ArrayXd& p, 
+        double sigma_p, const Eigen::ArrayXd& sigma_x, const Eigen::ArrayXXd& grid, 
+        const Eigen::ArrayXd & weights, Eigen::MatrixXd & jacobian);
+```
+(there is also same names function with a signature without the last argument, which would skip Jacobian computation)
+
+The inputs are:
+- delta_bar - Eigen Array of average over population vertical qualities of each product. Has size $N_{products}$
+
+The output of the function is an Eigen Array that corresponds to the predicted shares of every product.
+
 # Author
 Roman Istomin
 
