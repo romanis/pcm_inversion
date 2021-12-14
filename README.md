@@ -49,18 +49,44 @@ There are two essential libraries that are built by this code: one that computes
 conditional on structural parameters, the other uses these computations in conjunction with NLopt solver
 to solve MPEC style feasibility problem trying to equate observed market shares and the predicted ones.
 ## Market share computation library
-The source is located at `pcm_inversion/market_share`. All functions are put in `pcm_share::` scope and the main function to call is `pcm_share::unc_share` that computes PCM shares conditional on structural parameters. Here is the signature:
+The source is located at `pcm_inversion/market_share`. All functions are put in `pcm_share::` scope and the main function to call is `pcm_share::unc_share` that computes PCM shares in the market with
+`N` products each having `K` characteristics of horizontal differentiation (except for price) 
+conditional on structural parameters. Here is the signature:
 
 ```
 Eigen::ArrayXd 
-unc_share(const Eigen::ArrayXd& delta_bar, const Eigen::MatrixXd& x, const Eigen::ArrayXd& p, 
-        double sigma_p, const Eigen::ArrayXd& sigma_x, const Eigen::ArrayXXd& grid, 
-        const Eigen::ArrayXd & weights, Eigen::MatrixXd & jacobian);
+unc_share(
+    const Eigen::ArrayXd& delta_bar, 
+    const Eigen::MatrixXd& x, 
+    const Eigen::ArrayXd& p, 
+    double sigma_p,
+    const Eigen::ArrayXd& sigma_x, 
+    const Eigen::ArrayXXd& grid, 
+    const Eigen::ArrayXd & weights, 
+    Eigen::MatrixXd & jacobian
+);
 ```
 (there is also same names function with a signature without the last argument, which would skip Jacobian computation)
 
 The inputs are:
-- delta_bar - Eigen Array of average over population vertical qualities of each product. Has size `$N_{products}$`
+- delta_bar - Eigen array of average over population vertical qualities of each product. Has size `N`
+- x - Eigen matrix that has `N` rows, each row containing vlaues of `K` numerical horizontal 
+characteristics of the products (e.g. volume, horsepower, CPU clock, 
+battery of dummies for the manufacturer etc.)
+- p - Eigen array of prices of each product. Has size `N`. It is important that products are sorted 
+in ascending order by their price. It is also important that 
+products with the same price do have hotizontal differences.
+- sigma_x - Eigen array of standard deviations of the ideosyncratic preferences for each 
+horizontal characteristic in population. Has size `K`. Marginal indirect utility (or preference) 
+for horizontal characteristic `i` is assumed to have some distribution parameterized 
+by only scale parameter `sigma_x[i]`. E.g. each horizontal characteristic's preference 
+in population may have normal distribution with mean zero and std  `sigma_x[i]`.
+- grid - Eigen 2 dimensional array that contains draws that numerically 
+integrate out the distribution of ideosyncratic preferences. 
+Has the size `[D; K]` where `D` is the number of draws. One can use any grid generation technique, but
+I recomment Tasmanian Sparse Grids.
+- weights - Eigen array of size `D` that contains the weights of draws in the grid
+- jacobian - Eigen matrix containing the jacobian of predicted matket shares with respect to delta_bar
 
 The output of the function is an Eigen Array that corresponds to the predicted shares of every product.
 
