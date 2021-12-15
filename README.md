@@ -94,7 +94,7 @@ The output of the function is an Eigen Array that corresponds to the predicted s
 
 Next function is important because it produces an initial guess, which is a solution to "unperturbed"
 demand without any idiosyncratic preferences, in other word, vertical qualities that would rationalize 
-observed shares in a pure vertical model [Bresnahan Reiss style](https://www.researchgate.net/profile/Timothy-Bresnahan/publication/4995420_Entry_in_Monopoly_Market/links/0046352cae2d618765000000/Entry-in-Monopoly-Market.pdf)
+observed shares in a pure vertical model [Bresnahan 1987 style](http://homes.chass.utoronto.ca/~jovb/ECO2901/Bresnahan_JIndE87.pdf)
 
 ```
 Eigen::ArrayXd 
