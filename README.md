@@ -114,6 +114,7 @@ The inputs are:
 Roman Istomin
 
 - [github/romanis](https://github.com/romanis)
+- [https://www.linkedin.com/in/roman-istomin/](https://www.linkedin.com/in/roman-istomin/)
 
 # License
 Copyright © 2021, Roman Istomin. 
