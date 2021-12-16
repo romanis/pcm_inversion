@@ -246,6 +246,8 @@ Roman Istomin
 - [github/romanis](https://github.com/romanis)
 - [https://www.linkedin.com/in/roman-istomin/](https://www.linkedin.com/in/roman-istomin/)
 
+# License
+Copyright © 2021, Roman Istomin. 
 
 # Citing 
 If you use this Libraries in work that leads to a publication, I would appreciate it if you would kindly cite Me in your manuscript. Cite Library as something like:
