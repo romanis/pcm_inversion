@@ -15,7 +15,7 @@ using namespace Eigen;
 int main(){
 
     int num_prod = 50, num_x_dim = 4; 
-    double min_asmissible_share = 0.001, sigma_p = 1;
+    double min_admissible_share = 0.001, sigma_p = 1;
     
     Eigen::ArrayXd delta_bar = Eigen::ArrayXd::Zero(num_prod);
     Eigen::ArrayXd p(num_prod);
@@ -31,9 +31,9 @@ int main(){
     Eigen::ArrayXXd grid;
     generate_tasmanian_global_grid(num_x_dim, 6, grid, weights);
     auto un_sh = pcm_share::unc_share(delta_bar, x, p, sigma_p, sigma_x, grid, weights, jacobian);
-    while((un_sh < min_asmissible_share).any()){
+    while((un_sh < min_admissible_share).any()){
         for(int i=0; i< num_prod; ++i){
-            if(un_sh[i] < min_asmissible_share){
+            if(un_sh[i] < min_admissible_share){
                 delta_bar[i] += 0.01*std::abs(delta_bar[0] - delta_bar[num_prod-1]);
             }
         }
@@ -41,7 +41,6 @@ int main(){
     }
     std::cout<<"unc share\n"<<un_sh<<std::endl<<"sum of all shares " <<un_sh.sum()<<std::endl;
 
-    std::vector<double> initial;
     share_inversion::pcm_parameters param(x, p, 2.0, sigma_x, grid, weights, un_sh);
     
     

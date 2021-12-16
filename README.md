@@ -163,8 +163,82 @@ One important constant that is part of `share_inversion::` namespace is `MIN_ADM
 defines smallest share of any product (or outside option) such that current algorithms still reliably invert 
 the shares to get vertical qualities.
 
+# Example
+There is an example folder, here I am going over a code of the example
 
+```
+int num_prod = 50, num_x_dim = 4; 
+double min_admissible_share = 0.001, sigma_p = 1;
+```
+This part sets up the size of the market (50 products), the number of heterogeneity dimensions (4), 
+minimal share of any product that is going to be generated (1e-3) and the standard deviation of log of price sensitivity (1)
 
+```
+Eigen::ArrayXd delta_bar = Eigen::ArrayXd::Zero(num_prod);
+Eigen::ArrayXd p(num_prod);
+Eigen::MatrixXd jacobian;
+```
+This is instantiation of the vertical quality and price arrays and declaration of Jacobian matrix
+
+```
+for(int i = 0; i< num_prod; ++i){
+    delta_bar[i] = i+1;
+    p[i]=pow(i+1, 1.2);
+}
+```
+Setting up the ground truth values of vertical quality of product to ordinal number of the product and 
+the price of each product to be ordinal number to the power 1.2, which models higher margins for 
+more expensive products.
+
+```
+Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_x_dim);
+Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_x_dim);
+Eigen::ArrayXd weights;
+Eigen::ArrayXXd grid;
+```
+Instantiation of arrays of standard deviations of marginal utilities of each heterogeneity dimension to 1, 
+matrix of characteristics of each product to some random values and declaration of the heterogeneity integration grid and weights.
+
+```
+generate_tasmanian_global_grid(num_x_dim, 6, grid, weights);
+```
+Calling helper function to generate Tasmanian sparse grid (and weights) that integrates the distribution of heterogeneity
+with `num_x_dim` dimensions with precision equivalent to 6 points per dimension Kronecker product grid. 
+This is the only function that actually uses Tasmanian library and one can potentially replace it with another 
+grid generation routine and get rid of Tasmanian dependency.
+
+```
+auto un_sh = pcm_share::unc_share(delta_bar, x, p, sigma_p, sigma_x, grid, weights, jacobian);
+while((un_sh < min_admissible_share).any()){
+    for(int i=0; i< num_prod; ++i){
+        if(un_sh[i] < min_admissible_share){
+            delta_bar[i] += 0.01*std::abs(delta_bar[0] - delta_bar[num_prod-1]);
+        }
+    }
+    un_sh = pcm_share::unc_share(delta_bar, x, p, sigma_p, sigma_x, grid, weights, jacobian);
+}
+```
+Computation of the predicted shares of the products given vertical qualities, x, p and other structural parameters. 
+It is followed by a while loop that adjusts the values of vertical qualities to make sure all shares are above the 
+`min_admissible_share` threshold.
+
+```
+share_inversion::pcm_parameters param(x, p, 2.0, sigma_x, grid, weights, un_sh);
+```
+Instantiation of the class member that is binding all the structural parameters of the market
+
+```
+auto eigen_solution = share_inversion::invert_shares(param);
+```
+Inversion of the market shares to get the vertical qualities that rationalize the observed market shares.
+
+```
+Eigen::ArrayX4d sh(num_prod, 4);
+auto shares_at_optimum = pcm_share::unc_share(eigen_solution, x, p, sigma_p, sigma_x, grid, weights, jacobian);
+sh <<shares_at_optimum, un_sh, shares_at_optimum-un_sh, eigen_solution;
+std::cout<<"shares at optimum\n" << sh << std::endl;
+```
+Printint out the solution, its deviations from the ground truth and the shares at optimum
 # Author
 Roman Istomin
 
