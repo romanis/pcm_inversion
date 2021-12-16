@@ -37,7 +37,8 @@ You can leave them there and add these paths to your link path and add the
 include path. 
 
 But it is advisable that you install
-the required files in system path (if you have administrative privilege) by running 
+the required files in system path (if you have administrative privilege) to be able to 
+include and link the libraries from any directory by running 
 ```
 sudo make install
 ```
