@@ -26,10 +26,11 @@ namespace share_inversion{
         double share_equality_tolerances; //!< tolerance with withich we expect the inversion to come to observed shares. default is 1e-8
         double delta_step_tolerance; //!< tolerance to step in delta space. default is 1e-5
         std::vector<double> delta_initial; //!< initial step for the inversion. 
+                                            //!< Highly recommended NOT to provide it because the algorithm has a very good initial guess of its own. Only provide it if you really know what you are doing.
+                                            //!< If not all shares are positive at this initial guess, it will be ignored.
         unsigned max_number_of_function_calls; //!< maximum number of times share predicting function will be called. default 1000
         unsigned number_of_times_function_called = 0;
-        //!< Highly recommended NOT to provide it because the algorithm has a very good initial guess of its own. Only provide it if you really know what you are doing.
-        //!< If not all shares are positive at this initial guess, it will be ignored.
+        
 
 
         pcm_parameters(Eigen::MatrixXd& x, Eigen::ArrayXd &p, double sigma_p, Eigen::ArrayXd &sigma_x, Eigen::ArrayXXd& grid, 
