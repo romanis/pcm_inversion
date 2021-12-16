@@ -49,7 +49,7 @@ There are two essential libraries that are built by this code: one that computes
 conditional on structural parameters, the other uses these computations in conjunction with NLopt solver
 to solve MPEC style feasibility problem trying to equate observed market shares and the predicted ones.
 ## Market share computation library
-The source is located at `pcm_inversion/market_share`. All functions are put in `pcm_share::` scope and the main function to call is `pcm_share::unc_share` that computes PCM shares in the market with
+The source is located at `pcm_inversion/market_share`. All functions are put in `pcm_share::` namespace and the main function to call is `pcm_share::unc_share` that computes PCM shares in the market with
 `N` products each having `K` characteristics of horizontal differentiation (except for price) 
 conditional on structural parameters. Here is the signature:
 
@@ -109,6 +109,9 @@ The inputs are:
 - `shared_data` - Eigen array of shares that each product has in the data
 - `p` - Eigen array of prices of every product. It is important that prices are sorted in ascending order
 - `sigma` - standard deviation of log of price sensitivity
+
+## Share inversion library
+The source is located at `pcm_inversion/market_inversion`. All functions are put in `share_inversion::` namespace.  The main function to call is `share_inversion::invert_shares` 
 
 # Author
 Roman Istomin
