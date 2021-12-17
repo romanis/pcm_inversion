@@ -239,7 +239,18 @@ auto shares_at_optimum = pcm_share::unc_share(eigen_solution, x, p, sigma_p, sig
 sh <<shares_at_optimum, un_sh, shares_at_optimum-un_sh, eigen_solution;
 std::cout<<"shares at optimum\n" << sh << std::endl;
 ```
-Printint out the solution, its deviations from the ground truth and the shares at optimum
+Printing out the solution, its deviations from the ground truth and the shares at optimum
+
+# Unit tests
+Each library's folder has unit testing file that ends with `_test.cpp`. It uses [Google test suite](https://google.github.io/googletest/quickstart-cmake.html)
+
+One can poke through these tests to check the usage of every function in the libraries and potential corner cases that an author had thought about.
+
+To run unit tests, after building the libraries with `make` command, go to the respective folder inside `build/` folder, e.g. `build/market_share` and 
+run command
+```
+ctest
+```
 # Author
 Roman Istomin
 
