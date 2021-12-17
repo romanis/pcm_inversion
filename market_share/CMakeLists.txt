@@ -15,3 +15,25 @@ set_target_properties(pcm_market_share PROPERTIES PUBLIC_HEADER "${ROOT}/market_
 
 target_link_libraries(pcm_market_share Eigen3::Eigen )
 target_link_libraries(pcm_market_share ${Boost_LIBRARIES})
+
+
+enable_testing()
+
+add_executable(
+    market_share_test
+    market_share_test.cpp
+)
+
+target_include_directories(market_share_test PUBLIC ${Boost_INCLUDE_DIR} )
+target_include_directories(market_share_test PUBLIC ${Eigen3_INCLUDE_DIR} )
+
+target_link_libraries(
+    market_share_test
+    gtest_main
+    Eigen3::Eigen
+    ${Boost_LIBRARIES}
+    pcm_market_share
+)
+
+include(GoogleTest)
+gtest_discover_tests(market_share_test)

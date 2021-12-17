@@ -140,7 +140,7 @@ struct pcm_parameters{
         Eigen::ArrayXd data_shares; //!< Observed shares of products. Size n_products. Should sum up to (strictly) less than 1
         int func_evals = 0, jacobian_evals = 0; //!< counters of the time we have called the function with and without jacobian
         nlopt::algorithm nlopt_algo; //!< one of the algorithms from NLOPT library. default is nlopt::LD_SLSQP
-        double share_equality_tolerances; //!< tolerance with withich we expect the inversion to come to observed shares. default is 1e-8
+        double share_equality_tolerances; //!< tolerance with which we expect the inversion to come to observed shares. default is 1e-8
         double delta_step_tolerance; //!< tolerance to step in delta space. default is 1e-5
         std::vector<double> delta_initial; //!< initial step for the inversion. 
                                             //!< Highly recommended NOT to provide it because the algorithm has a very good initial guess of its own. Only provide it if you really know what you are doing.
