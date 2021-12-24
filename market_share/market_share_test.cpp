@@ -109,6 +109,40 @@ TEST(InitialGuessTest, Exponentially_Distributed_shares) {
     for(int i=0; i<num_prod-1; ++i){
         ASSERT_LE(initial_guess[i], initial_guess[i+1]);
     }
-    
+}
 
+TEST(CondShareTest, Simple_Computation) {
+    int num_prod = 50;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+
+    auto shares = pcm_share::cond_share(deltas, p, 1.0);
+    ASSERT_TRUE((shares > 0).all());
+}
+
+TEST(CondShareTest, One_product_with_equal_quality) {
+    int num_prod = 50;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+    deltas[4] = deltas[3]-1;
+
+    auto shares = pcm_share::cond_share(deltas, p, 1.0);
+    ASSERT_EQ(shares[4], 0);
+    for(int i = 0; i< num_prod; ++i){
+        if(i != 4){
+            ASSERT_GE(shares[i], 0);
+        }
+    }
 }

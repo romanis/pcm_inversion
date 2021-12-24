@@ -261,13 +261,15 @@ namespace pcm_share{
         Eigen::ArrayXd endpoints = ArrayXd::Zero(delta.size()+1);
     //    first endpoint is delta(0)/p(0)
         endpoints[0] = (delta[0]/p[0]);
-    //    the other endpoints can be calculated diffrently
 
+        // TODO: check here which products have positive market shares, otherwise tests fail
+    //    the other endpoints can be calculated diffrently
         endpoints(seq(1, last-1)) = (delta(seq(1, last)) - delta(seq(0, last-1)) ) / ( p(seq(1, last)) - p(seq(0, last-1)) ) ; // note that the last endpoint stays zero
 
         
     //    need to check that endpoints are sorted in reverse order
         ArrayXd ep_tmp(endpoints);
+        std::cout<<endpoints<<endl;
         reverse(ep_tmp.begin(), ep_tmp.end());
         if(!is_sorted(ep_tmp.begin(), ep_tmp.end())){
             throw runtime_error("endpoints are not sorted poperly. check which goods go to conditional market share");
