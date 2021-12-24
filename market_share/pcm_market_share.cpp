@@ -16,6 +16,34 @@ using namespace std;
 using namespace Eigen;
 using Eigen::indexing::last;
 
+std::vector<int> index_positive_shares(const ArrayXd& delta, const ArrayXd & p){
+    vector<int> ind;
+    for(int j=0; j<delta.size(); ++j){
+//            calculate upper bound on price elasticity of people who will choose product j
+        double min_upper, max_lower;
+        if(j>0){
+            ArrayXd u_alpha = (delta[j] - delta(seq(0, j-1))) / (p[j] - p(seq(0, j-1)));
+            min_upper = std::min(u_alpha.minCoeff(), delta[j]/p[j]);
+        }else{
+            min_upper = delta[j]/p[j];
+        }
+        
+        if(j < delta.size()-1){
+            ArrayXd l_alpha = (delta[j] - delta(seq(j+1, last))) / (p[j] - p(seq(j+1, last)));
+            max_lower = std::max(l_alpha.maxCoeff(), 0.0);
+        }else{
+            max_lower = 0;
+        }
+        
+        
+//            if there is slack between up and lower, it has positive market share
+        if(min_upper > max_lower){
+            ind.push_back(j);
+        }            
+    }
+    return ind;
+}
+
 namespace pcm_share{
     Eigen::ArrayXd unc_share(const ArrayXd& delta_bar, const MatrixXd& x, const ArrayXd& p, double sigma_p, const ArrayXd& sigma_x, const ArrayXXd& grid, const ArrayXd & weights, MatrixXd & jacobian)
     {
@@ -47,31 +75,7 @@ namespace pcm_share{
     //        delta_hat = delta + sigma_x*x*nu(i,:);
             ArrayXd delta_cond = delta_bar + (x*(sigma_x.transpose()*grid.row(draw)).matrix().transpose()).array();
     //        determine indexes of goods that have positive market shares
-            vector<int> ind;
-            for(int j=0; j<delta_bar.size(); ++j){
-    //            calculate upper bound on price elasticity of people who will choose product j
-                double min_upper, max_lower;
-                if(j>0){
-                    ArrayXd u_alpha = (delta_cond[j] - delta_cond(seq(0, j-1))) / (p[j] - p(seq(0, j-1)));
-                    min_upper = std::min(u_alpha.minCoeff(), delta_cond[j]/p[j]);
-                }else{
-                    min_upper = delta_cond[j]/p[j];
-                }
-                
-                if(j < delta_bar.size()-1){
-                    ArrayXd l_alpha = (delta_cond[j] - delta_cond(seq(j+1, last))) / (p[j] - p(seq(j+1, last)));
-                    max_lower = std::max(l_alpha.maxCoeff(), 0.0);
-                }else{
-                    max_lower = 0;
-                }
-                
-                
-    //            if there is slack between up and lower, it has positive market share
-                if(min_upper > max_lower){
-                    ind.push_back(j);
-                }
-                
-            }
+            vector<int> ind = index_positive_shares(delta_cond, p);
 
     //        if there is a product with positive market share
             if(ind.size() > 0){
@@ -81,7 +85,7 @@ namespace pcm_share{
                 ArrayXd p_positive = p(ind);
                 
                 
-                ArrayXd shares_tmp = cond_share(delta_positive,p_positive, sigma_p, jacobian_tmp);
+                ArrayXd shares_tmp = cond_share(delta_positive,p_positive, sigma_p, jacobian_tmp, false);
 
     //            add shares to corresponding dimensions of un_share
                 int num_share=0, num_i=0, num_j=0;
@@ -128,31 +132,8 @@ namespace pcm_share{
     //        delta_hat = delta + sigma_x*x*nu(i,:);
             ArrayXd delta_cond = delta_bar + (x*(sigma_x.transpose()*grid.row(draw)).matrix().transpose()).array();
     //        determine indexes of goods that have positive market shares
-            vector<int> ind;
-            for(int j=0; j<delta_bar.size(); ++j){
-    //            calculate upper bound on price elasticity of people who will choose product j
-                double min_upper, max_lower;
-                if(j>0){
-                    ArrayXd u_alpha = (delta_cond[j] - delta_cond(seq(0, j-1))) / (p[j] - p(seq(0, j-1)));
-                    min_upper = std::min(u_alpha.minCoeff(), delta_cond[j]/p[j]);
-                }else{
-                    min_upper = delta_cond[j]/p[j];
-                }
-                
-                if(j < delta_bar.size()-1){
-                    ArrayXd l_alpha = (delta_cond[j] - delta_cond(seq(j+1, last))) / (p[j] - p(seq(j+1, last)));
-                    max_lower = std::max(l_alpha.maxCoeff(), 0.0);
-                }else{
-                    max_lower = 0;
-                }
-                
-                
-    //            if there is slack between up and lower, it has positive market share
-                if(min_upper > max_lower){
-                    ind.push_back(j);
-                }
-                
-            }
+            vector<int> ind = index_positive_shares(delta_cond, p);
+
 
     //        if there is a product with positive market share
             if(ind.size() > 0){
@@ -161,7 +142,7 @@ namespace pcm_share{
                 ArrayXd p_positive = p(ind);
                 
                 
-                ArrayXd shares_tmp = cond_share(delta_positive,p_positive, sigma_p);
+                ArrayXd shares_tmp = cond_share(delta_positive,p_positive, sigma_p, false);
 
     //            add shares to corresponding dimensions of un_share
                 int num_share=0, num_i=0, num_j=0;
@@ -178,7 +159,7 @@ namespace pcm_share{
     }
 
 
-    Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p, Eigen::MatrixXd & jacobian){
+    Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p, Eigen::MatrixXd & jacobian,  bool check_positive_shares){
     //    this function calculates conditional on heterogeneity market shares of pure vertical model
         Eigen::ArrayXd con_share = ArrayXd::Zero(delta.size());
     //    make sure prices are sorted
@@ -189,14 +170,26 @@ namespace pcm_share{
         if(delta.size() != p.size()){
             throw runtime_error("price vector and delta sizes differ");
         }
+
+        vector<int> ind;
+        if(check_positive_shares){
+            ind = index_positive_shares(delta, p);
+        }else{
+            for(int i = 1; i<delta.size(); i++){
+                ind.push_back(i);
+            }
+        }
+        Eigen::ArrayXd positive_shares = ArrayXd::Zero(ind.size());
+        Eigen::ArrayXd delta_positive = delta(ind);
+        Eigen::ArrayXd p_positive = p(ind);
         
     //    compute points of being indifferent
-        Eigen::ArrayXd endpoints = ArrayXd::Zero(delta.size()+1);
+        Eigen::ArrayXd endpoints = ArrayXd::Zero(positive_shares.size()+1);
     //    first endpoint is delta(0)/p(0)
         endpoints[0] = (delta[0]/p[0]);
     //    the other endpoints can be calculated diffrently
 
-        endpoints(seq(1, last-1)) = (delta(seq(1, last)) - delta(seq(0, last-1)) ) / ( p(seq(1, last)) - p(seq(0, last-1)) ) ; // note that the last endpoint stays zero
+        endpoints(seq(1, last-1)) = (delta_positive(seq(1, last)) - delta_positive(seq(0, last-1)) ) / ( p_positive(seq(1, last)) - p_positive(seq(0, last-1)) ) ; // note that the last endpoint stays zero
 
         
     //    need to check that endpoints are sorted in reverse order
@@ -210,30 +203,31 @@ namespace pcm_share{
         boost::math::lognormal lognormDistr(0, sigma_p);
     //    calculate market shares
         double previous_cdf = boost::math::cdf(lognormDistr,endpoints[0]);
-        for(int i=0; i< delta.size(); ++i){
+        for(int i=0; i< ind.size(); ++i){
             double current_cdf = boost::math::cdf(lognormDistr,endpoints[i+1]);
-            con_share[i] = previous_cdf - current_cdf;
+            positive_shares[i] = previous_cdf - current_cdf;
             previous_cdf = current_cdf;
         }
+        con_share(ind) = positive_shares;
         
     //    calculate jacobian
 
         {
             jacobian = MatrixXd::Zero(delta.size(), delta.size());
     //        if only one product, simple
-            if(delta.size() == 1){
-                jacobian(0,0) = (boost::math::pdf(lognormDistr, endpoints[0]))/p[0];
+            if(ind.size() == 1){
+                jacobian(ind[0],ind[0]) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
     //            cout<<"jacobian "<<jacobian[0][0]<<endl;
                 
             }
             else{
                 
     //            hardcode derivatives of 1,1 1,2 and end,end-1 and end,end
-                jacobian(0,0) = (boost::math::pdf(lognormDistr, endpoints[0]))/p[0];
+                jacobian(ind[0],ind[0]) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
     //            cout<< "size of jacobian "<< jacobian.size()<<endl;
     //            all the rest calculate algirithmically
-                for(int i=1; i<delta.size(); ++i){
-                    double val = (boost::math::pdf(lognormDistr, endpoints[i]))/(p[i]  -p[i-1]);
+                for(int i=1; i<ind.size(); ++i){
+                    double val = (boost::math::pdf(lognormDistr, endpoints[i]))/(p_positive[i]  -p_positive[i-1]);
                     jacobian(i,i-1) -= val;
                     jacobian(i-1,i) -= val;
                     jacobian(i,i)   += val;
@@ -245,7 +239,7 @@ namespace pcm_share{
     }
 
 
-    Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p){
+    Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p,  bool check_positive_shares){
     //    this function calculates conditional on heterogeneity market shares of pure vertical model
         Eigen::ArrayXd con_share = ArrayXd::Zero(delta.size());
     //    make sure prices are sorted
@@ -256,20 +250,30 @@ namespace pcm_share{
         if(delta.size() != p.size()){
             throw runtime_error("price vector and delta sizes differ");
         }
+
+        vector<int> ind;
+        if(check_positive_shares){
+            ind = index_positive_shares(delta, p);
+        }else{
+            for(int i = 1; i<delta.size(); i++){
+                ind.push_back(i);
+            }
+        }
+        Eigen::ArrayXd positive_shares = ArrayXd::Zero(ind.size());
+        Eigen::ArrayXd delta_positive = delta(ind);
+        Eigen::ArrayXd p_positive = p(ind);
         
     //    compute points of being indifferent
-        Eigen::ArrayXd endpoints = ArrayXd::Zero(delta.size()+1);
+        Eigen::ArrayXd endpoints = ArrayXd::Zero(positive_shares.size()+1);
     //    first endpoint is delta(0)/p(0)
         endpoints[0] = (delta[0]/p[0]);
-
-        // TODO: check here which products have positive market shares, otherwise tests fail
     //    the other endpoints can be calculated diffrently
-        endpoints(seq(1, last-1)) = (delta(seq(1, last)) - delta(seq(0, last-1)) ) / ( p(seq(1, last)) - p(seq(0, last-1)) ) ; // note that the last endpoint stays zero
+
+        endpoints(seq(1, last-1)) = (delta_positive(seq(1, last)) - delta_positive(seq(0, last-1)) ) / ( p_positive(seq(1, last)) - p_positive(seq(0, last-1)) ) ; // note that the last endpoint stays zero
 
         
     //    need to check that endpoints are sorted in reverse order
         ArrayXd ep_tmp(endpoints);
-        std::cout<<endpoints<<endl;
         reverse(ep_tmp.begin(), ep_tmp.end());
         if(!is_sorted(ep_tmp.begin(), ep_tmp.end())){
             throw runtime_error("endpoints are not sorted poperly. check which goods go to conditional market share");
@@ -279,11 +283,12 @@ namespace pcm_share{
         boost::math::lognormal lognormDistr(0, sigma_p);
     //    calculate market shares
         double previous_cdf = boost::math::cdf(lognormDistr,endpoints[0]);
-        for(int i=0; i< delta.size(); ++i){
+        for(int i=0; i< ind.size(); ++i){
             double current_cdf = boost::math::cdf(lognormDistr,endpoints[i+1]);
-            con_share[i] = previous_cdf - current_cdf;
+            positive_shares[i] = previous_cdf - current_cdf;
             previous_cdf = current_cdf;
         }
+        con_share(ind) = positive_shares;
         
         return con_share;
     }

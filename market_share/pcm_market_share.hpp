@@ -49,9 +49,10 @@ namespace pcm_share{
      * @param p prices of products
      * @param sigma_p standard deviation of the price coefficient
      * @param jacobian matrix of jacobian with respect to deltas
+     * @param check_positive_shares flag to check if all the shares are positive conditional on deltas and prices
      * @return std::vector<double> 
      */
-    Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p, Eigen::MatrixXd & jacobian ); 
+    Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p, Eigen::MatrixXd & jacobian, bool check_positive_shares = true); 
 
     /**
      * @brief computes market share of vertical model conditional on draw of heterogeneity without jacobian
@@ -59,9 +60,10 @@ namespace pcm_share{
      * @param delta vertical qualities of the products
      * @param p prices of products
      * @param sigma_p standard deviation of the price coefficient
+     * @param check_positive_shares flag to check if all the shares are positive conditional on deltas and prices
      * @return std::vector<double> 
      */
-    Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p); 
+    Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p, bool check_positive_shares = true); 
 
 
     Eigen::ArrayXd initial_guess(const Eigen::ArrayXd& shares_data, const Eigen::ArrayXd& p, double sigma_p);
