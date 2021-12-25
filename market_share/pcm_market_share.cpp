@@ -186,7 +186,7 @@ namespace pcm_share{
     //    compute points of being indifferent
         Eigen::ArrayXd endpoints = ArrayXd::Zero(positive_shares.size()+1);
     //    first endpoint is delta(0)/p(0)
-        endpoints[0] = (delta[0]/p[0]);
+        endpoints[0] = (delta_positive[0]/p_positive[0]);
     //    the other endpoints can be calculated diffrently
 
         endpoints(seq(1, last-1)) = (delta_positive(seq(1, last)) - delta_positive(seq(0, last-1)) ) / ( p_positive(seq(1, last)) - p_positive(seq(0, last-1)) ) ; // note that the last endpoint stays zero
@@ -199,9 +199,9 @@ namespace pcm_share{
             throw runtime_error("endpoints are not sorted poperly. check which goods go to conditional market share");
         }
         // cout<<" endpoints \n" << endpoints<<endl;
-    //    creadte lognormal distr
+        //    creadte lognormal distr
         boost::math::lognormal lognormDistr(0, sigma_p);
-    //    calculate market shares
+        //    calculate market shares
         double previous_cdf = boost::math::cdf(lognormDistr,endpoints[0]);
         for(int i=0; i< ind.size(); ++i){
             double current_cdf = boost::math::cdf(lognormDistr,endpoints[i+1]);
@@ -210,30 +210,32 @@ namespace pcm_share{
         }
         con_share(ind) = positive_shares;
         
-    //    calculate jacobian
+        //    calculate jacobian
 
         {
             jacobian = MatrixXd::Zero(delta.size(), delta.size());
-    //        if only one product, simple
+            Eigen::MatrixXd jacobian_positive = MatrixXd::Zero(ind.size(), ind.size());
+        //        if only one product, simple
             if(ind.size() == 1){
-                jacobian(ind[0],ind[0]) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
-    //            cout<<"jacobian "<<jacobian[0][0]<<endl;
+                jacobian_positive(ind[0],ind[0]) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
+        //            cout<<"jacobian "<<jacobian[0][0]<<endl;
                 
             }
             else{
                 
-    //            hardcode derivatives of 1,1 1,2 and end,end-1 and end,end
-                jacobian(ind[0],ind[0]) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
-    //            cout<< "size of jacobian "<< jacobian.size()<<endl;
-    //            all the rest calculate algirithmically
+        //            hardcode derivatives of 1,1 1,2 and end,end-1 and end,end
+                jacobian_positive(ind[0],ind[0]) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
+        //            cout<< "size of jacobian "<< jacobian.size()<<endl;
+        //            all the rest calculate algirithmically
                 for(int i=1; i<ind.size(); ++i){
                     double val = (boost::math::pdf(lognormDistr, endpoints[i]))/(p_positive[i]  -p_positive[i-1]);
-                    jacobian(i,i-1) -= val;
-                    jacobian(i-1,i) -= val;
-                    jacobian(i,i)   += val;
-                    jacobian(i-1, i-1) += val;
+                    jacobian_positive(i,i-1) -= val;
+                    jacobian_positive(i-1,i) -= val;
+                    jacobian_positive(i,i)   += val;
+                    jacobian_positive(i-1, i-1) += val;
                 }
             }
+            jacobian(ind,ind) = jacobian_positive;
         }
         return con_share;
     }
@@ -266,7 +268,7 @@ namespace pcm_share{
     //    compute points of being indifferent
         Eigen::ArrayXd endpoints = ArrayXd::Zero(positive_shares.size()+1);
     //    first endpoint is delta(0)/p(0)
-        endpoints[0] = (delta[0]/p[0]);
+        endpoints[0] = (delta_positive[0]/p_positive[0]);
     //    the other endpoints can be calculated diffrently
 
         endpoints(seq(1, last-1)) = (delta_positive(seq(1, last)) - delta_positive(seq(0, last-1)) ) / ( p_positive(seq(1, last)) - p_positive(seq(0, last-1)) ) ; // note that the last endpoint stays zero

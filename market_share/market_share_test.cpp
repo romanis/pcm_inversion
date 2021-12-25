@@ -146,6 +146,7 @@ TEST(CondShareTest, One_product_with_equal_quality) {
         }
     }
 }
+
 TEST(CondShareTest, One_product_with_equal_quality_no_jacobian) {
     int num_prod = 50;
     Eigen::ArrayXd p(num_prod);
@@ -164,4 +165,105 @@ TEST(CondShareTest, One_product_with_equal_quality_no_jacobian) {
             ASSERT_GE(shares[i], 0);
         }
     }
+}
+
+TEST(CondShareTest, first_product_zero_share_low_delta) {
+    int num_prod = 50;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+    deltas[0] = deltas[1]-10;
+    auto shares = pcm_share::cond_share(deltas, p, 1.0, true);
+    ASSERT_EQ(shares[0], 0);
+    for(int i = 0; i< num_prod; ++i){
+        if(i != 0){
+            ASSERT_GE(shares[i], 0);
+        }
+    }
+}
+
+TEST(CondShareTest, first_product_zero_share_high_price) {
+    int num_prod = 50;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+    p[0] = p[0]+1;
+    auto shares = pcm_share::cond_share(deltas, p, 1.0, true);
+    ASSERT_EQ(shares[0], 0);
+    for(int i = 0; i< num_prod; ++i){
+        if(i != 0){
+            ASSERT_GE(shares[i], 0);
+        }
+    }
+}
+
+
+TEST(CondShareTest, last_product_zero_share_low_delta) {
+    int num_prod = 50;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+    deltas[num_prod-1] = deltas[num_prod-2];
+    auto shares = pcm_share::cond_share(deltas, p, 1.0, true);
+    ASSERT_EQ(shares[num_prod-1], 0);
+    for(int i = 0; i< num_prod; ++i){
+        if(i != num_prod-1){
+            ASSERT_GE(shares[i], 0);
+        }
+    }
+}
+
+TEST(CondShareTest, last_product_zero_share_high_price) { /// this does not increase the price of the highest quality product since highest quality product will always have positive share
+    int num_prod = 50;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+    p[num_prod-2] = p[num_prod-2]+1;
+    auto shares = pcm_share::cond_share(deltas, p, 1.0, true);
+    ASSERT_EQ(shares[num_prod-2], 0);
+    for(int i = 0; i< num_prod; ++i){
+        if(i != num_prod-2){
+            ASSERT_GE(shares[i], 0);
+        }
+    }
+}
+
+TEST(CondShareTest, first_product_zero_share_zero_jacobian) {
+    int num_prod = 5;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+    deltas[0] = deltas[1]-10;
+    MatrixXd jacobian, jacobian1;
+    auto shares = pcm_share::cond_share(deltas, p, 1.0, jacobian, true);
+    std::cout<<shares<<std::endl;
+    std::cout<<jacobian<<std::endl;
+    deltas[1] += 1e-5;
+    auto shares1 = pcm_share::cond_share(deltas, p, 1.0, jacobian1, true);
+    std::cout<<(shares1 - shares)*1e5<<std::endl;
 }
