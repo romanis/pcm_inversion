@@ -217,14 +217,14 @@ namespace pcm_share{
             Eigen::MatrixXd jacobian_positive = MatrixXd::Zero(ind.size(), ind.size());
         //        if only one product, simple
             if(ind.size() == 1){
-                jacobian_positive(ind[0],ind[0]) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
+                jacobian_positive(0,0) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
         //            cout<<"jacobian "<<jacobian[0][0]<<endl;
                 
             }
             else{
                 
         //            hardcode derivatives of 1,1 1,2 and end,end-1 and end,end
-                jacobian_positive(ind[0],ind[0]) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
+                jacobian_positive(0,0) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
         //            cout<< "size of jacobian "<< jacobian.size()<<endl;
         //            all the rest calculate algirithmically
                 for(int i=1; i<ind.size(); ++i){

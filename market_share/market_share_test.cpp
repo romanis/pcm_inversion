@@ -248,6 +248,28 @@ TEST(CondShareTest, last_product_zero_share_high_price) { /// this does not incr
     }
 }
 
+TEST(CondShareTest, plain_jacobian_correctness) {
+    int num_prod = 5;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+    MatrixXd jacobian, jacobian1;
+    auto shares = pcm_share::cond_share(deltas, p, 1.0, jacobian, true);
+    for(int i = 0; i< num_prod; ++i){
+        auto new_deltas = deltas;
+        new_deltas[i] += 1e-6;
+        auto shares1 = pcm_share::cond_share(new_deltas, p, 1.0, jacobian1, true);
+        for(int j = 0; j< num_prod; ++j){
+            ASSERT_LE(abs(((shares1 - shares)*1e6)[j] - jacobian(i,j)), 1e-5);
+        }
+    }
+}
+
 TEST(CondShareTest, first_product_zero_share_zero_jacobian) {
     int num_prod = 5;
     Eigen::ArrayXd p(num_prod);
@@ -261,9 +283,12 @@ TEST(CondShareTest, first_product_zero_share_zero_jacobian) {
     deltas[0] = deltas[1]-10;
     MatrixXd jacobian, jacobian1;
     auto shares = pcm_share::cond_share(deltas, p, 1.0, jacobian, true);
-    std::cout<<shares<<std::endl;
-    std::cout<<jacobian<<std::endl;
-    deltas[1] += 1e-5;
-    auto shares1 = pcm_share::cond_share(deltas, p, 1.0, jacobian1, true);
-    std::cout<<(shares1 - shares)*1e5<<std::endl;
+    for(int i = 0; i< num_prod; ++i){
+        auto new_deltas = deltas;
+        new_deltas[i] += 1e-6;
+        auto shares1 = pcm_share::cond_share(new_deltas, p, 1.0, jacobian1, true);
+        for(int j = 0; j< num_prod; ++j){
+            ASSERT_LE(abs(((shares1 - shares)*1e6)[j] - jacobian(i,j)), 1e-5);
+        }
+    }
 }
