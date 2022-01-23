@@ -292,3 +292,25 @@ TEST(CondShareTest, first_product_zero_share_zero_jacobian) {
         }
     }
 }
+
+TEST(UnconditionalShareTest, Simple_Computation) {
+    int num_prod = 50;
+    int num_dim = 5;
+    int num_draws = 1000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    std::cout<<grid({0,1,2,3}, all)<<endl;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+
+    auto shares = pcm_share::cond_share(deltas, p, 1.0);
+    ASSERT_TRUE((shares > 0).all());
+}
