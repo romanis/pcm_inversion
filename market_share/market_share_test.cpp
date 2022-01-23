@@ -1,6 +1,7 @@
-#include <gtest/gtest.h>
+#include "gtest/gtest.h"
 #include "pcm_market_share.hpp"
 #include "Eigen/Dense"
+#include "Eigen/Core"
 #include <boost/random.hpp>
 #include <iostream>
 
@@ -187,6 +188,43 @@ TEST(CondShareTest, first_product_zero_share_low_delta) {
     }
 }
 
+TEST(CondShareTest, first_product_the_only_positive_share) {
+    int num_prod = 50;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+    deltas[0] = num_prod + 1;
+    auto shares = pcm_share::cond_share(deltas, p, 1.0, true);
+    ASSERT_GT(shares[0], 0);
+    for(int i = 1; i< num_prod; ++i){
+        ASSERT_GE(shares[i], 0);
+    }
+}
+
+TEST(CondShareTest, second_product_the_only_positive_share) {
+    int num_prod = 50;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+    deltas[1] = num_prod + 1;
+    auto shares = pcm_share::cond_share(deltas, p, 1.0, true);
+    ASSERT_GT(shares[1], 0);
+    ASSERT_EQ(shares[0], 0);
+    for(int i = 2; i< num_prod; ++i){
+        ASSERT_GE(shares[i], 0);
+    }
+}
+
 TEST(CondShareTest, first_product_zero_share_high_price) {
     int num_prod = 50;
     Eigen::ArrayXd p(num_prod);
@@ -294,7 +332,7 @@ TEST(CondShareTest, first_product_zero_share_zero_jacobian) {
 }
 
 TEST(UnconditionalShareTest, Simple_Computation) {
-    int num_prod = 50;
+    int num_prod = 25;
     int num_dim = 5;
     int num_draws = 1000;
     Eigen::ArrayXd p(num_prod);
@@ -303,14 +341,14 @@ TEST(UnconditionalShareTest, Simple_Computation) {
     Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
     Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
     Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
-    std::cout<<grid({0,1,2,3}, all)<<endl;
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
 
     // fill prices and shares
     for(int i = 1; i<= num_prod; ++i){
-        p[i-1] = pow(i, 1.1);
+        p[i-1] = pow(i, 1.9);
         deltas[i-1] = i;
     }
 
-    auto shares = pcm_share::cond_share(deltas, p, 1.0);
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights);
     ASSERT_TRUE((shares > 0).all());
 }

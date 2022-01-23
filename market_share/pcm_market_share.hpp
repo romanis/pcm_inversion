@@ -17,7 +17,7 @@ namespace pcm_share{
      * @param p vector of prices size Nx1
      * @param sigma_p standard deviation of log of price sensitivity
      * @param sigma_x vector of standard deviation of each horizontal differentiation size K.
-     * @param jacobian jacibian of the system with respect to deltas size NxN
+     * @param jacobian jacobian of the system with respect to deltas size NxN
      * @param grid the grid to integrate with respect to draws of heterogeneity. size DxK where D is the size of the number of draws 
      * @param weights weights of each point in  grid size K 
      * @return std::vector<double> 

@@ -35,7 +35,6 @@ std::vector<int> index_positive_shares(const ArrayXd& delta, const ArrayXd & p){
             max_lower = 0;
         }
         
-        
 //            if there is slack between up and lower, it has positive market share
         if(min_upper > max_lower){
             ind.push_back(j);
@@ -187,7 +186,7 @@ namespace pcm_share{
         Eigen::ArrayXd endpoints = ArrayXd::Zero(positive_shares.size()+1);
     //    first endpoint is delta(0)/p(0)
         endpoints[0] = (delta_positive[0]/p_positive[0]);
-    //    the other endpoints can be calculated diffrently
+    //    the other endpoints can be calculated differently
 
         endpoints(seq(1, last-1)) = (delta_positive(seq(1, last)) - delta_positive(seq(0, last-1)) ) / ( p_positive(seq(1, last)) - p_positive(seq(0, last-1)) ) ; // note that the last endpoint stays zero
 
@@ -196,10 +195,10 @@ namespace pcm_share{
         ArrayXd ep_tmp(endpoints);
         reverse(ep_tmp.begin(), ep_tmp.end());
         if(!is_sorted(ep_tmp.begin(), ep_tmp.end())){
-            throw runtime_error("endpoints are not sorted poperly. check which goods go to conditional market share");
+            throw runtime_error("endpoints are not sorted properly. check which goods go to conditional market share");
         }
         // cout<<" endpoints \n" << endpoints<<endl;
-        //    creadte lognormal distr
+        //    create lognormal distr
         boost::math::lognormal lognormDistr(0, sigma_p);
         //    calculate market shares
         double previous_cdf = boost::math::cdf(lognormDistr,endpoints[0]);
@@ -226,7 +225,7 @@ namespace pcm_share{
         //            hardcode derivatives of 1,1 1,2 and end,end-1 and end,end
                 jacobian_positive(0,0) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
         //            cout<< "size of jacobian "<< jacobian.size()<<endl;
-        //            all the rest calculate algirithmically
+        //            all the rest calculate algorithmically
                 for(int i=1; i<ind.size(); ++i){
                     double val = (boost::math::pdf(lognormDistr, endpoints[i]))/(p_positive[i]  -p_positive[i-1]);
                     jacobian_positive(i,i-1) -= val;
@@ -257,7 +256,7 @@ namespace pcm_share{
         if(check_positive_shares){
             ind = index_positive_shares(delta, p);
         }else{
-            for(int i = 1; i<delta.size(); i++){
+            for(int i = 0; i<delta.size(); i++){
                 ind.push_back(i);
             }
         }
@@ -269,7 +268,7 @@ namespace pcm_share{
         Eigen::ArrayXd endpoints = ArrayXd::Zero(positive_shares.size()+1);
     //    first endpoint is delta(0)/p(0)
         endpoints[0] = (delta_positive[0]/p_positive[0]);
-    //    the other endpoints can be calculated diffrently
+    //    the other endpoints can be calculated differently
 
         endpoints(seq(1, last-1)) = (delta_positive(seq(1, last)) - delta_positive(seq(0, last-1)) ) / ( p_positive(seq(1, last)) - p_positive(seq(0, last-1)) ) ; // note that the last endpoint stays zero
 
@@ -278,10 +277,10 @@ namespace pcm_share{
         ArrayXd ep_tmp(endpoints);
         reverse(ep_tmp.begin(), ep_tmp.end());
         if(!is_sorted(ep_tmp.begin(), ep_tmp.end())){
-            throw runtime_error("endpoints are not sorted poperly. check which goods go to conditional market share");
+            throw runtime_error("endpoints are not sorted properly. check which goods go to conditional market share");
         }
         // cout<<" endpoints \n" << endpoints<<endl;
-    //    creadte lognormal distr
+    //    create lognormal distr
         boost::math::lognormal lognormDistr(0, sigma_p);
     //    calculate market shares
         double previous_cdf = boost::math::cdf(lognormDistr,endpoints[0]);
@@ -303,7 +302,7 @@ namespace pcm_share{
     //    delta_0(1) = p_sim(1) * logninv(sum(share),0,sigma_p);
         double sum_share=shares_data.sum();
         
-        //    creadte lognormal distr
+        //    create lognormal distr
         boost::math::lognormal lognormDistr(0, sigma_p);
     //    cout<<boost::math::quantile(lognormDistr, sum_share)<<endl;
     //    compute the first delta guess
