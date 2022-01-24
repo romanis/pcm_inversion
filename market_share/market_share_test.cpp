@@ -206,6 +206,48 @@ TEST(CondShareTest, first_product_the_only_positive_share) {
     }
 }
 
+TEST(CondShareTest, middle_product_the_only_positive_share) {
+    int num_prod = 50;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+    deltas[10] = num_prod + 1;
+    auto shares = pcm_share::cond_share(deltas, p, 1.0, true);
+    for(int i = 0; i< num_prod; ++i){
+        if(i != 10){
+            ASSERT_EQ(shares[i], 0);
+        }else{
+            ASSERT_GE(shares[i], 0);
+        }
+    }
+}
+
+TEST(CondShareTest, last_product_the_only_positive_share) {
+    int num_prod = 50;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.1);
+        deltas[i-1] = i;
+    }
+    deltas[num_prod-1] = 2*num_prod + 1;
+    auto shares = pcm_share::cond_share(deltas, p, 1.0, true);
+    for(int i = 0; i< num_prod; ++i){
+        if(i != num_prod-1){
+            ASSERT_EQ(shares[i], 0);
+        }else{
+            ASSERT_GE(shares[i], 0);
+        }
+    }
+}
+
 TEST(CondShareTest, second_product_the_only_positive_share) {
     int num_prod = 50;
     Eigen::ArrayXd p(num_prod);
@@ -334,7 +376,7 @@ TEST(CondShareTest, first_product_zero_share_zero_jacobian) {
 TEST(UnconditionalShareTest, Simple_Computation) {
     int num_prod = 25;
     int num_dim = 5;
-    int num_draws = 1000;
+    int num_draws = 10000;
     Eigen::ArrayXd p(num_prod);
     Eigen::ArrayXd deltas(num_prod);
 
@@ -351,4 +393,385 @@ TEST(UnconditionalShareTest, Simple_Computation) {
 
     auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights);
     ASSERT_TRUE((shares > 0).all());
+    ASSERT_LT(shares.sum(), 1.0);
+}
+
+TEST(UnconditionalShareTest, Zero_share_low_delta_first_product) {
+    int num_prod = 25;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.9);
+        deltas[i-1] = i;
+    }
+    deltas[0] -= 10;
+
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights);
+    ASSERT_EQ(shares[0], 0);
+    for(int i = 1; i < num_prod; ++i){
+        ASSERT_GT(shares[i], 0);
+    }
+}
+
+TEST(UnconditionalShareTest, Zero_share_low_delta_middle_product) {
+    int num_prod = 25;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.9);
+        deltas[i-1] = i;
+    }
+    deltas[10] -= 10;
+
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights);
+    for(int i = 0; i < num_prod; ++i){
+        if(i != 10){
+            ASSERT_GT(shares[i], 0);
+        }else{
+            ASSERT_EQ(shares[i], 0);
+        }
+    }
+}
+
+TEST(UnconditionalShareTest, Zero_share_low_delta_last_product) {
+    int num_prod = 25;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.9);
+        deltas[i-1] = i;
+    }
+    deltas[num_prod-1] -= 10;
+
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights);
+    for(int i = 0; i < num_prod; ++i){
+        if(i != (num_prod-1)){
+            ASSERT_GT(shares[i], 0);
+        }else{
+            ASSERT_EQ(shares[i], 0);
+        }
+    }
+}
+
+TEST(UnconditionalShareTest, first_product_the_only_positive_share) {
+    int num_prod = 25;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.9);
+        deltas[i-1] = i;
+    }
+    deltas[0] += 50;
+
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights);
+    for(int i = 0; i < num_prod; ++i){
+        if(i == 0){
+            ASSERT_GT(shares[i], 0);
+        }else{
+            ASSERT_EQ(shares[i], 0);
+        }
+    }
+}
+
+TEST(UnconditionalShareTest, middle_product_the_only_positive_share) {
+    int num_prod = 25;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.9);
+        deltas[i-1] = i;
+    }
+    deltas[20] += 1000;
+
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights);
+    for(int i = 0; i < num_prod; ++i){
+        if(i == 20){
+            ASSERT_GT(shares[i], 0);
+        }else{
+            ASSERT_EQ(shares[i], 0);
+        }
+    }
+}
+
+TEST(UnconditionalShareTest, last_product_the_only_positive_share) {
+    int num_prod = 25;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.9);
+        deltas[i-1] = i;
+    }
+    deltas[num_prod-1] += 10000;
+
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights);
+    for(int i = 0; i < num_prod; ++i){
+        if(i == num_prod-1){
+            ASSERT_GT(shares[i], 0);
+        }else{
+            ASSERT_EQ(shares[i], 0);
+        }
+    }
+}
+
+TEST(UnconditionalShareTest, simple_jacobian_correctness) {
+    int num_prod = 10;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.2);
+        deltas[i-1] = i;
+    }
+    MatrixXd jacobian, jacobian1;
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights, jacobian);
+    for(int i = 0; i< num_prod; ++i){
+        auto new_deltas = deltas;
+        new_deltas[i] += 1e-6;
+        auto shares1 = pcm_share::unc_share(new_deltas, x, p, 1.0, sigma_x, grid, weights, jacobian1);
+        for(int j = 0; j< num_prod; ++j){
+            ASSERT_LE(abs(((shares1 - shares)*1e6)[j] - jacobian(i,j)), 1e-5);
+        }
+    }
+}
+
+TEST(UnconditionalShareTest, first_product_zero_share_jacobian_correctness) {
+    int num_prod = 10;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.2);
+        deltas[i-1] = i;
+    }
+    deltas[0] -= 10;
+    MatrixXd jacobian, jacobian1;
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights, jacobian);
+    for(int i = 0; i< num_prod; ++i){
+        auto new_deltas = deltas;
+        new_deltas[i] += 1e-6;
+        auto shares1 = pcm_share::unc_share(new_deltas, x, p, 1.0, sigma_x, grid, weights, jacobian1);
+        for(int j = 0; j< num_prod; ++j){
+            ASSERT_LE(abs(((shares1 - shares)*1e6)[j] - jacobian(i,j)), 1e-5);
+        }
+    }
+}
+
+TEST(UnconditionalShareTest, middle_product_zero_share_jacobian_correctness) {
+    int num_prod = 10;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.2);
+        deltas[i-1] = i;
+    }
+    deltas[5] -= 10;
+    MatrixXd jacobian, jacobian1;
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights, jacobian);
+    for(int i = 0; i< num_prod; ++i){
+        auto new_deltas = deltas;
+        new_deltas[i] += 1e-6;
+        auto shares1 = pcm_share::unc_share(new_deltas, x, p, 1.0, sigma_x, grid, weights, jacobian1);
+        for(int j = 0; j< num_prod; ++j){
+            ASSERT_LE(abs(((shares1 - shares)*1e6)[j] - jacobian(i,j)), 1e-5);
+        }
+    }
+}
+
+TEST(UnconditionalShareTest, last_product_zero_share_jacobian_correctness) {
+    int num_prod = 10;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.2);
+        deltas[i-1] = i;
+    }
+    deltas[num_prod-1] -= 10;
+    MatrixXd jacobian, jacobian1;
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights, jacobian);
+    for(int i = 0; i< num_prod; ++i){
+        auto new_deltas = deltas;
+        new_deltas[i] += 1e-6;
+        auto shares1 = pcm_share::unc_share(new_deltas, x, p, 1.0, sigma_x, grid, weights, jacobian1);
+        for(int j = 0; j< num_prod; ++j){
+            ASSERT_LE(abs(((shares1 - shares)*1e6)[j] - jacobian(i,j)), 1e-5);
+        }
+    }
+}
+
+TEST(UnconditionalShareTest, first_product_the_only_share_jacobian_correctness) {
+    int num_prod = 10;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.2);
+        deltas[i-1] = i;
+    }
+    deltas[0] += 50;
+    MatrixXd jacobian, jacobian1;
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights, jacobian);
+    for(int i = 0; i< num_prod; ++i){
+        auto new_deltas = deltas;
+        new_deltas[i] += 1e-6;
+        auto shares1 = pcm_share::unc_share(new_deltas, x, p, 1.0, sigma_x, grid, weights, jacobian1);
+        for(int j = 0; j< num_prod; ++j){
+            ASSERT_LE(abs(((shares1 - shares)*1e6)[j] - jacobian(i,j)), 1e-5);
+        }
+    }
+}
+
+TEST(UnconditionalShareTest, middle_product_the_only_share_jacobian_correctness) {
+    int num_prod = 10;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.2);
+        deltas[i-1] = i;
+    }
+    deltas[5] += 50;
+    MatrixXd jacobian, jacobian1;
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights, jacobian);
+    for(int i = 0; i< num_prod; ++i){
+        auto new_deltas = deltas;
+        new_deltas[i] += 1e-6;
+        auto shares1 = pcm_share::unc_share(new_deltas, x, p, 1.0, sigma_x, grid, weights, jacobian1);
+        for(int j = 0; j< num_prod; ++j){
+            ASSERT_LE(abs(((shares1 - shares)*1e6)[j] - jacobian(i,j)), 1e-5);
+        }
+    }
+}
+
+TEST(UnconditionalShareTest, last_product_the_only_share_jacobian_correctness) {
+    int num_prod = 10;
+    int num_dim = 5;
+    int num_draws = 10000;
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd deltas(num_prod);
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+    Eigen::ArrayXd sigma_x = Eigen::ArrayXd::Ones(num_dim);
+    Eigen::ArrayXXd grid = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd weights = Eigen::ArrayXd::Ones(num_draws)/num_draws;
+
+    // fill prices and shares
+    for(int i = 1; i<= num_prod; ++i){
+        p[i-1] = pow(i, 1.2);
+        deltas[i-1] = i;
+    }
+    deltas[num_prod-1] += 50;
+    MatrixXd jacobian, jacobian1;
+    auto shares = pcm_share::unc_share(deltas, x, p, 1.0, sigma_x, grid, weights, jacobian);
+    for(int i = 0; i< num_prod; ++i){
+        auto new_deltas = deltas;
+        new_deltas[i] += 1e-6;
+        auto shares1 = pcm_share::unc_share(new_deltas, x, p, 1.0, sigma_x, grid, weights, jacobian1);
+        for(int j = 0; j< num_prod; ++j){
+            ASSERT_LE(abs(((shares1 - shares)*1e6)[j] - jacobian(i,j)), 1e-5);
+        }
+    }
 }

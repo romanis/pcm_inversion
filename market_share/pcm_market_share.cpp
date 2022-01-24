@@ -95,10 +95,6 @@ namespace pcm_share{
                 
             }
         }
-        // cout<<"share"<<endl;
-        //    for(auto it: un_share){
-        //        cout<< it<<endl;
-        //    }
         return un_share;
     }
 
@@ -174,7 +170,7 @@ namespace pcm_share{
         if(check_positive_shares){
             ind = index_positive_shares(delta, p);
         }else{
-            for(int i = 1; i<delta.size(); i++){
+            for(int i = 0; i<delta.size(); i++){
                 ind.push_back(i);
             }
         }
