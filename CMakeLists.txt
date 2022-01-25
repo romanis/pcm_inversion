@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-
+add_compile_options(-Wall)
 project (PCM_inversion)
 set(CMAKE_BUILD_TYPE Release)
 # set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

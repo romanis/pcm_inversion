@@ -87,7 +87,6 @@ namespace pcm_share{
                 ArrayXd shares_tmp = cond_share(delta_positive,p_positive, sigma_p, jacobian_tmp, false);
 
     //            add shares to corresponding dimensions of un_share
-                int num_share=0, num_i=0, num_j=0;
 
                 un_share(ind) += shares_tmp*weights[draw];
                 
@@ -140,8 +139,6 @@ namespace pcm_share{
                 ArrayXd shares_tmp = cond_share(delta_positive,p_positive, sigma_p, false);
 
     //            add shares to corresponding dimensions of un_share
-                int num_share=0, num_i=0, num_j=0;
-
                 un_share(ind) += shares_tmp*weights[draw];
                                 
             }
@@ -198,7 +195,7 @@ namespace pcm_share{
         boost::math::lognormal lognormDistr(0, sigma_p);
         //    calculate market shares
         double previous_cdf = boost::math::cdf(lognormDistr,endpoints[0]);
-        for(int i=0; i< ind.size(); ++i){
+        for(unsigned i=0; i< ind.size(); ++i){
             double current_cdf = boost::math::cdf(lognormDistr,endpoints[i+1]);
             positive_shares[i] = previous_cdf - current_cdf;
             previous_cdf = current_cdf;
@@ -222,7 +219,7 @@ namespace pcm_share{
                 jacobian_positive(0,0) = (boost::math::pdf(lognormDistr, endpoints[0]))/p_positive[0];
         //            cout<< "size of jacobian "<< jacobian.size()<<endl;
         //            all the rest calculate algorithmically
-                for(int i=1; i<ind.size(); ++i){
+                for(unsigned i=1; i<ind.size(); ++i){
                     double val = (boost::math::pdf(lognormDistr, endpoints[i]))/(p_positive[i]  -p_positive[i-1]);
                     jacobian_positive(i,i-1) -= val;
                     jacobian_positive(i-1,i) -= val;
@@ -280,7 +277,7 @@ namespace pcm_share{
         boost::math::lognormal lognormDistr(0, sigma_p);
     //    calculate market shares
         double previous_cdf = boost::math::cdf(lognormDistr,endpoints[0]);
-        for(int i=0; i< ind.size(); ++i){
+        for(unsigned i=0; i< ind.size(); ++i){
             double current_cdf = boost::math::cdf(lognormDistr,endpoints[i+1]);
             positive_shares[i] = previous_cdf - current_cdf;
             previous_cdf = current_cdf;

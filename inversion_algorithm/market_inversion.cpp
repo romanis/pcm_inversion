@@ -22,7 +22,7 @@ void c(unsigned m, double *result, unsigned n, const double* deltas, double* gra
         u_share -= params->data_shares;
         params->jacobian_evals++;
         // copy D into result
-        for(int i=0; i<=n; ++i){
+        for(unsigned i=0; i<=n; ++i){
             result[i] = u_share[i];
         }
 
@@ -38,7 +38,7 @@ void c(unsigned m, double *result, unsigned n, const double* deltas, double* gra
         u_share -= params->data_shares;
         params->func_evals++;
         // copy D into result
-        for(int i=0; i<=n; ++i){
+        for(unsigned i=0; i<=n; ++i){
             result[i] = u_share[i];
         }
     }
@@ -56,7 +56,7 @@ void c(unsigned m, double *result, unsigned n, const double* deltas, double* gra
 double myfunc(const std::vector<double> &x, std::vector<double> &grad, void *my_func_data)
 {
     if (!grad.empty()) {
-        for(int i=0; i < x.size() ; ++i){
+        for(unsigned i=0; i < x.size() ; ++i){
           grad[i] = 0;
         }
     }
@@ -84,7 +84,7 @@ void adjust_deltas_towards_positive_shares(Eigen::ArrayXd & shares_at_optimum, s
         eigen_solution[num_prod-1] += 0.1*std::abs(eigen_solution[j] - eigen_solution[num_prod-1]);
     }
     // else, increase the deltas of the shares with zero predicted share
-    for(int i=1; i<num_prod-1; ++i){
+    for(unsigned i=1; i<num_prod-1; ++i){
         if(shares_at_optimum[i] == 0){
             eigen_solution[i] += 0.1*std::abs(eigen_solution[i-1] - eigen_solution[i+1]);
         }
@@ -105,7 +105,7 @@ namespace share_inversion{
         opt.set_xtol_rel(params.delta_step_tolerance);
 
         std::vector<double> x_initial(num_prod, 0);
-        if (!params.delta_initial.empty() && params.delta_initial.size() == params.data_shares.size()){
+        if (!params.delta_initial.empty() && (long int) params.delta_initial.size() == params.data_shares.size()){
             x_initial = params.delta_initial;
         }else{
             auto initial_guess = pcm_share::initial_guess(params.data_shares, params.p, params.sigma_p);
@@ -121,7 +121,7 @@ namespace share_inversion{
         bool success = false;
         /// try first solution from this starting point
         try{
-            nlopt::result result = opt.optimize(x_initial, minf);
+            opt.optimize(x_initial, minf);
                         
             auto shares_at_optimum = pcm_share::unc_share(eigen_solution, params.x, params.p, params.sigma_p, params.sigma_x, params.grid, params.weights);
             if((shares_at_optimum > 0).all() && shares_at_optimum.sum() < 1.0 - MIN_ADMISSIBLE_SHARE){
@@ -144,7 +144,7 @@ namespace share_inversion{
             }
             /// start new optimization routine from the new point
             try{
-                nlopt::result result = opt.optimize(x_initial, minf);
+                opt.optimize(x_initial, minf);
                 success = true;
             }catch(std::exception &e) {
                 /// sometimes the solution has numeric problems, but for all other purposes, it had converged
