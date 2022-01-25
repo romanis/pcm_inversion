@@ -68,7 +68,7 @@ namespace pcm_share{
     
     
     //    loop over all points in the grid
-    #pragma omp parallel for schedule(dynamic, 10)
+#pragma omp parallel for schedule(dynamic, 10)
         for(int draw=0; draw<weights.size(); ++draw){
     //        calculate the conditional quality
     //        delta_hat = delta + sigma_x*x*nu(i,:);
@@ -87,10 +87,11 @@ namespace pcm_share{
                 ArrayXd shares_tmp = cond_share(delta_positive,p_positive, sigma_p, jacobian_tmp, false);
 
     //            add shares to corresponding dimensions of un_share
-
+#pragma omp critical
+{
                 un_share(ind) += shares_tmp*weights[draw];
-                
                 jacobian(ind, ind) += jacobian_tmp*weights[draw];
+}
                 
             }
         }
@@ -139,8 +140,8 @@ namespace pcm_share{
                 ArrayXd shares_tmp = cond_share(delta_positive,p_positive, sigma_p, false);
 
     //            add shares to corresponding dimensions of un_share
+#pragma omp critical
                 un_share(ind) += shares_tmp*weights[draw];
-                                
             }
         }
         // cout<<"share"<<endl;
