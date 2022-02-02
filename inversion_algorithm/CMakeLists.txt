@@ -14,3 +14,26 @@ target_include_directories(market_inversion PUBLIC ${ROOT}/market_share)
 target_link_libraries(market_inversion Eigen3::Eigen)
 target_link_libraries(market_inversion pcm_market_share)
 target_link_libraries(market_inversion NLopt::nlopt)
+
+
+enable_testing()
+
+add_executable(
+    inversion_test
+    inversion_test.cpp
+)
+
+target_include_directories(inversion_test PUBLIC ${Boost_INCLUDE_DIR} )
+target_include_directories(inversion_test PUBLIC ${Eigen3_INCLUDE_DIR} )
+
+target_link_libraries(
+    inversion_test
+    gtest_main
+    Eigen3::Eigen
+    ${Boost_LIBRARIES}
+    pcm_market_share
+    market_inversion
+)
+
+include(GoogleTest)
+gtest_discover_tests(inversion_test)
