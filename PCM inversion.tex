@@ -88,13 +88,13 @@
 	\label{eq:utility}
 	\end{align}
 	
-	Now everything except price elasticity is fixed for all products and we  calling ${\bar \delta_j} + \sigma_x \cdot \boldsymbol{\nu}_{ix} \cdot x_j$ an conditional quality of product $j$ we are in a setting of \cite{bresnahan1990entry} purely vertical model. Denote 
+	Now everything except price elasticity is fixed for all products, i.e. the only heterogeneity between different consumers is the price elasticity.  By  calling ${\bar \delta_j} + \sigma_x \cdot \boldsymbol{\nu}_{ix} \cdot x_j$ a conditional quality of product $j$, we are in the purely vertical model. Denote 
 	\begin{align}
 	\hat \delta_j = {\bar \delta_j} + \sigma_x \cdot \boldsymbol{\nu}_{ix} \cdot x_j
 	\label{eq:delta}
 	\end{align}
 	
-	This makes purely vertical model introduced in empirical literature by \cite{bresnahan1990entry}. \cite{song2007measuring} on page 12 shows that market shares of purely vertical model can be obtained as
+	This makes purely vertical model introduced in empirical literature by \cite{bresnahan1990entry}. \cite{song2007measuring} on page 12 shows that market shares of purely vertical model can be calculated as follows:
 	\begin{align}
 	s_1(\hat \delta, P,F) &= F\left(\frac{\hat\delta_1 - \hat\delta_0}{p_1}\right) - F\left(\frac{\hat\delta_2 - \hat\delta_1}{p_2 - p_1}\right)\label{eq:s1}\\	
 	s_j(\hat \delta, P,F) &= F\left(\frac{\hat\delta_j - \hat\delta_{j-1}}{p_j - p_{j-1}}\right) - F\left(\frac{\hat\delta_{j+1} - \hat\delta_{j}}{p_{j+1} - p_{j}}\right)\label{eq:sk}\\	
@@ -107,9 +107,7 @@
 	
 	Aggregated market shares are weighted sums of conditional market shares over draws of $\boldsymbol{\nu}_{ix}$. Thus derivatives of each aggregated market share with respect to $\hat\delta$ will be the weighted sum of conditional derivatives of that market share with respect to $\hat \delta$. So, I am going to concentrate on computing the derivative of conditional market share given by equations \ref{eq:s1} - \ref{eq:sJ} with respect to $\hat{\delta}$.
 	
-	I am going to use the knowledge of which product competes with which to get analytic expression for conditional market share with respect to $\hat\delta$. 
-	
-	If conditional on draw $\nu$ product $k$ has zero market share, its derivative is also zero. Otherwise we locate two products with positive market shares that are next more expensive and next less expensive than $k$. Abusing notation call them $k-1$ and $k+1$ (assuming they are next more expensive and next less expensive) and from \ref{eq:sk} get
+	If conditional on draw $\nu$ product $k$ has zero market share, its derivative is also zero. Otherwise we locate two products with positive market shares that are next more expensive and next less expensive than $k$. Abusing notation call them $k-1$ and $k+1$ (assuming they are next more expensive and next less expensive) to get
 	
 	\begin{align}
 	\frac{\partial s_k}{\partial \hat \delta_k} &= f\left(\frac{\hat\delta_k - \hat\delta_{k-1}}{p_k - p_{k-1}}\right)\cdot \frac 1{p_k - p_{k-1}} + f\left(\frac{\hat\delta_{k+1} - \hat\delta_{k}}{p_{k+1} - p_{k}}\right)\cdot \frac 1{p_{k+1} - p_{k}} \\
@@ -127,7 +125,9 @@
 	\begin{align}
 	\bar S(\delta,\sigma,X,P) = \bar s
 	\end{align}
-	Or to use it for MPEC-type estimate of the whole model without doing inversion on every iteration like \cite{Fox2011}.
+	Or to use it for MPEC-type estimate of the whole model without doing inversion on every iteration like \cite{dube2012improving}.
+	
+	\section{Main obstacle to Newton family of solvers}
 	
 	\section{Simulation results}
 	
