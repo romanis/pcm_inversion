@@ -19,10 +19,10 @@ This code implements methods that compute and invert [Pure Charactetistics Model
 
 This is a software designed to be compiled an run on a Unix machine only.
 
-To install: checkout this code to your computer
+To install: clone this code to your computer
 
 ```
-git checkout https://github.com/romanis/pcm_inversion
+git clone https://github.com/romanis/pcm_inversion
 ```
 Enter the directory and create build directory
 ```
