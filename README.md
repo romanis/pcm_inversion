@@ -1,5 +1,4 @@
 # Temporary hold on dev
-Due to Russia's invasion to Ukraine, I was unable to finish some work on this library, all my thoughts go into supporting Ukraine. 
 
 If you find this library useful for you, please consider supporting Ukrainian refugees at https://novaukraine.org/ you will make me a big favor
 
