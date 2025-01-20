@@ -1,6 +1,26 @@
 project (share_computation)
 set(CMAKE_BUILD_TYPE Release)
 
+# Only uncomment it if you know what you are doing. It typically not work due to different openmp flag for different compilers
+# if(APPLE)
+# if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+#     set(OpenMP_C "${CMAKE_C_COMPILER}" CACHE STRING "" FORCE)
+#     set(OpenMP_C_FLAGS "-fopenmp=libomp -Wno-unused-command-line-argument" CACHE STRING "" FORCE)
+#     set(OpenMP_C_LIB_NAMES "libomp" "libgomp" "libiomp5" CACHE STRING "" FORCE)
+#     set(OpenMP_libomp_LIBRARY ${OpenMP_C_LIB_NAMES} CACHE STRING "" FORCE)
+#     set(OpenMP_libgomp_LIBRARY ${OpenMP_C_LIB_NAMES} CACHE STRING "" FORCE)
+#     set(OpenMP_libiomp5_LIBRARY ${OpenMP_C_LIB_NAMES} CACHE STRING "" FORCE)
+# endif()
+# if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+#   set(OpenMP_CXX "${CMAKE_CXX_COMPILER}" CACHE STRING "" FORCE)
+#   set(OpenMP_CXX_FLAGS "-fopenmp=libomp -Wno-unused-command-line-argument" CACHE STRING "" FORCE)
+#   set(OpenMP_CXX_LIB_NAMES "libomp" "libgomp" "libiomp5" CACHE STRING "" FORCE)
+#   set(OpenMP_libomp_LIBRARY ${OpenMP_CXX_LIB_NAMES} CACHE STRING "" FORCE)
+#   set(OpenMP_libgomp_LIBRARY ${OpenMP_CXX_LIB_NAMES} CACHE STRING "" FORCE)
+#   set(OpenMP_libiomp5_LIBRARY ${OpenMP_CXX_LIB_NAMES} CACHE STRING "" FORCE)
+# endif()
+# endif()
+
 
 find_package(Boost REQUIRED)
 find_package (Eigen3 3.4 REQUIRED NO_MODULE)

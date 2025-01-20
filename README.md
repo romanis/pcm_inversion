@@ -12,9 +12,16 @@ This code implements methods that compute and invert [Pure Charactetistics Model
 - [Eigen](https://eigen.tuxfamily.org/) at least 3.4 version is required. Beware that as of December 2021 Ubuntu `apt` is only distributing 3.3, so, you might want to build form source.
 - [NLopt](https://nlopt.readthedocs.io/) This is the only solver that is supported so far, in the future I might add additional ones
 ## Software that is highly recommented 
-- [Tasmanian](https://tasmanian.ornl.gov/) This library is not required for the inversion to work, but is useful for examples and in general, for 
+- [Tasmanian](https://github.com/ORNL/TASMANIAN/tree/master) This library is not required for the inversion to work, but is useful for examples and in general, for 
 
 # Installation 
+
+If you are using MAC OS, there is a problem with OpenMP libraries. You can still use the 
+I recomment installing GCC compiler and using it instead of Apples's compiler.
+```
+brew install gcc
+```
+This will install gcc into `/opt/homebrew/bin/gcc-14` and g++ into `/opt/homebrew/bin/g++-14`
 
 This is a software designed to be compiled an run on a Unix machine only.
 
@@ -29,11 +36,20 @@ cd pcm_inversion
 mkdir build
 cd build
 ```
-Run cmake and then make
+Run cmake and then make (if you are using ordinary Linux)
 ```
 cmake ..
 make
 ```
+
+Or 
+
+```
+cmake -DCMAKE_C_COMPILER=/opt/homebrew/bin/gcc-14 -DCMAKE_CXX_COMPILER=/opt/homebrew/bin/g++-14 ..
+make
+```
+If you are using Apple computer and installed GCC compiler with brew.
+
 At this point the libraries are built and are located 
 inside `build/market_share` and `build/inversion_algorithm` directories. 
 You can leave them there and add these paths to your link path and add the 
