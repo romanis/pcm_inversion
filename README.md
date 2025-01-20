@@ -8,7 +8,7 @@ This code implements methods that compute and invert [Pure Charactetistics Model
 - [Eigen](https://eigen.tuxfamily.org/) at least 3.4 version is required. Beware that as of December 2021 Ubuntu `apt` is only distributing 3.3, so, you might want to build form source.
 - [NLopt](https://nlopt.readthedocs.io/) This is the only solver that is supported so far, in the future I might add additional ones
 ## Software that is highly recommented 
-- [Tasmanian](https://github.com/ORNL/TASMANIAN/tree/master) This library is not required for the inversion to work, but is useful for examples and in general, for 
+- [Tasmanian](https://github.com/ORNL/TASMANIAN/tree/master) This library is not required for the inversion to work, but is useful for examples and in general, for building a numerical integration techniques used in numerical integration. 
 
 # Installation 
 
