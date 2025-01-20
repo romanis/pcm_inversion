@@ -1,7 +1,3 @@
-# Temporary hold on dev
-
-If you find this library useful for you, please consider supporting Ukrainian refugees at https://novaukraine.org/ you will make me a big favor
-
 # What does this code do?
 This code implements methods that compute and invert [Pure Charactetistics Model](https://onlinelibrary.wiley.com/doi/abs/10.1111/j.1468-2354.2007.00459.x). 
 
@@ -16,7 +12,7 @@ This code implements methods that compute and invert [Pure Charactetistics Model
 
 # Installation 
 
-If you are using MAC OS, there is a problem with OpenMP libraries. You can still use the 
+If you are using MAC OS, there is a problem with OpenMP libraries. 
 I recomment installing GCC compiler and using it instead of Apples's compiler.
 ```
 brew install gcc
