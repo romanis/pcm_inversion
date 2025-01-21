@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.18)
 add_compile_options(-Wall)
 project (PCM_inversion)
 set(CMAKE_BUILD_TYPE Release)

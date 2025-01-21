@@ -12,6 +12,9 @@
 #include <Eigen/Dense>
 #include <Eigen/Core>
 
+#include <pybind11/pybind11.h>
+#include <pybind11/eigen.h>
+
 using namespace std;
 using namespace Eigen;
 using Eigen::indexing::last;
