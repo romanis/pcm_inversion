@@ -46,6 +46,8 @@ set_target_properties(pcm_market_share PROPERTIES PUBLIC_HEADER "${ROOT}/market_
 
 target_link_libraries(pcm_market_share PUBLIC Eigen3::Eigen )
 target_link_libraries(pcm_market_share PUBLIC ${Boost_LIBRARIES})
+target_link_libraries(pcm_market_share PUBLIC Python::Python)
+
 if(OpenMP_CXX_FOUND)
     target_link_libraries(pcm_market_share PUBLIC OpenMP::OpenMP_CXX)
 endif()
@@ -65,6 +67,7 @@ if(pybind11_FOUND)
     target_link_libraries(python_market_share PUBLIC Eigen3::Eigen )
     target_link_libraries(python_market_share PUBLIC ${Boost_LIBRARIES})
     target_link_libraries(python_market_share PUBLIC pybind11::module)
+    target_link_libraries(python_market_share PUBLIC Python::Python)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(python_market_share PUBLIC OpenMP::OpenMP_CXX)
     endif()
