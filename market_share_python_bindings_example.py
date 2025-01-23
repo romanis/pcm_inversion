@@ -37,10 +37,10 @@ weights = grid.getQuadratureWeights() /(np.pi**(0.5*num_dimensions))    # Quadra
 print(f'points size: {len(points)}')
 # calculate unconditional share
 res = pms.unconditional_share_with_jacobian(delta, x, p, sigma_p, sigma_x, points, weights)
-print(f'unconditional share and jacobian \n{res[0]}\n\n{res[1]}')
+print(f'unconditional share and jacobian \n{res[0].round(3)}\n\n{res[1].round(3)}')
 
 delta[0] += 1e-5
 res1 = pms.unconditional_share_with_jacobian(delta, x, p, sigma_p, sigma_x, points, weights)
-print(f'numerical jacobian \n{(res1[0]-res[0])/1e-5}')
+print(f'numerical jacobian \n{((res1[0]-res[0])/1e-5).round(3)}')
 
 print(f'Time taken: {time.time()-start}')
