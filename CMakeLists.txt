@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.18)
 add_compile_options(-Wall)
 project (PCM_inversion)
 set(CMAKE_BUILD_TYPE Release)
@@ -19,6 +19,7 @@ FetchContent_MakeAvailable(googletest)
 
 add_subdirectory(market_share)
 add_subdirectory(inversion_algorithm)
+add_subdirectory(python_bindings)
 find_package(Tasmanian)
 IF(Tasmanian_FOUND)
     message("found Tasmanian, building examples")

@@ -12,6 +12,8 @@
 #include <Eigen/Dense>
 #include <Eigen/Core>
 
+
+
 using namespace std;
 using namespace Eigen;
 using Eigen::indexing::last;
@@ -273,7 +275,6 @@ namespace pcm_share{
         if(!is_sorted(ep_tmp.begin(), ep_tmp.end())){
             throw runtime_error("endpoints are not sorted properly. check which goods go to conditional market share");
         }
-        // cout<<" endpoints \n" << endpoints<<endl;
     //    create lognormal distr
         boost::math::lognormal lognormDistr(0, sigma_p);
     //    calculate market shares

@@ -23,7 +23,7 @@ set(CMAKE_BUILD_TYPE Release)
 
 
 find_package(Boost REQUIRED)
-find_package (Eigen3 3.4 REQUIRED NO_MODULE)
+find_package(Eigen3 3.4 REQUIRED NO_MODULE)
 find_package(OpenMP)
 
 add_library(pcm_market_share SHARED ./pcm_market_share.cpp)
