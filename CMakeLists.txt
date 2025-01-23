@@ -19,6 +19,7 @@ FetchContent_MakeAvailable(googletest)
 
 add_subdirectory(market_share)
 add_subdirectory(inversion_algorithm)
+add_subdirectory(python_bindings)
 find_package(Tasmanian)
 IF(Tasmanian_FOUND)
     message("found Tasmanian, building examples")
