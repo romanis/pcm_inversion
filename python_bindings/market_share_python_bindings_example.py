@@ -2,20 +2,20 @@ import pandas as pd
 import numpy as np
 # add the path to python_bindings to the system path
 import sys
-sys.path.append('./build/python_bindings')
+sys.path.append('./build/python_bindings') 
 
-import python_market_share as pms
+from pcm_market_share import conditional_share_with_jacobian, unconditional_share_with_jacobian
 import time
 from  Tasmanian import TasmanianSparseGrid
 
 # create time now variable
 start = time.time()
-delta = [1.5,4,6]
-p = [.1,2.2, 8]
+delta = [1.5,4,6,7]
+p = [.1,2.2, 8, 12]
 sigma_p = 1.0
-res = pms.conditional_share_with_jacobian(delta, p, sigma_p)
+res = conditional_share_with_jacobian(delta, p, sigma_p)
 delta[0] += 1e-5
-res1 = pms.conditional_share_with_jacobian(delta, p, sigma_p)
+res1 = conditional_share_with_jacobian(delta, p, sigma_p)
 print(f'market share and jacobian \n{res[0]}\n\n{res[1]}')
 print(f'numerical jacobian \n{(res1[0]-res[0])/1e-5}')
 
@@ -36,11 +36,11 @@ points = grid.getPoints() * (2**0.5)                # List of points in the grid
 weights = grid.getQuadratureWeights() /(np.pi**(0.5*num_dimensions))    # Quadrature weights
 print(f'points size: {len(points)}')
 # calculate unconditional share
-res = pms.unconditional_share_with_jacobian(delta, x, p, sigma_p, sigma_x, points, weights)
+res = unconditional_share_with_jacobian(delta, x, p, sigma_p, sigma_x, points, weights)
 print(f'unconditional share and jacobian \n{res[0].round(3)}\n\n{res[1].round(3)}')
 
 delta[0] += 1e-5
-res1 = pms.unconditional_share_with_jacobian(delta, x, p, sigma_p, sigma_x, points, weights)
+res1 = unconditional_share_with_jacobian(delta, x, p, sigma_p, sigma_x, points, weights)
 print(f'numerical jacobian \n{((res1[0]-res[0])/1e-5).round(3)}')
 
 print(f'Time taken: {time.time()-start}')
