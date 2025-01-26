@@ -2,9 +2,10 @@ import pandas as pd
 import numpy as np
 # add the path to python_bindings to the system path
 import sys
-sys.path.append('./build/python_bindings') 
+sys.path.append('../build/python_bindings') 
 
 from pcm_market_share import conditional_share_with_jacobian, unconditional_share_with_jacobian
+from python_pcm_inversion import invert_shares
 import time
 from  Tasmanian import TasmanianSparseGrid
 
@@ -24,7 +25,7 @@ print(f'numerical jacobian \n{(res1[0]-res[0])/1e-5}')
 num_prod = 5
 num_dimensions = 6
 x = np.random.rand(num_prod, num_dimensions)
-delta = [i for i in range(1, num_prod+1)]
+delta = [i+ 0.01 for i in range(1, num_prod+1)]
 p = [i**1.2 for i in range(1, num_prod+1)]
 sigma_p = 1.0
 
@@ -42,5 +43,11 @@ print(f'unconditional share and jacobian \n{res[0].round(3)}\n\n{res[1].round(3)
 delta[0] += 1e-5
 res1 = unconditional_share_with_jacobian(delta, x, p, sigma_p, sigma_x, points, weights)
 print(f'numerical jacobian \n{((res1[0]-res[0])/1e-5).round(3)}')
+
+print(f'Time taken: {time.time()-start}')
+start = time.time()
+# res[0][0] += 1e-2
+invert = invert_shares(x, p, sigma_p, sigma_x, points, weights, res[0])
+print(f'inverted shares \n{invert.round(3)}')
 
 print(f'Time taken: {time.time()-start}')

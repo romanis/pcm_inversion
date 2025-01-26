@@ -7,7 +7,7 @@
 #include "nlopt.hpp"
 
 namespace share_inversion{
-    double MIN_ADMISSIBLE_SHARE = 1e-5; //!< minimal share of any product (or outside option) that is supported by the inversion mechanism. If any share is lower than this, inversion is deemed unstable
+    extern double MIN_ADMISSIBLE_SHARE; //!< minimal share of any product (or outside option) that is supported by the inversion mechanism. If any share is lower than this, inversion is deemed unstable
 
     /**
      * @brief struct that is holding information relevant to computation of PCM share

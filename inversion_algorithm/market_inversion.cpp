@@ -93,6 +93,8 @@ void adjust_deltas_towards_positive_shares(Eigen::ArrayXd & shares_at_optimum, s
 }
 
 namespace share_inversion{
+    double MIN_ADMISSIBLE_SHARE = 1e-5; // extern definition to avoind multiple definition error on linker stage
+
     Eigen::ArrayXd invert_shares(share_inversion::pcm_parameters & params){
         params.number_of_times_function_called = 0;
         // create instance of optimization. dimensionality of the problem is the number of shares to invert

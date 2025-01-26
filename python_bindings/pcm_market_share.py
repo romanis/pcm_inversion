@@ -148,4 +148,3 @@ def unconditional_share_without_jacobian(
     Returns array of size N market shares of every product.
     """
     return pms.unconditional_share_without_jacobian(delta, x, p, sigma_p, sigma_x, points, weights)
-)
