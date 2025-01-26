@@ -20,6 +20,11 @@ FetchContent_MakeAvailable(googletest)
 add_subdirectory(market_share)
 add_subdirectory(inversion_algorithm)
 
+# FIND_PACKAGE(LATEX)
+# IF(LATEX_FOUND)
+#     add_subdirectory(latex_article)
+# ENDIF()
+
 find_package(pybind11 CONFIG REQUIRED)
 find_package(Python 3.7 COMPONENTS Interpreter Development REQUIRED)
 if(Python_FOUND AND pybind11_FOUND)
