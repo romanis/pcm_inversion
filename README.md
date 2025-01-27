@@ -59,6 +59,8 @@ include and link the libraries from any directory by running
 sudo make install
 ```
 
+If you also had Pybind11 installed and had compatible Python (3.7+), then you would also have the python bindings built for both `market_share` and `inversion_algorithm`. These would be located in `build/python_bindings/`, and the names depend on the exact compiler you used, but would look something like `python_pcm_inversion.cpython-313-darwin.so` and `python_market_share.cpython-313-darwin.so`. 
+
 If you had Tasmanian library installed, you also have built the example folder `pcm_inversion/example/test_pcm.cpp`. Executable of it is in `pcm_inversion/build/examples/test_pcm`. 
 
 If you would like to use Python version of the library, please read [Python bindings readme](./python_bindings/Readme-python-bindings.md)
