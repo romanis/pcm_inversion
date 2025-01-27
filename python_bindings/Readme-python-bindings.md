@@ -22,6 +22,6 @@ Assuming you have ran `sudo make install`, your bindings library gets copied to 
 
 ## Usage
 
-The exposed functions have in-code documentation. Each function has extensive explanation of the types expected for each argument. Market share functions are detailed in [pcm_market_share.py](pcm_market_share.py) and inversion function is detailed in [market_inversion_python.py](market_inversion_python.py).
+The exposed functions have in-code documentation. Each function has extensive explanation of the types expected for each argument. Market share functions are detailed in [pcm_market_share.py](pcm_market_share.py) and inversion function is detailed in [pcm_inversion_algorithm.py](pcm_inversion_algorithm.py).
 
-An exmple of usage is given in [pcm_inversion_algorithm.py](pcm_inversion_algorithm.py). 
+An exmple of usage is given in [market_share_python_bindings_example.py](market_share_python_bindings_example.py). 
