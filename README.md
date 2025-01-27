@@ -61,6 +61,8 @@ sudo make install
 
 If you had Tasmanian library installed, you also have built the example folder `pcm_inversion/example/test_pcm.cpp`. Executable of it is in `pcm_inversion/build/examples/test_pcm`. 
 
+If you would like to use Python version of the library, please read [Python bindings readme](./python_bindings/Readme-python-bindings.md)
+
 # Quick user guide
 There are two essential libraries that are built by this code: one that computes market shares (along with Jacobian)
 conditional on structural parameters, the other uses these computations in conjunction with NLopt solver
