@@ -2,13 +2,16 @@ import pandas as pd
 import numpy as np
 from numpy.typing import ArrayLike
 from typing import Tuple
-# add the path to python_bindings to the system path
 import sys
-sys.path.append('/usr/local/lib/') # in this path the cmake is installing the python bindings library
+sys.path.append('/usr/local/lib/')
 
-from python_pcm_inversion import invert_shares
+from python_pcm_inversion import invert_shares as _cpp_invert
 
-def invert_shares(x : ArrayLike, p : ArrayLike, sigma_p: float, sigma_x: ArrayLike, points : ArrayLike, weights : ArrayLike, data_shares : ArrayLike) -> ArrayLike:
+def invert_shares(x : ArrayLike, p : ArrayLike, sigma_p: float, sigma_x: ArrayLike, points : ArrayLike, weights : ArrayLike, data_shares : ArrayLike,
+                  share_equality_tolerances=1e-8,
+                  delta_step_tolerance=1e-5,
+                  max_number_of_function_calls=1000,
+                  method=None) -> ArrayLike:
     """
     inverts PCM market shares conditional on all other parameters of the model.
 
@@ -44,4 +47,11 @@ def invert_shares(x : ArrayLike, p : ArrayLike, sigma_p: float, sigma_x: ArrayLi
     from pcm_market_share library, we get the predicted unconditional market shares equal to data_shares.
     unconditional_share_without_jacobian(d, x, p, sigma_p, sigma_x, points, weights) = data_shares with first argument d being the return of this function.
     """
-    return invert_shares(x, p, sigma_p, sigma_x, points, weights, shares)
+    kwargs = dict(
+        share_equality_tolerances=share_equality_tolerances,
+        delta_step_tolerance=delta_step_tolerance,
+        max_number_of_function_calls=max_number_of_function_calls,
+    )
+    if method is not None:
+        kwargs["method"] = method
+    return _cpp_invert(x, p, sigma_p, sigma_x, points, weights, data_shares, **kwargs)

@@ -44,7 +44,7 @@ int main(){
     share_inversion::pcm_parameters param(x, p, 2.0, sigma_x, grid, weights, un_sh);
     
     
-    auto eigen_solution = share_inversion::invert_shares(param);
+    auto eigen_solution = share_inversion::invert_shares(param, share_inversion::InversionMethod::NLOPT_SLSQP);
 
     Eigen::ArrayX4d sh(num_prod, 4);
     
