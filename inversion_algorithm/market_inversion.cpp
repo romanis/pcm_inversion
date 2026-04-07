@@ -92,12 +92,206 @@ void adjust_deltas_towards_positive_shares(Eigen::ArrayXd & shares_at_optimum, s
     return;
 }
 
+/**
+ * @brief Selects the starting point for the cone-aware Newton iteration.
+ *
+ * Returns pcm_share::initial_guess unless params.delta_initial is non-empty,
+ * matches the product count, and its predicted shares are strictly positive
+ * with sum below 1 - share_inversion::MIN_ADMISSIBLE_SHARE.
+ *
+ * @param params fully populated share_inversion::pcm_parameters struct
+ * @return Eigen::ArrayXd initial delta of size n_products inside the feasibility cone P
+ */
+Eigen::ArrayXd cone_newton::select_initial_delta(share_inversion::pcm_parameters & params)
+{
+    const unsigned n = static_cast<unsigned>(params.data_shares.size());
+    Eigen::ArrayXd delta = pcm_share::initial_guess(
+        params.data_shares, params.p, params.sigma_p);
+
+    if (!params.delta_initial.empty() &&
+        static_cast<long int>(params.delta_initial.size()) == params.data_shares.size())
+    {
+        Eigen::Map<const Eigen::ArrayXd> delta_user(params.delta_initial.data(), n);
+        Eigen::ArrayXd s_user = pcm_share::unc_share(
+            delta_user, params.x, params.p, params.sigma_p,
+            params.sigma_x, params.grid, params.weights);
+        if ((s_user > 0).all() &&
+            s_user.sum() < 1.0 - share_inversion::MIN_ADMISSIBLE_SHARE)
+        {
+            delta = delta_user;
+        }
+    }
+    return delta;
+}
+
+/**
+ * @brief Computes a Newton step from the current Jacobian and residual.
+ *
+ * Attempts J.lu().solve(-r). If the result contains NaN or its Euclidean norm
+ * exceeds 1e6, falls back to the diagonal-Jacobian steepest-descent step
+ * -J.diagonal()^{-1} * r.
+ *
+ * @param J dense Jacobian matrix of size n x n returned by pcm_share::unc_share
+ * @param r residual array of size n equal to s - data_shares
+ * @return Eigen::VectorXd Newton step of size n
+ */
+Eigen::VectorXd cone_newton::compute_newton_step(const Eigen::MatrixXd & J,
+                                                  const Eigen::ArrayXd  & r)
+{
+    Eigen::VectorXd step = J.lu().solve((-r).matrix());
+    if (step.hasNaN() || step.norm() > 1e6)
+    {
+        step = -(J.diagonal().array().inverse() * r).matrix();
+    }
+    return step;
+}
+
+/**
+ * @brief Backtracks the Newton step to restore feasibility.
+ *
+ * Starting from lambda = 1, halves lambda up to max_halvings = 50 times until
+ * all shares of delta + lambda * step are strictly positive and their sum is
+ * below 1 - share_inversion::MIN_ADMISSIBLE_SHARE. Increments calls for each
+ * pcm_share::unc_share evaluation.
+ *
+ * @param delta current iterate of size n
+ * @param step Newton step of size n
+ * @param params fully populated share_inversion::pcm_parameters struct
+ * @param calls reference to the function-evaluation counter; incremented in place
+ * @return std::pair containing the best feasible delta_candidate and its share vector
+ */
+std::pair<Eigen::ArrayXd, Eigen::ArrayXd>
+cone_newton::backtrack_to_feasibility(const Eigen::ArrayXd            & delta,
+                                      const Eigen::VectorXd           & step,
+                                      share_inversion::pcm_parameters & params,
+                                      unsigned                        & calls)
+{
+    const unsigned max_halvings = 50;
+    double lambda = 1.0;
+    Eigen::ArrayXd delta_candidate = delta + lambda * step.array();
+    Eigen::ArrayXd s_candidate = pcm_share::unc_share(
+        delta_candidate, params.x, params.p, params.sigma_p,
+        params.sigma_x, params.grid, params.weights);
+    ++calls;
+
+    for (unsigned k = 0;
+         k < max_halvings &&
+         (!((s_candidate > 0).all()) ||
+          s_candidate.sum() >= 1.0 - share_inversion::MIN_ADMISSIBLE_SHARE);
+         ++k)
+    {
+        lambda *= 0.5;
+        delta_candidate = delta + lambda * step.array();
+        s_candidate = pcm_share::unc_share(
+            delta_candidate, params.x, params.p, params.sigma_p,
+            params.sigma_x, params.grid, params.weights);
+        ++calls;
+    }
+    return {delta_candidate, s_candidate};
+}
+
+/**
+ * @brief Attempts to repair an infeasible delta_candidate via adjust heuristic.
+ *
+ * Calls adjust_deltas_towards_positive_shares on delta_candidate; if the
+ * resulting shares are all strictly positive, returns the repaired delta.
+ * Otherwise returns delta_candidate unchanged.
+ *
+ * @param delta_candidate infeasible iterate of size n
+ * @param s_candidate predicted shares for delta_candidate; some may be non-positive
+ * @param params fully populated share_inversion::pcm_parameters struct
+ * @param calls reference to the function-evaluation counter; incremented in place
+ * @return Eigen::ArrayXd repaired delta of size n, or delta_candidate if repair fails
+ */
+Eigen::ArrayXd cone_newton::recover_feasibility(
+    const Eigen::ArrayXd            & delta_candidate,
+    const Eigen::ArrayXd            & s_candidate,
+    share_inversion::pcm_parameters & params,
+    unsigned                        & calls)
+{
+    const unsigned n = static_cast<unsigned>(delta_candidate.size());
+    std::vector<double> x_recover(
+        delta_candidate.data(), delta_candidate.data() + n);
+    Eigen::ArrayXd s_mut = s_candidate;
+    adjust_deltas_towards_positive_shares(s_mut, x_recover);
+    Eigen::Map<Eigen::ArrayXd> recovered(x_recover.data(), n);
+    Eigen::ArrayXd s_after = pcm_share::unc_share(
+        recovered, params.x, params.p, params.sigma_p,
+        params.sigma_x, params.grid, params.weights);
+    ++calls;
+    if ((s_after > 0).all())
+        return recovered;
+    return delta_candidate;
+}
+
+/**
+ * @brief Cone-aware Newton solver: finds delta such that unc_share(delta) == data_shares.
+ *
+ * Orchestrates select_initial_delta, then iterates: compute_newton_step,
+ * backtrack_to_feasibility, recover_feasibility until the L-inf share residual
+ * drops below params.share_equality_tolerances or the call budget is exhausted.
+ *
+ * @param params fully populated share_inversion::pcm_parameters struct
+ * @return Eigen::ArrayXd delta solution of size n_products
+ */
+Eigen::ArrayXd cone_newton::invert(share_inversion::pcm_parameters & params)
+{
+    Eigen::ArrayXd delta = cone_newton::select_initial_delta(params);
+
+    unsigned calls = 0;
+    const unsigned max_calls = params.max_number_of_function_calls;
+    const unsigned max_iter  = 100;
+
+    for (unsigned iter = 0; iter < max_iter; ++iter)
+    {
+        if (calls >= max_calls)
+            break;
+
+        Eigen::MatrixXd J;
+        Eigen::ArrayXd s = pcm_share::unc_share(
+            delta, params.x, params.p, params.sigma_p,
+            params.sigma_x, params.grid, params.weights, J);
+        ++calls;
+
+        Eigen::ArrayXd r = s - params.data_shares;
+
+        if (r.abs().maxCoeff() < params.share_equality_tolerances)
+            break;
+
+        Eigen::VectorXd step = cone_newton::compute_newton_step(J, r);
+
+        auto [delta_candidate, s_candidate] =
+            cone_newton::backtrack_to_feasibility(delta, step, params, calls);
+
+        if (!((s_candidate > 0).all()))
+        {
+            delta = cone_newton::recover_feasibility(
+                delta_candidate, s_candidate, params, calls);
+        }
+        else
+        {
+            delta = delta_candidate;
+        }
+    }
+
+    return delta;
+}
+
 namespace share_inversion{
     double MIN_ADMISSIBLE_SHARE = 1e-5; // extern definition to avoind multiple definition error on linker stage
 
-    Eigen::ArrayXd invert_shares(share_inversion::pcm_parameters & params){
+    /**
+     * @brief Inverts PCM market shares using the NLopt LD_SLSQP constrained optimizer.
+     *
+     * Creates an nlopt::opt instance, adds an equality multi-constraint via c(), and
+     * enters a retry loop using adjust_deltas_towards_positive_shares() when predicted
+     * shares are not all strictly positive.
+     *
+     * @param params all parameters of the market; observed shares are in params.data_shares
+     * @return Eigen::ArrayXd delta of size n_products such that unc_share(delta) == data_shares
+     */
+    Eigen::ArrayXd invert_shares_nlopt(share_inversion::pcm_parameters & params){
         params.number_of_times_function_called = 0;
-        // create instance of optimization. dimensionality of the problem is the number of shares to invert
         nlopt::opt opt(params.nlopt_algo, params.data_shares.size());
         opt.set_min_objective(myfunc, NULL);
         unsigned num_prod = params.data_shares.size();
@@ -115,13 +309,10 @@ namespace share_inversion{
                 x_initial[i] = initial_guess[i];
             }
         }
-        /// map X to eigen array
         Eigen::Map<Eigen::ArrayXd> eigen_solution(x_initial.data(), num_prod);
 
-        // start solution
         double minf;
         bool success = false;
-        /// try first solution from this starting point
         try{
             opt.optimize(x_initial, minf);
                         
@@ -131,25 +322,18 @@ namespace share_inversion{
             }
         }
         catch(std::exception &e) {
-            // std::cout << "nlopt failed: " << e.what() << std::endl;
         }
 
-        /// likely it will not be the success from the first time, in this case enter the loop of adjusting deltas to the point all products have positive predicted shares
         while(!success && params.number_of_times_function_called < params.max_number_of_function_calls){    
-            /// compute current shares at the point of current optimum candidate        
             auto shares_at_optimum = pcm_share::unc_share(eigen_solution, params.x, params.p, params.sigma_p, params.sigma_x, params.grid, params.weights);
-            /// adjust current optimum candidate until all predicted shares are positive and are totally lower than 
             while((shares_at_optimum == 0).any() || (shares_at_optimum.sum() > 1.0 - MIN_ADMISSIBLE_SHARE)){
                 adjust_deltas_towards_positive_shares(shares_at_optimum, x_initial);
-                /// compute new shares at optimum candidate
                 shares_at_optimum = pcm_share::unc_share(eigen_solution, params.x, params.p, params.sigma_p, params.sigma_x, params.grid, params.weights);
             }
-            /// start new optimization routine from the new point
             try{
                 opt.optimize(x_initial, minf);
                 success = true;
             }catch(std::exception &e) {
-                /// sometimes the solution has numeric problems, but for all other purposes, it had converged
                 shares_at_optimum = pcm_share::unc_share(eigen_solution, params.x, params.p, params.sigma_p, params.sigma_x, params.grid, params.weights);
                 if((shares_at_optimum > 0).all()){
                     success = true;
@@ -159,5 +343,25 @@ namespace share_inversion{
 
         
         return eigen_solution;
+    }
+
+    /**
+     * @brief Inverts PCM market shares to recover delta, dispatching to the algorithm
+     *        selected by method.
+     *
+     * For NLOPT_SLSQP, delegates to invert_shares_nlopt().
+     * For CONE_AWARE_NEWTON, delegates to cone_newton::invert().
+     *
+     * @param params all parameters of the market; observed shares are in params.data_shares
+     * @param method inversion algorithm to use
+     * @return Eigen::ArrayXd delta of size n_products such that unc_share(delta) == data_shares
+     */
+    Eigen::ArrayXd invert_shares(share_inversion::pcm_parameters & params,
+                                  share_inversion::InversionMethod method)
+    {
+        if (method == share_inversion::InversionMethod::CONE_AWARE_NEWTON)
+            return cone_newton::invert(params);
+
+        return share_inversion::invert_shares_nlopt(params);
     }
 }
