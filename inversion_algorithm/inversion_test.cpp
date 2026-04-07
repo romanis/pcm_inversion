@@ -4,6 +4,7 @@
 #include "Eigen/Core"
 
 #include <boost/random.hpp>
+#include <chrono>
 #include <iostream>
 
 TEST(PCMInversion, Basic_calculation) {
@@ -605,4 +606,76 @@ TEST(PCMInversion, zero_share_at_high_end_ConeNewton) {
     Eigen::MatrixXd tmp(num_prod, 3);
 
     ASSERT_LE((inverted_deltas - deltas(positive)).abs().sum(), param.delta_step_tolerance * num_prod * 10);
+}
+
+/**
+ * @brief Benchmarks NLOPT_SLSQP against CONE_AWARE_NEWTON by running each algorithm
+ *        N = 1000 times on a 5-product, 1-dimensional PCM market with sigma_x = 0.5
+ *        and 500 integration draws, measuring total and per-call wall-clock time via
+ *        std::chrono::high_resolution_clock.  Timing results are printed to std::cout;
+ *        the test also asserts that both algorithms produce results within 1e-4 of each
+ *        other to confirm correctness under the benchmark fixture.
+ */
+TEST(PCMInversion, Benchmark_NLOPT_vs_ConeNewton) {
+    const int num_prod  = 5;
+    const int num_dim   = 1;
+    const int num_draws = 500;
+    const int N         = 1000;
+
+    Eigen::MatrixXd x = Eigen::MatrixXd::Random(num_prod, num_dim);
+
+    Eigen::ArrayXd p(num_prod);
+    Eigen::ArrayXd known_deltas(num_prod);
+
+    for (int i = 1; i <= num_prod; ++i) {
+        p[i-1]            = pow(i, 1.5);
+        known_deltas[i-1] = i;
+    }
+
+    const double sigma_p = 1.0;
+
+    Eigen::ArrayXd sigma_x(num_dim);
+    sigma_x(0) = 0.5;
+
+    Eigen::ArrayXXd grid    = Eigen::ArrayXXd::Random(num_draws, num_dim);
+    Eigen::ArrayXd  weights = Eigen::ArrayXd::Ones(num_draws) / num_draws;
+
+    Eigen::ArrayXd data_shares = pcm_share::unc_share(
+        known_deltas, x, p, sigma_p, sigma_x, grid, weights);
+
+    share_inversion::pcm_parameters param_slsqp(
+        x, p, sigma_p, sigma_x, grid, weights, data_shares);
+    share_inversion::pcm_parameters param_newton(
+        x, p, sigma_p, sigma_x, grid, weights, data_shares);
+
+    Eigen::ArrayXd delta_slsqp_final;
+    Eigen::ArrayXd delta_newton_final;
+
+    auto t0_slsqp = std::chrono::high_resolution_clock::now();
+    for (int iter = 0; iter < N; ++iter) {
+        delta_slsqp_final = share_inversion::invert_shares(
+            param_slsqp, share_inversion::InversionMethod::NLOPT_SLSQP);
+    }
+    auto t1_slsqp = std::chrono::high_resolution_clock::now();
+
+    auto t0_newton = std::chrono::high_resolution_clock::now();
+    for (int iter = 0; iter < N; ++iter) {
+        delta_newton_final = share_inversion::invert_shares(
+            param_newton, share_inversion::InversionMethod::CONE_AWARE_NEWTON);
+    }
+    auto t1_newton = std::chrono::high_resolution_clock::now();
+
+    double ms_slsqp  = std::chrono::duration<double, std::milli>(t1_slsqp  - t0_slsqp).count();
+    double ms_newton = std::chrono::duration<double, std::milli>(t1_newton - t0_newton).count();
+    double speedup   = ms_slsqp / ms_newton;
+
+    std::cout << "\n[BENCHMARK] NLOPT_SLSQP:       "
+              << ms_slsqp  << " ms total, "
+              << ms_slsqp  / N << " ms/call (" << N << " calls)\n"
+              << "[BENCHMARK] CONE_AWARE_NEWTON: "
+              << ms_newton << " ms total, "
+              << ms_newton / N << " ms/call (" << N << " calls)\n"
+              << "[BENCHMARK] Speedup: " << speedup << "x\n";
+
+    ASSERT_LE((delta_slsqp_final - delta_newton_final).abs().maxCoeff(), 1e-4);
 }
