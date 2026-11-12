@@ -1,5 +1,7 @@
 project (share_computation)
-set(CMAKE_BUILD_TYPE Release)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
 
 # Only uncomment it if you know what you are doing. It typically not work due to different openmp flag for different compilers
 # if(APPLE)

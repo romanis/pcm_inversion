@@ -22,7 +22,7 @@ void c(unsigned m, double *result, unsigned n, const double* deltas, double* gra
         u_share -= params->data_shares;
         params->jacobian_evals++;
         // copy D into result
-        for(unsigned i=0; i<=n; ++i){
+        for(unsigned i=0; i<n; ++i){
             result[i] = u_share[i];
         }
 
@@ -38,7 +38,7 @@ void c(unsigned m, double *result, unsigned n, const double* deltas, double* gra
         u_share -= params->data_shares;
         params->func_evals++;
         // copy D into result
-        for(unsigned i=0; i<=n; ++i){
+        for(unsigned i=0; i<n; ++i){
             result[i] = u_share[i];
         }
     }
@@ -64,28 +64,45 @@ double myfunc(const std::vector<double> &x, std::vector<double> &grad, void *my_
 }
 
 void adjust_deltas_towards_positive_shares(Eigen::ArrayXd & shares_at_optimum, std::vector<double> & eigen_solution){
-    unsigned num_prod = shares_at_optimum.size();
-    if(shares_at_optimum.sum() > 1.0 - share_inversion::MIN_ADMISSIBLE_SHARE){
-        for(auto & d: eigen_solution){
-            d -= std::abs(eigen_solution[0] - eigen_solution[num_prod-1]);
-        }        
+    const int num_prod = static_cast<int>(shares_at_optimum.size());
+    if(num_prod == 0){
+        return;
     }
-    // std::cout<<"number of zero shares " << (shares_at_optimum == 0).count()<<std::endl;
-    if(shares_at_optimum[0] == 0){
-        // find positive share index
+    if(shares_at_optimum.sum() > 1.0 - share_inversion::MIN_ADMISSIBLE_SHARE){
+        const double shift = std::abs(eigen_solution[0] - eigen_solution[num_prod-1]);
+        for(auto & d: eigen_solution){
+            d -= shift;
+        }
+    }
+    // every product has zero share: consumers all take the outside good, so raise all qualities.
+    if((shares_at_optimum <= 0).all()){
+        double scale = 0.0;
+        for(double d : eigen_solution){
+            scale = std::max(scale, std::abs(d));
+        }
+        const double shift = 0.1 * std::max(scale, 1e-8);
+        for(auto & d: eigen_solution){
+            d += shift;
+        }
+        return;
+    }
+    if(shares_at_optimum[0] <= 0){
+        // nearest product above with positive share (exists: not all shares are zero)
         int j = 1;
-        while(shares_at_optimum[j++] == 0){}
+        while(j < num_prod && shares_at_optimum[j] <= 0){ ++j; }
         eigen_solution[0] += 0.1*std::abs(eigen_solution[j] - eigen_solution[0]);
     }
-    if(shares_at_optimum[num_prod-1] == 0){
-        // find positive share index
-        unsigned j = num_prod - 2;
-        while(shares_at_optimum[j--] == 0){}
-        eigen_solution[num_prod-1] += 0.1*std::abs(eigen_solution[j] - eigen_solution[num_prod-1]);
+    if(num_prod > 1 && shares_at_optimum[num_prod-1] <= 0){
+        // nearest product below with positive share
+        int j = num_prod - 2;
+        while(j >= 0 && shares_at_optimum[j] <= 0){ --j; }
+        if(j >= 0){
+            eigen_solution[num_prod-1] += 0.1*std::abs(eigen_solution[j] - eigen_solution[num_prod-1]);
+        }
     }
     // else, increase the deltas of the shares with zero predicted share
-    for(unsigned i=1; i<num_prod-1; ++i){
-        if(shares_at_optimum[i] == 0){
+    for(int i=1; i<num_prod-1; ++i){
+        if(shares_at_optimum[i] <= 0){
             eigen_solution[i] += 0.1*std::abs(eigen_solution[i-1] - eigen_solution[i+1]);
         }
     }
@@ -240,8 +257,31 @@ Eigen::ArrayXd cone_newton::invert(share_inversion::pcm_parameters & params)
 
     unsigned calls = 0;
     const unsigned max_calls = params.max_number_of_function_calls;
-    const unsigned max_iter  = 100;
+    const unsigned max_iter  = 200;
+    const double armijo = 1e-4;
+    const auto feasible = [](const Eigen::ArrayXd & s) {
+        return (s > 0).all() && s.sum() < 1.0 - share_inversion::MIN_ADMISSIBLE_SHARE;
+    };
 
+    // Move the starting point into the feasibility cone before iterating.
+    {
+        Eigen::ArrayXd s0 = pcm_share::unc_share(
+            delta, params.x, params.p, params.sigma_p,
+            params.sigma_x, params.grid, params.weights);
+        ++calls;
+        for (unsigned k = 0; k < 100 && !feasible(s0) && calls < max_calls; ++k)
+        {
+            std::vector<double> v(delta.data(), delta.data() + delta.size());
+            adjust_deltas_towards_positive_shares(s0, v);
+            delta = Eigen::Map<Eigen::ArrayXd>(v.data(), delta.size());
+            s0 = pcm_share::unc_share(
+                delta, params.x, params.p, params.sigma_p,
+                params.sigma_x, params.grid, params.weights);
+            ++calls;
+        }
+    }
+
+    double mu = 0.0;   // Levenberg-Marquardt damping, 0 means a pure Newton step
     for (unsigned iter = 0; iter < max_iter; ++iter)
     {
         if (calls >= max_calls)
@@ -254,24 +294,55 @@ Eigen::ArrayXd cone_newton::invert(share_inversion::pcm_parameters & params)
         ++calls;
 
         Eigen::ArrayXd r = s - params.data_shares;
+        const double merit = 0.5 * r.matrix().squaredNorm();
 
         if (r.abs().maxCoeff() < params.share_equality_tolerances)
             break;
 
-        Eigen::VectorXd step = cone_newton::compute_newton_step(J, r);
-
-        auto [delta_candidate, s_candidate] =
-            cone_newton::backtrack_to_feasibility(delta, step, params, calls);
-
-        if (!((s_candidate > 0).all()))
+        // Try the Newton step (mu == 0) first; on failure escalate damping.
+        bool accepted = false;
+        for (unsigned attempt = 0; attempt < 12 && !accepted && calls < max_calls; ++attempt)
         {
-            delta = cone_newton::recover_feasibility(
-                delta_candidate, s_candidate, params, calls);
+            Eigen::VectorXd step;
+            if (mu == 0.0) {
+                step = cone_newton::compute_newton_step(J, r);
+            } else {
+                const Eigen::MatrixXd JtJ = J.transpose() * J;
+                const double scale = JtJ.diagonal().maxCoeff();
+                Eigen::MatrixXd A = JtJ;
+                A.diagonal().array() += mu * scale;
+                step = A.ldlt().solve(-(J.transpose() * r.matrix()));
+            }
+            // directional derivative of the merit along step
+            const double slope = (r.matrix().transpose() * (J * step))(0, 0);
+
+            double lambda = 1.0;
+            for (unsigned k = 0; k < 40 && calls < max_calls; ++k, lambda *= 0.5)
+            {
+                Eigen::ArrayXd cand = delta + lambda * step.array();
+                Eigen::ArrayXd s_c = pcm_share::unc_share(
+                    cand, params.x, params.p, params.sigma_p,
+                    params.sigma_x, params.grid, params.weights);
+                ++calls;
+                if (!feasible(s_c))
+                    continue;
+                const double merit_c = 0.5 * (s_c - params.data_shares).matrix().squaredNorm();
+                const double bound = slope < 0 ? merit + armijo * lambda * slope : merit;
+                if (merit_c < bound) {
+                    delta = cand;
+                    accepted = true;
+                    break;
+                }
+            }
+            if (accepted) {
+                mu = (mu == 0.0) ? 0.0 : mu / 10.0;
+                if (mu < 1e-10) mu = 0.0;
+            } else {
+                mu = (mu == 0.0) ? 1e-6 : mu * 10.0;
+            }
         }
-        else
-        {
-            delta = delta_candidate;
-        }
+        if (!accepted)
+            break;   // no feasible descent step: stationary point of the merit
     }
 
     return delta;
