@@ -1,5 +1,7 @@
 project (share_computation LANGUAGES CXX)
-set(CMAKE_BUILD_TYPE Release)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
 cmake_minimum_required(VERSION 3.18)
 # set compiler to homebrew gcc and g++
 # set(CMAKE_C_COMPILER "/usr/local/bin/gcc-11")

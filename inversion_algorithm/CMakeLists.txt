@@ -1,5 +1,7 @@
 project (market_inversion)
-set(CMAKE_BUILD_TYPE Release)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
 
 find_package (Eigen3 3.4 REQUIRED NO_MODULE)
 find_package("NLopt")

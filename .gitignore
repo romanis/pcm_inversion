@@ -2,4 +2,7 @@ build
 .venv
 .vscode
 *.json
-__pycache__
+__pycache__build-dbg
+nevo_replication/.vendor
+nevo_replication/results/*.pkl
+nevo_replication/results/*.npz
