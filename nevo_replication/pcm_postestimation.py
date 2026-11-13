@@ -12,6 +12,7 @@ Run after pcm_nevo.py and blp_baseline.py:
 """
 from __future__ import annotations
 
+import os
 import pathlib
 
 import numpy as np
@@ -25,18 +26,29 @@ OUT = pathlib.Path(__file__).resolve().parent / "results"
 
 
 def main() -> None:
-    products = pd.read_csv(pyblp.data.NEVO_PRODUCTS_LOCATION)
+    raw = pd.read_csv(pyblp.data.NEVO_PRODUCTS_LOCATION)
     agents = pd.read_csv(pyblp.data.NEVO_AGENTS_LOCATION)
-    est = np.load(OUT / "pcm_estimates.npz")
+    tag = os.environ.get("PCM_TAG", "")
+    est = np.load(OUT / f"pcm_estimates{tag}.npz")
     theta, delta = est["theta"], est["delta"]
-    gh = int(pd.read_json(OUT / "pcm_estimates.json", typ="series")["gh_nodes"])
+    cfg = pd.read_json(OUT / f"pcm_estimates{tag}.json", typ="series")
+    # rebuild exactly the sample and consumers the estimation used
+    pn.configure(bool(cfg.get("firm_taste", False)))
+    agents = pn.expand_demographics(agents, int(cfg.get("demo_draws", 0)))
+    products = raw
+    if cfg.get("drop"):
+        ds, dp, ratio = (float(v) for v in cfg["drop"].split(","))
+        products = pn.drop_near_duplicates(raw, ds, dp, ratio)[0]
+    # rows of the BLP arrays (estimated on all 2,256 products) that match the kept products
+    key = raw.reset_index()[["index", "market_ids", "product_ids"]]
+    blp_rows = products.merge(key, on=["market_ids", "product_ids"], how="left")["index"].to_numpy()
     th, ph, sp = pn.split(theta)
 
     n = len(products)
     own = np.empty(n)
     n_cross_nonzero = np.empty(n)
     margins = {k: np.empty(n) for k in ("single_product", "multi_product", "collusion")}
-    for m in pn.build_markets(products, agents, gh):
+    for m in pn.build_markets(products, agents, int(cfg["gh_nodes"]), int(cfg.get("nu_draws", 0))):
         d = pd_cpp.shares(delta[m.rows], m.cpp, th, ph, sp, True)
         s, Jp, p = d["s"], d["d_price"], m.cpp.p
         assert np.max(np.abs(s - m.shares)) < 1e-10, m.market_id
@@ -55,26 +67,28 @@ def main() -> None:
 
     blp = np.load(OUT / "blp_baseline.npz")
     p_all = products.prices.to_numpy()
+    blp_margin = {k: blp[f"markup_{k}"].ravel()[blp_rows] / p_all for k in margins}
+    blp_own = blp["own_elasticities"].ravel()[blp_rows]
     rows = []
     for k in margins:
-        b = (blp[f"markup_{k}"].ravel() / p_all)
+        b = blp_margin[k]
         rows.append((f"margin (p-c)/p, {k}", np.median(margins[k]), np.mean(margins[k]), np.median(b), np.mean(b)))
-    rows.insert(0, ("own-price elasticity", np.median(own), np.mean(own),
-                    np.median(blp["own_elasticities"]), np.mean(blp["own_elasticities"])))
+    rows.insert(0, ("own-price elasticity", np.median(own), np.mean(own), np.median(blp_own), np.mean(blp_own)))
     table = pd.DataFrame(rows, columns=["quantity", "PCM median", "PCM mean", "BLP median", "BLP mean"]).set_index("quantity")
     # Nevo's decomposition: share of the collusive margin explained by each source
-    for model, mm in (("PCM", margins), ("BLP", {k: blp[f"markup_{k}"].ravel() / p_all for k in margins})):
+    for model, mm in (("PCM", margins), ("BLP", blp_margin)):
         med = {k: np.median(v) for k, v in mm.items()}
         table.loc[f"portfolio effect (multi - single), {model}", f"{model} median"] = med["multi_product"] - med["single_product"]
         table.loc[f"collusion effect (collusion - multi), {model}", f"{model} median"] = med["collusion"] - med["multi_product"]
     pd.set_option("display.width", 200)
+    print(f"sample: {n} brand-markets (BLP columns use the same rows of the full-sample BLP fit)")
     print(table.round(4).to_string())
     print(f"\nPCM brands with a nonzero cross-price elasticity, per brand: median {np.median(n_cross_nonzero):.0f} "
-          f"of 23 (BLP: all 23 by construction)")
-    table.to_csv(OUT / "pcm_vs_blp.csv")
+          f"of the other brands in the market (BLP: all of them by construction)")
+    table.to_csv(OUT / f"pcm_vs_blp{tag}.csv")
     pd.DataFrame({"market_ids": products.market_ids, "product_ids": products.product_ids,
                   "own_elasticity": own, "n_cross_nonzero": n_cross_nonzero,
-                  **{f"margin_{k}": v for k, v in margins.items()}}).to_csv(OUT / "pcm_product_level.csv", index=False)
+                  **{f"margin_{k}": v for k, v in margins.items()}}).to_csv(OUT / f"pcm_product_level{tag}.csv", index=False)
 
 
 if __name__ == "__main__":

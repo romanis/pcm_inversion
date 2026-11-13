@@ -43,8 +43,9 @@ OUT.mkdir(exist_ok=True)
 
 DEMOS = ["income", "income_squared", "age", "child"]
 CHARS = ["const", "sugar", "mushy"]
+FIRMS = [1, 2, 3, 4, 6]          # manufacturers in the fake cereal data
 # taste parameters: (name, characteristic column, basis)
-TASTE = [
+BASE_TASTE = [
     ("sigma_const", 0, "nu0"), ("sigma_sugar", 1, "nu1"), ("sigma_mushy", 2, "nu2"),
     ("pi_const_income", 0, "income"), ("pi_const_age", 0, "age"),
     ("pi_sugar_income", 1, "income"), ("pi_sugar_age", 1, "age"),
@@ -52,8 +53,35 @@ TASTE = [
 ]
 # demographic shifters of log price sensitivity, mirroring BLP's price x {income, income^2, child}
 SCALE = [("phi_price_income", "income"), ("phi_price_income_sq", "income_squared"), ("phi_price_child", "child")]
-NAMES = [t[0] for t in TASTE] + [s[0] for s in SCALE] + ["sigma_p"]
-N_TASTE, N_SCALE = len(TASTE), len(SCALE)
+N_SCALE = len(SCALE)
+FIRM_TASTE = False
+TASTE: list = []
+NAMES: list = []
+N_TASTE = 0
+
+
+def configure(firm_taste: bool) -> None:
+    """Choose the taste specification. With firm_taste, x gets one dummy column per firm and each
+    consumer draws an independent N(0, sigma_firm_f^2) taste for every firm's brands. Brand fixed
+    effects absorb the mean, so only the spread is estimated. It gives the model a horizontal
+    dimension that separates brands of different firms with near-identical sugar, mushy and price."""
+    global FIRM_TASTE, TASTE, NAMES, N_TASTE
+    FIRM_TASTE = firm_taste
+    TASTE = list(BASE_TASTE)
+    if firm_taste:
+        TASTE += [(f"sigma_firm{f}", 3 + k, f"nuf{f}") for k, f in enumerate(FIRMS)]
+    NAMES = [t[0] for t in TASTE] + [s[0] for s in SCALE] + ["sigma_p"]
+    N_TASTE = len(TASTE)
+
+
+configure(False)
+
+
+def sobol_normal(dim: int, n: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """n scrambled Sobol points mapped to standard normals, equal weights."""
+    from scipy.stats import norm, qmc
+    u = qmc.Sobol(dim, scramble=True, seed=seed).random(n)
+    return norm.ppf(u), np.full(n, 1.0 / n)
 
 
 def gauss_hermite(dim: int, n: int) -> tuple[np.ndarray, np.ndarray]:
@@ -74,8 +102,19 @@ class MarketData:
     theta_ok: np.ndarray = field(default=None)  # theta at which delta solves the inversion
 
 
-def build_markets(products: pd.DataFrame, agents: pd.DataFrame, gh_nodes: int) -> list[MarketData]:
-    nu, nu_w = gauss_hermite(3, gh_nodes)
+def build_markets(products: pd.DataFrame, agents: pd.DataFrame, gh_nodes: int,
+                  nu_draws: int = 0) -> list[MarketData]:
+    """Taste draws: a Gauss-Hermite product grid over the 3 characteristic tastes, or, when
+    nu_draws > 0 (required with firm tastes, where the dimension is 3 + 5), nu_draws Sobol points."""
+    dim = 3 + (len(FIRMS) if FIRM_TASTE else 0)
+    if nu_draws > 0:
+        nu, nu_w = sobol_normal(dim, nu_draws)
+    elif dim == 3:
+        nu, nu_w = gauss_hermite(3, gh_nodes)
+    else:
+        raise ValueError("firm tastes need nu_draws > 0 (a product grid in 8 dimensions is too large)")
+    if FIRM_TASTE and set(products.firm_ids.unique()) - set(FIRMS):
+        raise ValueError("unexpected firm ids")
     markets = []
     for mkt, prod in products.groupby("market_ids", sort=True):
         prod = prod.sort_values("prices")
@@ -88,10 +127,14 @@ def build_markets(products: pd.DataFrame, agents: pd.DataFrame, gh_nodes: int) -
         nux = np.tile(nu, (len(D), 1))
         w = np.repeat(ag.weights.to_numpy(float), len(nu)) * np.tile(nu_w, len(D))
         cols = {"nu0": nux[:, 0], "nu1": nux[:, 1], "nu2": nux[:, 2]}
+        cols.update({f"nuf{f}": nux[:, 3 + k] for k, f in enumerate(FIRMS) if FIRM_TASTE})
         cols.update({d: Dx[:, k] for k, d in enumerate(DEMOS)})
         taste_basis = np.column_stack([cols[b] for _, _, b in TASTE])
         scale_basis = np.column_stack([cols[b] for _, b in SCALE])
-        x = np.column_stack([np.ones(len(prod)), prod.sugar, prod.mushy]).astype(float)
+        xcols = [np.ones(len(prod)), prod.sugar, prod.mushy]
+        if FIRM_TASTE:
+            xcols += [(prod.firm_ids == f).astype(float) for f in FIRMS]
+        x = np.column_stack(xcols).astype(float)
         m = pd_cpp.Market(x, prod.prices.to_numpy(float), w, taste_basis,
                           [c for _, c, _ in TASTE], scale_basis)
         markets.append(MarketData(mkt, prod.index.to_numpy(), prod.shares.to_numpy(float), m))
@@ -156,9 +199,11 @@ def split(theta: np.ndarray):
 
 
 class PCMProblem:
-    def __init__(self, products: pd.DataFrame, agents: pd.DataFrame, gh_nodes: int = 5, workers: int = 94):
+    def __init__(self, products: pd.DataFrame, agents: pd.DataFrame, gh_nodes: int = 5, workers: int = 94,
+                 nu_draws: int = 0, path_seconds: float = 60.0):
+        self.path_seconds = path_seconds
         self.products = products
-        self.markets = build_markets(products, agents, gh_nodes)
+        self.markets = build_markets(products, agents, gh_nodes, nu_draws)
         self.n = len(products)
         brand = products.product_ids.to_numpy()
         self.brand_codes = pd.factorize(brand)[0]
@@ -178,27 +223,37 @@ class PCMProblem:
 
     def _solve_market(self, m: MarketData, theta: np.ndarray, grad: bool):
         th, ph, sp = split(theta)
+        t_start = time.time()
+        stages = []
         warm = m.delta if m.delta is not None else np.empty(0)
         r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, warm, 1e-13, 3000)
+        stages.append(f"warm {time.time() - t_start:.0f}s")
         if not r["converged"] and m.delta is not None:
             # Path in theta: from the last theta where this market inverted, move to the new
-            # theta in short steps, each warm-started from the previous solution.
+            # theta in short steps, each warm-started from the previous solution. Capped at
+            # PATH_SECONDS so one market cannot hold up the whole objective evaluation.
+            t0 = time.time()
             d, tau, step = m.delta, 0.0, 0.25
-            while tau < 1.0 and step > 1e-4:
+            while tau < 1.0 and step > 1e-4 and time.time() - t0 < self.path_seconds:
                 t = min(1.0, tau + step)
                 tt = m.theta_ok + t * (theta - m.theta_ok)
-                rr = pd_cpp.invert(m.shares, m.cpp, *split(tt), d, 1e-13, 3000)
+                rr = pd_cpp.invert(m.shares, m.cpp, *split(tt), d, 1e-13, 1000)
                 if rr["converged"]:
                     d, tau, step = rr["delta"], t, min(0.5, 2 * step)
                 else:
                     step /= 2
             if tau >= 1.0:
                 r = rr
+            stages.append(f"theta path to tau={tau:.3f} {time.time() - t0:.0f}s")
         if not r["converged"]:
+            t0 = time.time()
             rw = r
-            r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, np.empty(0), 1e-13, 6000)
+            r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, np.empty(0), 1e-13, 20000)
+            stages.append(f"cold {time.time() - t0:.0f}s")
             print(f"  {m.market_id}: warm start and theta path failed (resid {rw['max_abs_residual']:.1e}); "
                   f"cold: converged={r['converged']} resid {r['max_abs_residual']:.1e}", flush=True)
+        if time.time() - t_start > 30:
+            print(f"  {m.market_id}: slow inversion, {time.time() - t_start:.0f}s: {', '.join(stages)}", flush=True)
         out = {"delta": r["delta"], "converged": r["converged"], "resid": r["max_abs_residual"]}
         if grad:
             d = pd_cpp.shares(r["delta"], m.cpp, th, ph, sp, True)
@@ -261,18 +316,29 @@ def start_values() -> np.ndarray:
     th[NAMES.index("sigma_sugar")] = 0.003
     th[NAMES.index("sigma_mushy")] = 0.03
     th[NAMES.index("sigma_p")] = 0.5
+    for f in FIRMS if FIRM_TASTE else []:
+        th[NAMES.index(f"sigma_firm{f}")] = 0.02
+    if os.environ.get("PCM_START"):
+        # warm start from an earlier run's estimates; parameters it lacks keep the defaults above
+        prev = pd.read_csv(os.environ["PCM_START"], index_col=0)["estimate"]
+        for n, v in prev.items():
+            if n in NAMES:
+                th[NAMES.index(n)] = v
     return th
 
 
 def parameter_scales() -> np.ndarray:
     """Typical size of each parameter. Delta is in dollars per serving (prices 0.05 to 0.25), so
-    a taste spread of 0.05 on the constant, 0.003 per gram of sugar (sugar 0 to 20) and 0.03 on
-    mushy each move utility by a fraction of the price level. The optimizer works in u = theta / scale,
-    so its unit first step stays within that range instead of jumping sigma_sugar to ~1."""
+    a taste spread of 0.05 on the constant, 0.003 per gram of sugar (sugar 0 to 20), 0.03 on
+    mushy or on a firm dummy each move utility by a fraction of the price level. The optimizer works
+    in u = theta / scale, so its unit first step stays within that range instead of jumping
+    sigma_sugar to ~1."""
     sc = {"const": 0.05, "sugar": 0.003, "mushy": 0.03}
     out = []
     for n in NAMES:
-        if n.startswith(("sigma_const", "sigma_sugar", "sigma_mushy", "pi_")):
+        if n.startswith("sigma_firm"):
+            out.append(0.03)
+        elif n.startswith(("sigma_const", "sigma_sugar", "sigma_mushy", "pi_")):
             out.append(sc[n.split("_")[1]])
         elif n == "phi_price_income_sq":
             out.append(0.02)      # income^2 has sd 16
@@ -289,6 +355,9 @@ def main() -> None:
     gh = int(os.environ.get("PCM_GH_NODES", "5"))
     tag = os.environ.get("PCM_TAG", "")
     demo = int(os.environ.get("PCM_DEMO_DRAWS", "0"))
+    firm = os.environ.get("PCM_FIRM_TASTE", "") == "1"
+    nu_draws = int(os.environ.get("PCM_NU_DRAWS", "256" if firm else "0"))
+    configure(firm)
     agents = expand_demographics(agents, demo)
     if os.environ.get("PCM_DROP"):          # e.g. "2,0.02,10" = dsugar, rel dprice, share ratio
         ds, dp, ratio = (float(v) for v in os.environ["PCM_DROP"].split(","))
@@ -296,9 +365,11 @@ def main() -> None:
         dropped.to_csv(OUT / f"pcm_dropped{tag}.csv", index=False)
         print(f"dropped {len(dropped)} near-duplicate brand-markets in {dropped.market_ids.nunique()} markets:\n"
               f"{dropped.round(4).to_string(index=False)}")
-    prob = PCMProblem(products, agents, gh_nodes=gh)
-    print(f"{len(prob.markets)} markets, {len(products)} products, "
-          f"consumers per market {agents.groupby("market_ids").size().iloc[0] * gh ** 3}")
+    prob = PCMProblem(products, agents, gh_nodes=gh, nu_draws=nu_draws,
+                      workers=int(os.environ.get("PCM_WORKERS", "94")))
+    n_nu = nu_draws if nu_draws > 0 else gh ** 3
+    print(f"{len(prob.markets)} markets, {len(products)} products, firm tastes {firm}, "
+          f"consumers per market {agents.groupby('market_ids').size().iloc[0] * n_nu}")
 
     scale = parameter_scales()
     # sigmas are optimised in logs: sigma = scale * exp(u). At sigma = 0 the model can lose the
@@ -339,7 +410,8 @@ def main() -> None:
     table.to_csv(OUT / f"pcm_estimates{tag}.csv")
     with open(OUT / f"pcm_estimates{tag}.json", "w") as fh:
         json.dump({"objective": float(res.fun), "converged": bool(res.success), "message": str(res.message),
-                   "evaluations": prob.evals, "gh_nodes": gh, "demo_draws": demo, "drop": os.environ.get("PCM_DROP", "")}, fh, indent=2)
+                   "evaluations": prob.evals, "gh_nodes": gh, "demo_draws": demo, "drop": os.environ.get("PCM_DROP", ""),
+                   "firm_taste": firm, "nu_draws": nu_draws}, fh, indent=2)
 
 
 if __name__ == "__main__":

@@ -105,14 +105,13 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
         out.d_price = MatrixXd::Zero(N, N);
     }
 
-    // Draws are independent: each thread accumulates its own partial sums over a block of draws,
-    // and the blocks are added in a fixed order so results do not depend on the thread count.
-    // Small markets stay serial; the thread count follows OMP_NUM_THREADS.
-    const int min_draws_per_block = 64;
-    const int n_blocks = std::max(1, std::min(R / min_draws_per_block, omp_get_max_threads()));
+    // Draws are independent: fixed blocks of 64 draws each accumulate partial sums in parallel,
+    // and the blocks are added in index order, so results are bit-identical for any thread count.
+    const int block = 64;
+    const int n_blocks = std::max(1, (R + block - 1) / block);
     std::vector<Shares> part(n_blocks);
 
-#pragma omp parallel for schedule(static) num_threads(n_blocks) if(n_blocks > 1)
+#pragma omp parallel for schedule(dynamic) if(n_blocks > 1)
     for (int b = 0; b < n_blocks; ++b) {
         Shares & acc = part[b];
         acc.s = ArrayXd::Zero(N);
