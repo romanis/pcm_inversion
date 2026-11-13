@@ -137,16 +137,48 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
     return out;
 }
 
+InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Params & prm,
+                            const ArrayXd & delta0, double tol, unsigned max_evals, unsigned & evals);
+
 InversionResult invert(const ArrayXd & s_data, const Market & mk, const Params & prm,
                        const ArrayXd & delta0, double tol, unsigned max_evals)
 {
-    const int N = static_cast<int>(s_data.size());
     if ((s_data <= 0).any() || s_data.sum() >= 1.0)
         throw std::runtime_error("pcm_demand::invert: data shares must be positive and sum below one");
+    unsigned evals = 0;
+    InversionResult res = invert_from(s_data, mk, prm, delta0, tol, max_evals, evals);
+    if (res.converged) { res.share_evaluations = evals; return res; }
 
+    // Continuation in the heterogeneity: at lambda = 0 (no taste or scale heterogeneity) the
+    // vertical-model guess is exact; raise lambda to 1, warm-starting each step from the last.
+    ArrayXd delta = pcm_share::initial_guess(s_data, mk.p, prm.sigma_p);
+    double lambda = 0.0, step = 0.25;
+    unsigned iters = 0;
+    while (lambda < 1.0 && evals < max_evals && step > 1e-6) {
+        const double target = std::min(1.0, lambda + step);
+        Params pl{prm.theta * target, prm.phi * target, prm.sigma_p};
+        InversionResult r = invert_from(s_data, mk, pl, delta, tol, max_evals, evals);
+        iters += r.iterations;
+        if (r.converged) { delta = r.delta; lambda = target; step *= 1.5; }
+        else             { step *= 0.5; }
+    }
+    if (lambda >= 1.0) {
+        res = invert_from(s_data, mk, prm, delta, tol, max_evals, evals);
+        res.iterations += iters;
+    }
+    res.share_evaluations = evals;
+    return res;
+}
+
+InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Params & prm,
+                            const ArrayXd & delta0, double tol, unsigned max_evals, unsigned & evals)
+{
+    const int N = static_cast<int>(s_data.size());
     InversionResult res{ArrayXd(), 0.0, 0, 0, false};
-    unsigned & evals = res.share_evaluations;
     auto S = [&](const ArrayXd & d) { ++evals; return shares(d, mk, prm, false).s; };
+    const ArrayXd log_sd = s_data.log();
+    // Residual in log shares: a 0.1% brand weighs as much as a 10% brand.
+    auto logres = [&](const ArrayXd & s) { return (s.log() - log_sd).eval(); };
 
     // starting point: caller's warm start if feasible, else the no-heterogeneity vertical guess
     ArrayXd delta;
@@ -174,11 +206,12 @@ InversionResult invert(const ArrayXd & s_data, const Market & mk, const Params &
         res.iterations = iter;
         Shares sh = shares(delta, mk, prm, true);
         ++evals;
-        const ArrayXd r = sh.s - s_data;
-        res.max_abs_residual = r.abs().maxCoeff();
+        res.max_abs_residual = (sh.s - s_data).abs().maxCoeff();
         if (res.max_abs_residual < tol) { res.converged = true; break; }
+        const ArrayXd r = logres(sh.s);
         const double merit = 0.5 * r.matrix().squaredNorm();
-        const MatrixXd & J = sh.d_delta;
+        // Jacobian of log shares: rows of ds/d delta divided by s
+        const MatrixXd J = sh.s.inverse().matrix().asDiagonal() * sh.d_delta;
 
         bool accepted = false;
         for (int attempt = 0; attempt < 14 && !accepted && evals < max_evals; ++attempt) {
@@ -197,7 +230,7 @@ InversionResult invert(const ArrayXd & s_data, const Market & mk, const Params &
                 const ArrayXd cand = delta + lambda * step.array();
                 const ArrayXd sc = S(cand);
                 if (!feasible(sc)) continue;
-                const double mc = 0.5 * (sc - s_data).matrix().squaredNorm();
+                const double mc = 0.5 * logres(sc).matrix().squaredNorm();
                 if (mc < (slope < 0 ? merit + 1e-4 * lambda * slope : merit)) {
                     delta = cand; accepted = true; break;
                 }
