@@ -149,6 +149,33 @@ InversionResult invert(const ArrayXd & s_data, const Market & mk, const Params &
     InversionResult res = invert_from(s_data, mk, prm, delta0, tol, max_evals, evals);
     if (res.converged) { res.share_evaluations = evals; return res; }
 
+    // Path following in shares: from a feasible delta with known shares s0, solve for the targets
+    // s(tau) = (1 - tau) s0 + tau s_data, tau 0 -> 1, each solve warm-started from the last.
+    // Newton directions go wrong across kinks (brands entering a consumer's frontier); short
+    // steps keep every solve inside one smooth piece most of the time.
+    {
+        ArrayXd d = res.delta.size() == s_data.size() ? res.delta : ArrayXd();
+        ArrayXd s0;
+        if (d.size()) { ++evals; s0 = shares(d, mk, prm, false).s; }
+        if (d.size() && feasible(s0)) {
+            double tau = 0.0, step = 0.1;
+            unsigned iters = 0;
+            while (tau < 1.0 && evals < max_evals && step > 1e-7) {
+                const double target = std::min(1.0, tau + step);
+                const ArrayXd st = (1.0 - target) * s0 + target * s_data;
+                InversionResult r = invert_from(st, mk, prm, d, tol, max_evals, evals);
+                iters += r.iterations;
+                if (r.converged) { d = r.delta; tau = target; step = std::min(0.5, step * 2.0); }
+                else             { step *= 0.5; }
+            }
+            if (tau >= 1.0) {
+                res = invert_from(s_data, mk, prm, d, tol, max_evals, evals);
+                res.iterations += iters;
+                if (res.converged) { res.share_evaluations = evals; return res; }
+            }
+        }
+    }
+
     // Continuation in the heterogeneity: at lambda = 0 (no taste or scale heterogeneity) the
     // vertical-model guess is exact; raise lambda to 1, warm-starting each step from the last.
     ArrayXd delta = pcm_share::initial_guess(s_data, mk.p, prm.sigma_p);
@@ -202,7 +229,7 @@ InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Par
     }
 
     double mu = 0.0;
-    for (unsigned iter = 0; iter < 500 && evals < max_evals; ++iter) {
+    for (unsigned iter = 0; iter < 150 && evals < max_evals; ++iter) {
         res.iterations = iter;
         Shares sh = shares(delta, mk, prm, true);
         ++evals;
@@ -214,7 +241,7 @@ InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Par
         const MatrixXd J = sh.s.inverse().matrix().asDiagonal() * sh.d_delta;
 
         bool accepted = false;
-        for (int attempt = 0; attempt < 14 && !accepted && evals < max_evals; ++attempt) {
+        for (int attempt = 0; attempt < 8 && !accepted && evals < max_evals; ++attempt) {
             VectorXd step;
             if (mu == 0.0) {
                 step = J.partialPivLu().solve(-r.matrix());
@@ -226,7 +253,7 @@ InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Par
             }
             const double slope = r.matrix().dot(J * step);
             double lambda = 1.0;
-            for (int k = 0; k < 40 && evals < max_evals; ++k, lambda *= 0.5) {
+            for (int k = 0; k < 30 && evals < max_evals; ++k, lambda *= 0.5) {
                 const ArrayXd cand = delta + lambda * step.array();
                 const ArrayXd sc = S(cand);
                 if (!feasible(sc)) continue;

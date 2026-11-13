@@ -71,6 +71,7 @@ class MarketData:
     shares: np.ndarray
     cpp: object                 # pd_cpp.Market
     delta: np.ndarray = field(default=None)  # warm start
+    theta_ok: np.ndarray = field(default=None)  # theta at which delta solves the inversion
 
 
 def build_markets(products: pd.DataFrame, agents: pd.DataFrame, gh_nodes: int) -> list[MarketData]:
@@ -125,14 +126,37 @@ class PCMProblem:
     def _solve_market(self, m: MarketData, theta: np.ndarray, grad: bool):
         th, ph, sp = split(theta)
         warm = m.delta if m.delta is not None else np.empty(0)
-        r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, warm, 1e-13, 20000)
+        r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, warm, 1e-13, 3000)
+        if not r["converged"] and m.delta is not None:
+            # Path in theta: from the last theta where this market inverted, move to the new
+            # theta in short steps, each warm-started from the previous solution.
+            d, tau, step = m.delta, 0.0, 0.25
+            while tau < 1.0 and step > 1e-4:
+                t = min(1.0, tau + step)
+                tt = m.theta_ok + t * (theta - m.theta_ok)
+                rr = pd_cpp.invert(m.shares, m.cpp, *split(tt), d, 1e-13, 3000)
+                if rr["converged"]:
+                    d, tau, step = rr["delta"], t, min(0.5, 2 * step)
+                else:
+                    step /= 2
+            if tau >= 1.0:
+                r = rr
         if not r["converged"]:
-            # retry cold: a warm start from a distant theta can sit in a bad basin
+            rw = r
             r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, np.empty(0), 1e-13, 20000)
+            print(f"  {m.market_id}: warm start and theta path failed (resid {rw['max_abs_residual']:.1e}); "
+                  f"cold: converged={r['converged']} resid {r['max_abs_residual']:.1e}", flush=True)
         out = {"delta": r["delta"], "converged": r["converged"], "resid": r["max_abs_residual"]}
         if grad:
             d = pd_cpp.shares(r["delta"], m.cpp, th, ph, sp, True)
-            out["ddelta"] = -np.linalg.solve(d["d_delta"], d["d_theta"])
+            try:
+                out["ddelta"] = -np.linalg.solve(d["d_delta"], d["d_theta"])
+            except np.linalg.LinAlgError:
+                zero = np.flatnonzero(np.abs(d["d_delta"]).sum(1) == 0)
+                print(f"  {m.market_id}: singular ds/ddelta, rows with no derivative {zero.tolist()}, "
+                      f"shares {d['s'][zero].tolist()}", flush=True)
+                out["ddelta"] = np.full_like(d["d_theta"], np.nan)
+                out["converged"] = False
         return out
 
     def delta(self, theta: np.ndarray, grad: bool):
@@ -149,6 +173,7 @@ class PCMProblem:
             worst = max(worst, float(r["resid"]))
             if r["converged"]:
                 m.delta = r["delta"]
+                m.theta_ok = theta.copy()
         return delta, ddelta, ok, worst
 
     def objective(self, theta: np.ndarray):
@@ -162,7 +187,8 @@ class PCMProblem:
         dq = 2 * self.n * (G.T @ self.W @ g)
         self.last = dict(theta=theta.copy(), delta=delta, xi=xi, q=q, G=G, ok=ok)
         print(f"eval {self.evals:4d}  q={q:.6e}  |grad|={np.abs(dq).max():.2e}  "
-              f"inversions_ok={ok} worst_resid={worst:.1e}  {time.time() - t0:.1f}s", flush=True)
+              f"inversions_ok={ok} worst_resid={worst:.1e}  {time.time() - t0:.1f}s\n"
+              f"      theta={np.array2string(theta, precision=4, max_line_width=250)}", flush=True)
         if not ok:
             return 1e10, np.zeros_like(theta)
         return q, dq
@@ -185,6 +211,25 @@ def start_values() -> np.ndarray:
     return th
 
 
+def parameter_scales() -> np.ndarray:
+    """Typical size of each parameter. Delta is in dollars per serving (prices 0.05 to 0.25), so
+    a taste spread of 0.05 on the constant, 0.003 per gram of sugar (sugar 0 to 20) and 0.03 on
+    mushy each move utility by a fraction of the price level. The optimizer works in u = theta / scale,
+    so its unit first step stays within that range instead of jumping sigma_sugar to ~1."""
+    sc = {"const": 0.05, "sugar": 0.003, "mushy": 0.03}
+    out = []
+    for n in NAMES:
+        if n.startswith(("sigma_const", "sigma_sugar", "sigma_mushy", "pi_")):
+            out.append(sc[n.split("_")[1]])
+        elif n == "phi_price_income_sq":
+            out.append(0.02)      # income^2 has sd 16
+        elif n.startswith("phi_"):
+            out.append(0.3)
+        else:
+            out.append(0.5)       # sigma_p
+    return np.array(out)
+
+
 def main() -> None:
     products = pd.read_csv(pyblp.data.NEVO_PRODUCTS_LOCATION)
     agents = pd.read_csv(pyblp.data.NEVO_AGENTS_LOCATION)
@@ -193,11 +238,35 @@ def main() -> None:
     print(f"{len(prob.markets)} markets, {len(products)} products, "
           f"{prob.markets[0].cpp.p.size} brands, consumers per market {20 * gh ** 3}")
 
-    bounds = [(0.0, None) if n.startswith("sigma") else (None, None) for n in NAMES]
-    bounds[NAMES.index("sigma_p")] = (1e-3, None)
+    scale = parameter_scales()
+    # sigmas are optimised in logs: sigma = scale * exp(u). At sigma = 0 the model can lose the
+    # continuous taste heterogeneity it needs to rationalise every brand's share (the inversion
+    # then has no solution), so the boundary must not be reachable by a single step.
+    is_log = np.array([n.startswith("sigma") for n in NAMES])
+
+    def to_theta(u):
+        return np.where(is_log, scale * np.exp(np.where(is_log, u, 0.0)), scale * u)
+
+    def scaled(u):
+        th = to_theta(u)
+        q, dq = prob.objective(th)
+        return q, dq * np.where(is_log, th, scale)
+
+    u0 = np.where(is_log, np.log(np.maximum(start_values(), 1e-12) / scale), start_values() / scale)
     t0 = time.time()
-    res = minimize(prob.objective, start_values(), jac=True, method="L-BFGS-B", bounds=bounds,
-                   options={"gtol": 1e-8, "ftol": 1e-12, "maxiter": 500})
+    # Restart L-BFGS from its own answer: with finite draws the objective has kinks where a brand
+    # enters or leaves a consumer's frontier, and a kink can end a line search early.
+    best = None
+    for restart in range(6):
+        res = minimize(scaled, u0 if best is None else best.x, jac=True, method="L-BFGS-B",
+                       options={"gtol": 1e-6, "ftol": 1e-12, "maxiter": 500})
+        print(f"restart {restart}: q={res.fun:.6e} {res.message}", flush=True)
+        if best is not None and res.fun > best.fun - 1e-7 * abs(best.fun):
+            best = res if res.fun < best.fun else best
+            break
+        best = res
+    res = best
+    res.x = to_theta(res.x)
     print(res.message, f"{time.time() - t0:.0f}s")
     se = prob.standard_errors(res.x)
     table = pd.DataFrame({"estimate": res.x, "robust_se": se}, index=NAMES)
