@@ -98,6 +98,59 @@ def build_markets(products: pd.DataFrame, agents: pd.DataFrame, gh_nodes: int) -
     return markets
 
 
+def expand_demographics(agents: pd.DataFrame, per_market: int, seed: int = 0) -> pd.DataFrame:
+    """Smooth each market's demographic draws to `per_market` draws.
+
+    The fake-data agent file has 20 draws per market, so demographic tastes take only ~20 values and
+    shares jump when a brand wins or loses one whole type. Each new draw copies a random original
+    draw from the same market, adds Gaussian noise to income and age with Silverman's bandwidth
+    (computed per market), keeps the child flag, and recomputes income_squared with the identity
+    the file satisfies exactly: income_squared = income^2 + 18.1139 income - 0.8824.
+    """
+    if per_market <= 0:
+        return agents
+    rng = np.random.default_rng(seed)
+    a_sq = np.linalg.lstsq(np.column_stack([np.ones(len(agents)), agents.income, agents.income ** 2]),
+                           agents.income_squared, rcond=None)[0]
+    out = []
+    for mkt, g in agents.groupby("market_ids", sort=True):
+        n = len(g)
+        pick = rng.integers(0, n, per_market)
+        new = g.iloc[pick].copy()
+        for col in ("income", "age"):
+            h = 1.06 * g[col].std() * n ** (-0.2)
+            new[col] = new[col].to_numpy() + h * rng.standard_normal(per_market)
+        new["income_squared"] = a_sq[0] + a_sq[1] * new.income + a_sq[2] * new.income ** 2
+        new["weights"] = 1.0 / per_market
+        out.append(new)
+    return pd.concat(out, ignore_index=True)
+
+
+def drop_near_duplicates(products: pd.DataFrame, max_dsugar: float, max_rel_dprice: float,
+                         min_share_ratio: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Within each market, for every pair of brands with the same mushy value, sugar within
+    max_dsugar grams and prices within max_rel_dprice of each other, drop the smaller brand when
+    the larger outsells it by more than min_share_ratio. Dropped shares go to the outside good.
+    Returns (kept products, dropped rows with the brand that dominated each one)."""
+    drop = []
+    for mkt, d in products.groupby("market_ids"):
+        idx = d.index.to_numpy()
+        for a in range(len(idx)):
+            for b in range(a + 1, len(idx)):
+                ra, rb = products.loc[idx[a]], products.loc[idx[b]]
+                if ra.mushy != rb.mushy or abs(ra.sugar - rb.sugar) > max_dsugar:
+                    continue
+                if abs(ra.prices - rb.prices) / min(ra.prices, rb.prices) >= max_rel_dprice:
+                    continue
+                big, small = (ra, rb) if ra.shares >= rb.shares else (rb, ra)
+                if big.shares / small.shares > min_share_ratio:
+                    drop.append((small.name, big.product_ids))
+    dropped_idx = sorted({i for i, _ in drop})
+    dropped = products.loc[dropped_idx, ["market_ids", "product_ids", "prices", "sugar", "mushy", "shares"]].copy()
+    dropped["dominated_by"] = [next(b for i, b in drop if i == k) for k in dropped_idx]
+    return products.drop(index=dropped_idx).reset_index(drop=True), dropped
+
+
 def split(theta: np.ndarray):
     return theta[:N_TASTE], theta[N_TASTE:N_TASTE + N_SCALE], float(theta[-1])
 
@@ -143,7 +196,7 @@ class PCMProblem:
                 r = rr
         if not r["converged"]:
             rw = r
-            r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, np.empty(0), 1e-13, 20000)
+            r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, np.empty(0), 1e-13, 6000)
             print(f"  {m.market_id}: warm start and theta path failed (resid {rw['max_abs_residual']:.1e}); "
                   f"cold: converged={r['converged']} resid {r['max_abs_residual']:.1e}", flush=True)
         out = {"delta": r["delta"], "converged": r["converged"], "resid": r["max_abs_residual"]}
@@ -234,9 +287,18 @@ def main() -> None:
     products = pd.read_csv(pyblp.data.NEVO_PRODUCTS_LOCATION)
     agents = pd.read_csv(pyblp.data.NEVO_AGENTS_LOCATION)
     gh = int(os.environ.get("PCM_GH_NODES", "5"))
+    tag = os.environ.get("PCM_TAG", "")
+    demo = int(os.environ.get("PCM_DEMO_DRAWS", "0"))
+    agents = expand_demographics(agents, demo)
+    if os.environ.get("PCM_DROP"):          # e.g. "2,0.02,10" = dsugar, rel dprice, share ratio
+        ds, dp, ratio = (float(v) for v in os.environ["PCM_DROP"].split(","))
+        products, dropped = drop_near_duplicates(products, ds, dp, ratio)
+        dropped.to_csv(OUT / f"pcm_dropped{tag}.csv", index=False)
+        print(f"dropped {len(dropped)} near-duplicate brand-markets in {dropped.market_ids.nunique()} markets:\n"
+              f"{dropped.round(4).to_string(index=False)}")
     prob = PCMProblem(products, agents, gh_nodes=gh)
     print(f"{len(prob.markets)} markets, {len(products)} products, "
-          f"{prob.markets[0].cpp.p.size} brands, consumers per market {20 * gh ** 3}")
+          f"consumers per market {agents.groupby("market_ids").size().iloc[0] * gh ** 3}")
 
     scale = parameter_scales()
     # sigmas are optimised in logs: sigma = scale * exp(u). At sigma = 0 the model can lose the
@@ -273,11 +335,11 @@ def main() -> None:
     print(table)
 
     delta = prob.last["delta"]
-    np.savez(OUT / "pcm_estimates.npz", theta=res.x, se=se, delta=delta, xi=prob.last["xi"])
-    table.to_csv(OUT / "pcm_estimates.csv")
-    with open(OUT / "pcm_estimates.json", "w") as fh:
+    np.savez(OUT / f"pcm_estimates{tag}.npz", theta=res.x, se=se, delta=delta, xi=prob.last["xi"])
+    table.to_csv(OUT / f"pcm_estimates{tag}.csv")
+    with open(OUT / f"pcm_estimates{tag}.json", "w") as fh:
         json.dump({"objective": float(res.fun), "converged": bool(res.success), "message": str(res.message),
-                   "evaluations": prob.evals, "gh_nodes": gh}, fh, indent=2)
+                   "evaluations": prob.evals, "gh_nodes": gh, "demo_draws": demo, "drop": os.environ.get("PCM_DROP", "")}, fh, indent=2)
 
 
 if __name__ == "__main__":

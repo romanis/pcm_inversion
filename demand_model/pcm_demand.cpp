@@ -2,6 +2,7 @@
 #include "pcm_market_share.hpp"
 
 #include <cmath>
+#include <omp.h>
 #include <stdexcept>
 #include <algorithm>
 
@@ -103,36 +104,64 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
         out.d_theta = MatrixXd::Zero(N, M + Q + 1);
         out.d_price = MatrixXd::Zero(N, N);
     }
-    ArrayXd s_c(N), dsig(N);
-    MatrixXd Jd(N, N), Jp(N, N);
-    VectorXd t(K);
 
-    for (int i = 0; i < R; ++i) {
-        t.setZero();
-        for (int m = 0; m < M; ++m) t[mk.taste_col[m]] += prm.theta[m] * mk.taste_basis(i, m);
-        const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
-        const double c = std::exp(log_c);
-        const ArrayXd dc = (delta + (mk.x * t).array()) / c;
+    // Draws are independent: each thread accumulates its own partial sums over a block of draws,
+    // and the blocks are added in a fixed order so results do not depend on the thread count.
+    // Small markets stay serial; the thread count follows OMP_NUM_THREADS.
+    const int min_draws_per_block = 64;
+    const int n_blocks = std::max(1, std::min(R / min_draws_per_block, omp_get_max_threads()));
+    std::vector<Shares> part(n_blocks);
 
-        s_c.setZero();
-        if (with_derivatives) { Jd.setZero(); Jp.setZero(); dsig.setZero(); }
-        cond_vertical(dc, mk.p, prm.sigma_p, s_c,
-                      with_derivatives ? &Jd : nullptr, &dsig, &Jp);
-
-        const double w = mk.weights[i];
-        out.s += w * s_c;
-        if (!with_derivatives) continue;
-
-        out.d_delta.noalias() += (w / c) * Jd;
-        out.d_price.noalias() += w * Jp;
-        for (int m = 0; m < M; ++m)
-            out.d_theta.col(m).noalias() += (w * mk.taste_basis(i, m) / c) * (Jd * mk.x.col(mk.taste_col[m]));
-        if (Q > 0) {
-            const VectorXd Jdc = Jd * dc.matrix();
-            for (int q = 0; q < Q; ++q)
-                out.d_theta.col(M + q).noalias() += (-w * mk.scale_basis(i, q)) * Jdc;
+#pragma omp parallel for schedule(static) num_threads(n_blocks) if(n_blocks > 1)
+    for (int b = 0; b < n_blocks; ++b) {
+        Shares & acc = part[b];
+        acc.s = ArrayXd::Zero(N);
+        if (with_derivatives) {
+            acc.d_delta = MatrixXd::Zero(N, N);
+            acc.d_theta = MatrixXd::Zero(N, M + Q + 1);
+            acc.d_price = MatrixXd::Zero(N, N);
         }
-        out.d_theta.col(M + Q) += w * dsig.matrix();
+        ArrayXd s_c(N), dsig(N);
+        MatrixXd Jd(N, N), Jp(N, N);
+        VectorXd t(K);
+        const int i0 = static_cast<int>((static_cast<long>(R) * b) / n_blocks);
+        const int i1 = static_cast<int>((static_cast<long>(R) * (b + 1)) / n_blocks);
+
+        for (int i = i0; i < i1; ++i) {
+            t.setZero();
+            for (int m = 0; m < M; ++m) t[mk.taste_col[m]] += prm.theta[m] * mk.taste_basis(i, m);
+            const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
+            const double c = std::exp(log_c);
+            const ArrayXd dc = (delta + (mk.x * t).array()) / c;
+
+            s_c.setZero();
+            if (with_derivatives) { Jd.setZero(); Jp.setZero(); dsig.setZero(); }
+            cond_vertical(dc, mk.p, prm.sigma_p, s_c,
+                          with_derivatives ? &Jd : nullptr, &dsig, &Jp);
+
+            const double w = mk.weights[i];
+            acc.s += w * s_c;
+            if (!with_derivatives) continue;
+
+            acc.d_delta.noalias() += (w / c) * Jd;
+            acc.d_price.noalias() += w * Jp;
+            for (int m = 0; m < M; ++m)
+                acc.d_theta.col(m).noalias() += (w * mk.taste_basis(i, m) / c) * (Jd * mk.x.col(mk.taste_col[m]));
+            if (Q > 0) {
+                const VectorXd Jdc = Jd * dc.matrix();
+                for (int q = 0; q < Q; ++q)
+                    acc.d_theta.col(M + q).noalias() += (-w * mk.scale_basis(i, q)) * Jdc;
+            }
+            acc.d_theta.col(M + Q) += w * dsig.matrix();
+        }
+    }
+    for (const Shares & acc : part) {
+        out.s += acc.s;
+        if (with_derivatives) {
+            out.d_delta += acc.d_delta;
+            out.d_theta += acc.d_theta;
+            out.d_price += acc.d_price;
+        }
     }
     return out;
 }
