@@ -21,6 +21,7 @@ FetchContent_MakeAvailable(googletest)
 
 add_subdirectory(market_share)
 add_subdirectory(inversion_algorithm)
+add_subdirectory(demand_model)
 
 # FIND_PACKAGE(LATEX)
 # IF(LATEX_FOUND)

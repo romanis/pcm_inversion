@@ -56,6 +56,10 @@ if(pybind11_FOUND)
     target_include_directories(python_pcm_inversion PUBLIC "${ROOT}/inversion_algorithm/")
     target_link_libraries(python_pcm_inversion PUBLIC Eigen3::Eigen )
     target_link_libraries(python_pcm_inversion PUBLIC market_inversion )
+
+    pybind11_add_module(python_pcm_demand "${ROOT}/python_bindings/pcm_demand_python.cpp")
+    target_include_directories(python_pcm_demand PUBLIC "${ROOT}/market_share/" "${ROOT}/demand_model/")
+    target_link_libraries(python_pcm_demand PUBLIC pcm_demand Eigen3::Eigen)
     
 
 

@@ -6,3 +6,5 @@ __pycache__build-dbg
 nevo_replication/.vendor
 nevo_replication/results/*.pkl
 nevo_replication/results/*.npz
+build-rel
+__pycache__
