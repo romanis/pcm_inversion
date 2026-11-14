@@ -338,7 +338,7 @@ InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Par
         const MatrixXd J = sh.s.inverse().matrix().asDiagonal() * sh.d_delta;
 
         bool accepted = false;
-        for (int attempt = 0; attempt < 8 && !accepted && evals < max_evals; ++attempt) {
+        for (int attempt = 0; attempt < 6 && !accepted && evals < max_evals; ++attempt) {
             VectorXd step;
             if (mu == 0.0) {
                 step = J.partialPivLu().solve(-r.matrix());
@@ -350,7 +350,7 @@ InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Par
             }
             const double slope = r.matrix().dot(J * step);
             double lambda = 1.0;
-            for (int k = 0; k < 30 && evals < max_evals; ++k, lambda *= 0.5) {
+            for (int k = 0; k < 14 && evals < max_evals; ++k, lambda *= 0.5) {
                 const ArrayXd cand = delta + lambda * step.array();
                 const ArrayXd sc = S(cand);
                 if (!feasible(sc)) continue;

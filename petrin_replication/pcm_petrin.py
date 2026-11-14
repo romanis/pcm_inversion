@@ -47,6 +47,7 @@ SCALE = [("phi_low_inc", "low_inc"), ("phi_mid_inc", "mid_inc"), ("phi_high_inc"
 NAMES = [t[0] for t in TASTE] + [s[0] for s in SCALE] + ["sigma_p"]
 N_TASTE, N_SCALE = len(TASTE), len(SCALE)
 N_ZD = 22
+TOL = 1e-10          # max |s_model - s_data|; shares are 1e-5 to 5e-3, so this is 1e-5 relative at worst
 
 
 def split(theta):
@@ -104,7 +105,7 @@ def build_markets(products: pd.DataFrame, agents: pd.DataFrame, nu_per_agent: in
 
 
 class PCMProblem:
-    def __init__(self, products, agents, nu_per_agent=4, workers=13, path_seconds=120.0):
+    def __init__(self, products, agents, nu_per_agent=4, workers=13, path_seconds=60.0):
         self.products = products
         self.path_seconds = path_seconds
         self.markets = build_markets(products, agents, nu_per_agent)
@@ -127,14 +128,16 @@ class PCMProblem:
         th, ph, sp = split(theta)
         t_start, stages = time.time(), []
         warm = m.delta if m.delta is not None else np.empty(0)
-        r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, warm, 1e-12, 3000 if m.delta is not None else 20000)
+        # a trial point gets a short first try; most of the run's time was going into trial
+        # points the optimizer then rejected
+        r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, warm, TOL, 8000 if m.delta is not None else 20000)
         stages.append(f"warm {time.time() - t_start:.0f}s")
         if not r["converged"] and m.delta is not None:
             t0 = time.time()
-            d, tau, step = m.delta, 0.0, 0.25
-            while tau < 1.0 and step > 1e-4 and time.time() - t0 < self.path_seconds:
+            d, tau, step = m.delta, 0.0, 0.5
+            while tau < 1.0 and step > 1e-3 and time.time() - t0 < self.path_seconds:
                 t = min(1.0, tau + step)
-                rr = pd_cpp.invert(m.shares, m.cpp, *split(m.theta_ok + t * (theta - m.theta_ok)), d, 1e-12, 1000)
+                rr = pd_cpp.invert(m.shares, m.cpp, *split(m.theta_ok + t * (theta - m.theta_ok)), d, TOL, 2000)
                 if rr["converged"]:
                     d, tau, step = rr["delta"], t, min(0.5, 2 * step)
                 else:
@@ -142,13 +145,14 @@ class PCMProblem:
             if tau >= 1.0:
                 r = rr
             stages.append(f"theta path to tau={tau:.3f} {time.time() - t0:.0f}s")
-        if not r["converged"]:
+        if not r["converged"] and m.delta is None:
             t0 = time.time()
-            rw = r
-            r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, np.empty(0), 1e-12, 20000)
+            r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, np.empty(0), TOL, 40000)
             stages.append(f"cold {time.time() - t0:.0f}s")
-            print(f"  {m.market_id}: warm start failed (resid {rw['max_abs_residual']:.1e}); "
-                  f"cold: converged={r['converged']} resid {r['max_abs_residual']:.1e}", flush=True)
+        if not r["converged"]:
+            # no cold restart at a trial point: a far-away theta the optimizer is probing is
+            # rejected (objective 1e10) and L-BFGS shortens its step
+            print(f"  {m.market_id}: inversion failed (resid {r['max_abs_residual']:.1e}): {', '.join(stages)}", flush=True)
         if time.time() - t_start > 60:
             print(f"  {m.market_id}: slow inversion {time.time() - t_start:.0f}s: {', '.join(stages)}", flush=True)
         out = {"delta": r["delta"], "converged": r["converged"], "resid": r["max_abs_residual"]}
@@ -229,7 +233,7 @@ def parameter_scales():
     """delta is in $1000; a taste spread of a few $1000 on a characteristic is the natural unit."""
     sc = {"sigma_const": 3.0, "sigma_hpwt": 2.0, "sigma_space": 1.0, "sigma_air": 0.5, "sigma_mpd": 1.0, "sigma_fwd": 1.0,
           "pi_mi_logfs_fv": 0.3, "pi_sw_logfs_fv": 0.3, "pi_su_logfs_fv": 0.3, "pi_pv_logfs_fv": 0.3,
-          "phi_low_inc": 5.0, "phi_mid_inc": 5.0, "phi_high_inc": 5.0, "sigma_p": 0.5}
+          "phi_low_inc": 1.0, "phi_mid_inc": 1.0, "phi_high_inc": 1.0, "sigma_p": 0.5}
     return np.array([sc[n] for n in NAMES])
 
 
@@ -254,17 +258,34 @@ def main():
 
     th0 = start_values()
     u0 = np.where(is_log, np.log(np.maximum(th0, 1e-12) / scale), th0 / scale)
+    # sigma_p in [0.05, 2]: a log price-sensitivity sd above 2 (95% range of 3000x) makes the
+    # inversion fail in every market; the other parameters are free
+    sp_lo, sp_hi = np.log(0.05 / scale[-1]), np.log(2.0 / scale[-1])
+    radius = float(os.environ.get("PCM_TRUST", "0.3"))
+
+    def trust_bounds(center):
+        """Box of +-radius (in scaled units) around the last accepted point: L-BFGS-B has no
+        step limit, and its long trial steps toward small sigmas landed where the inversion
+        stalls (residual 1e-4 to 1e-3 after 20,000 evaluations) at 250-450 s each."""
+        b = [(c - radius, c + radius) for c in center]
+        k = NAMES.index("sigma_p")
+        b[k] = (max(b[k][0], sp_lo), min(b[k][1], sp_hi))
+        return b
+
     t0 = time.time()
     best = None
     for step in range(2):                       # two-step GMM
-        for restart in range(4):
-            res = minimize(scaled, u0 if best is None else best.x, jac=True, method="L-BFGS-B",
+        for restart in range(40):
+            x_start = u0 if best is None else best.x
+            res = minimize(scaled, x_start, jac=True, method="L-BFGS-B", bounds=trust_bounds(x_start),
                            options={"gtol": 1e-6, "ftol": 1e-12, "maxiter": 300})
-            print(f"step {step} restart {restart}: q={res.fun:.6e} {res.message}", flush=True)
-            if best is not None and res.fun > best.fun - 1e-6 * abs(best.fun):
-                best = res if res.fun < best.fun else best
+            at_wall = np.any(np.abs(res.x - x_start) > radius - 1e-9)
+            print(f"step {step} restart {restart}: q={res.fun:.6e} at_trust_wall={at_wall} {res.message}", flush=True)
+            improved = best is None or res.fun < best.fun - 1e-6 * abs(best.fun)
+            if res.fun < (best.fun if best is not None else np.inf):
+                best = res
+            if not improved and not at_wall:
                 break
-            best = res
         if step == 0:
             _, S = prob.standard_errors(to_theta(best.x), products.clustering_ids.to_numpy())
             prob.set_weighting(np.linalg.inv(S))
