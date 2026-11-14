@@ -41,6 +41,12 @@ X_COLS = ["const", "hpwt", "space", "air", "mpd", "fwd", "mi", "sw", "su", "pv"]
 X1_COLS = X_COLS + ["pgnp", "trend", "trend2"]
 SIGMA_ON = ["const", "hpwt", "space", "air", "mpd", "fwd"]
 PI_ON = ["mi", "sw", "su", "pv"]
+# PCM_BODY_SIGMA=1 adds a random coefficient on each body type. Petrin's BLP has none: the logit
+# error gives a minivan its own following. Without it the PCM must fit the Caravan's 0.5% share
+# by climbing the vertical ladder past a dense cluster of same-price sedans, which fails.
+BODY_SIGMA = os.environ.get("PCM_BODY_SIGMA", "0") == "1"
+if BODY_SIGMA:
+    SIGMA_ON = SIGMA_ON + PI_ON
 TASTE = [(f"sigma_{c}", X_COLS.index(c), f"nu{k}") for k, c in enumerate(SIGMA_ON)] + \
         [(f"pi_{c}_logfs_fv", X_COLS.index(c), "logfs_fv") for c in PI_ON]
 SCALE = [("phi_low_inc", "low_inc"), ("phi_mid_inc", "mid_inc"), ("phi_high_inc", "high_inc")]
@@ -216,7 +222,7 @@ class PCMProblem:
 
 def start_values():
     th = np.zeros(len(NAMES))
-    st = {"sigma_const": 3.0, "sigma_hpwt": 2.0, "sigma_space": 1.0, "sigma_air": 0.5, "sigma_mpd": 1.0, "sigma_fwd": 1.0,
+    st = {"sigma_const": 3.0, "sigma_hpwt": 2.0, "sigma_space": 1.0, "sigma_air": 0.5, "sigma_mpd": 1.0, "sigma_fwd": 1.0, "sigma_mi": 2.0, "sigma_sw": 2.0, "sigma_su": 2.0, "sigma_pv": 2.0,
           "pi_mi_logfs_fv": 0.3, "pi_sw_logfs_fv": 0.3, "pi_su_logfs_fv": 0.3, "pi_pv_logfs_fv": 0.3,
           "phi_low_inc": 0.0, "phi_mid_inc": 0.0, "phi_high_inc": 0.0, "sigma_p": 0.7}
     for n, v in st.items():
@@ -231,7 +237,7 @@ def start_values():
 
 def parameter_scales():
     """delta is in $1000; a taste spread of a few $1000 on a characteristic is the natural unit."""
-    sc = {"sigma_const": 3.0, "sigma_hpwt": 2.0, "sigma_space": 1.0, "sigma_air": 0.5, "sigma_mpd": 1.0, "sigma_fwd": 1.0,
+    sc = {"sigma_const": 3.0, "sigma_hpwt": 2.0, "sigma_space": 1.0, "sigma_air": 0.5, "sigma_mpd": 1.0, "sigma_fwd": 1.0, "sigma_mi": 2.0, "sigma_sw": 2.0, "sigma_su": 2.0, "sigma_pv": 2.0,
           "pi_mi_logfs_fv": 0.3, "pi_sw_logfs_fv": 0.3, "pi_su_logfs_fv": 0.3, "pi_pv_logfs_fv": 0.3,
           "phi_low_inc": 1.0, "phi_mid_inc": 1.0, "phi_high_inc": 1.0, "sigma_p": 0.5}
     return np.array([sc[n] for n in NAMES])
