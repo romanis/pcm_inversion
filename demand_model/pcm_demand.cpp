@@ -5,6 +5,7 @@
 #include <omp.h>
 #include <stdexcept>
 #include <algorithm>
+#include <limits>
 
 using Eigen::ArrayXd;
 using Eigen::MatrixXd;
@@ -72,6 +73,72 @@ void cond_vertical(const ArrayXd & d, const ArrayXd & p, double sigma,
 }
 
 bool feasible(const ArrayXd & s) { return (s > 0).all() && s.sum() < 1.0; }
+
+// For every product, the smallest increase in delta_j that puts it on at least one consumer's
+// frontier. For draw i the frontier is the increasing part of the upper convex hull of the points
+// (p_k, dc_ik) together with the origin; a product below the hull by g (in conditional-quality units)
+// needs delta_j raised by c_i * g for that consumer. The lift is the minimum over draws. Products
+// already on some frontier get zero. Cost: one hull per draw, about one share evaluation.
+ArrayXd frontier_lift(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm)
+{
+    const int N = static_cast<int>(delta.size());
+    const int K = static_cast<int>(mk.x.cols());
+    const int R = static_cast<int>(mk.weights.size());
+    const int M = static_cast<int>(prm.theta.size());
+    const int Q = static_cast<int>(prm.phi.size());
+    ArrayXd lift = ArrayXd::Constant(N, std::numeric_limits<double>::infinity());
+    const int n_blocks = std::max(1, (R + 63) / 64);
+    std::vector<ArrayXd> part(n_blocks, lift);
+#pragma omp parallel for schedule(dynamic) if(n_blocks > 1)
+    for (int b = 0; b < n_blocks; ++b) {
+        ArrayXd & acc = part[b];
+        VectorXd t(K);
+        std::vector<int> hull;
+        hull.reserve(N + 1);
+        for (int i = (R * b) / n_blocks; i < (R * (b + 1)) / n_blocks; ++i) {
+            t.setZero();
+            for (int m = 0; m < M; ++m) t[mk.taste_col[m]] += prm.theta[m] * mk.taste_basis(i, m);
+            const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
+            const double c = std::exp(log_c);
+            const ArrayXd dc = (delta + (mk.x * t).array()) / c;
+            // upper hull by price (prices are sorted); index -1 stands for the origin (0, 0)
+            auto px = [&](int k) { return k < 0 ? 0.0 : mk.p[k]; };
+            auto qy = [&](int k) { return k < 0 ? 0.0 : dc[k]; };
+            hull.clear();
+            hull.push_back(-1);
+            for (int k = 0; k < N; ++k) {
+                while (hull.size() >= 2) {
+                    const int a = hull[hull.size() - 2], bq = hull.back();
+                    const double cross = (px(bq) - px(a)) * (qy(k) - qy(a)) - (qy(bq) - qy(a)) * (px(k) - px(a));
+                    if (cross >= 0) hull.pop_back(); else break;
+                }
+                hull.push_back(k);
+            }
+            // keep the increasing part: drop vertices after the maximum quality
+            double top = 0.0;
+            size_t end = 1;
+            for (size_t h = 1; h < hull.size(); ++h) {
+                if (qy(hull[h]) > top) { top = qy(hull[h]); end = h + 1; }
+            }
+            // evaluate the hull at each product's price
+            size_t seg = 0;
+            for (int k = 0; k < N; ++k) {
+                while (seg + 1 < end && px(hull[seg + 1]) < mk.p[k]) ++seg;
+                double h;
+                if (seg + 1 >= end) h = top;
+                else {
+                    const int a = hull[seg], bq = hull[seg + 1];
+                    const double w = (mk.p[k] - px(a)) / (px(bq) - px(a));
+                    h = qy(a) + w * (qy(bq) - qy(a));
+                }
+                const double gap = std::max(0.0, h - dc[k]);
+                acc[k] = std::min(acc[k], c * gap);
+            }
+        }
+    }
+    for (const ArrayXd & acc : part) lift = lift.min(acc);
+    return lift;
+}
 
 }  // namespace
 
@@ -177,6 +244,27 @@ InversionResult invert(const ArrayXd & s_data, const Market & mk, const Params &
     InversionResult res = invert_from(s_data, mk, prm, delta0, tol, max_evals, evals);
     if (res.converged) { res.share_evaluations = evals; return res; }
 
+    // Continuation in the heterogeneity: at lambda = 0 (no taste or scale heterogeneity) the
+    // vertical-model guess is exact; raise lambda to 1, warm-starting each step from the last.
+    {
+        ArrayXd delta = pcm_share::initial_guess(s_data, mk.p, prm.sigma_p);
+        double lambda = 0.0, step = 0.25;
+        unsigned iters = 0;
+        while (lambda < 1.0 && evals < max_evals && step > 1e-5) {
+            const double target = std::min(1.0, lambda + step);
+            Params pl{prm.theta * target, prm.phi * target, prm.sigma_p};
+            InversionResult r = invert_from(s_data, mk, pl, delta, tol, max_evals, evals);
+            iters += r.iterations;
+            if (r.converged) { delta = r.delta; lambda = target; step = std::min(0.5, step * 1.5); }
+            else             { step *= 0.5; }
+        }
+        if (lambda >= 1.0) {
+            res = invert_from(s_data, mk, prm, delta, tol, max_evals, evals);
+            res.iterations += iters;
+            if (res.converged) { res.share_evaluations = evals; return res; }
+        }
+    }
+
     // Path following in shares: from a feasible delta with known shares s0, solve for the targets
     // s(tau) = (1 - tau) s0 + tau s_data, tau 0 -> 1, each solve warm-started from the last.
     // Newton directions go wrong across kinks (brands entering a consumer's frontier); short
@@ -199,27 +287,8 @@ InversionResult invert(const ArrayXd & s_data, const Market & mk, const Params &
             if (tau >= 1.0) {
                 res = invert_from(s_data, mk, prm, d, tol, max_evals, evals);
                 res.iterations += iters;
-                if (res.converged) { res.share_evaluations = evals; return res; }
             }
         }
-    }
-
-    // Continuation in the heterogeneity: at lambda = 0 (no taste or scale heterogeneity) the
-    // vertical-model guess is exact; raise lambda to 1, warm-starting each step from the last.
-    ArrayXd delta = pcm_share::initial_guess(s_data, mk.p, prm.sigma_p);
-    double lambda = 0.0, step = 0.25;
-    unsigned iters = 0;
-    while (lambda < 1.0 && evals < max_evals && step > 1e-6) {
-        const double target = std::min(1.0, lambda + step);
-        Params pl{prm.theta * target, prm.phi * target, prm.sigma_p};
-        InversionResult r = invert_from(s_data, mk, pl, delta, tol, max_evals, evals);
-        iters += r.iterations;
-        if (r.converged) { delta = r.delta; lambda = target; step *= 1.5; }
-        else             { step *= 0.5; }
-    }
-    if (lambda >= 1.0) {
-        res = invert_from(s_data, mk, prm, delta, tol, max_evals, evals);
-        res.iterations += iters;
     }
     res.share_evaluations = evals;
     return res;
@@ -235,23 +304,23 @@ InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Par
     // Residual in log shares: a 0.1% brand weighs as much as a 10% brand.
     auto logres = [&](const ArrayXd & s) { return (s.log() - log_sd).eval(); };
 
-    // starting point: caller's warm start if feasible, else the no-heterogeneity vertical guess
-    ArrayXd delta;
-    ArrayXd s;
-    bool have = false;
-    if (delta0.size() == N) {
-        s = S(delta0);
-        if (feasible(s)) { delta = delta0; have = true; }
-    }
-    if (!have) {
-        delta = pcm_share::initial_guess(s_data, mk.p, prm.sigma_p);
-        s = S(delta);
-        // repair: lift zero-share products, lower everything if the outside good vanished
-        for (int k = 0; k < 500 && !feasible(s) && evals < max_evals; ++k) {
+    // starting point: caller's warm start, else the no-heterogeneity vertical guess; either is
+    // repaired if some products have zero share
+    ArrayXd delta = delta0.size() == N ? delta0 : pcm_share::initial_guess(s_data, mk.p, prm.sigma_p).eval();
+    ArrayXd s = S(delta);
+    {
+        // repair: lift every zero-share product onto some consumer's frontier plus a margin that
+        // grows with each round; if the outside good has vanished lower everything
+        double margin = 1e-5;
+        for (int k = 0; k < 60 && !feasible(s) && evals < max_evals; ++k) {
             const double span = std::max(delta.maxCoeff() - delta.minCoeff(), 1e-3 * delta.abs().maxCoeff() + 1e-8);
-            if (s.sum() >= 1.0) delta -= 0.1 * span;
-            for (int j = 0; j < N; ++j) if (s[j] <= 0) delta[j] += 0.05 * span;
+            if (s.sum() >= 1.0) delta -= 0.05 * span;
+            const ArrayXd lift = frontier_lift(delta, mk, prm);
+            ++evals;
+            for (int j = 0; j < N; ++j)
+                if (s[j] <= 0 && std::isfinite(lift[j])) delta[j] += lift[j] + margin * span;
             s = S(delta);
+            if (k % 10 == 9) margin *= 3.0;
         }
         if (!feasible(s)) { res.delta = delta; res.max_abs_residual = INFINITY; return res; }
     }
