@@ -154,13 +154,13 @@ class PCMProblem:
             if tau >= 1.0:
                 r = rr
             stages.append(f"theta path to tau={tau:.3f} {time.time() - t0:.0f}s")
-        if not r["converged"] and m.delta is None:
+        if not r["converged"]:
+            # cold start as last resort, also at trial points: the sigma-ray profile inverted every
+            # grid point cold, while warm starts across a 35% move in all sigmas did not
             t0 = time.time()
             r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, np.empty(0), TOL, 40000)
             stages.append(f"cold {time.time() - t0:.0f}s")
         if not r["converged"]:
-            # no cold restart at a trial point: a far-away theta the optimizer is probing is
-            # rejected (objective 1e10) and L-BFGS shortens its step
             print(f"  {m.market_id}: inversion failed (resid {r['max_abs_residual']:.1e}): {', '.join(stages)}", flush=True)
         if time.time() - t_start > 60:
             print(f"  {m.market_id}: slow inversion {time.time() - t_start:.0f}s: {', '.join(stages)}", flush=True)
