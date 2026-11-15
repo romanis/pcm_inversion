@@ -119,6 +119,9 @@ class PCMProblem:
         self.X1 = np.column_stack([np.ones(self.n)] + [products[c].to_numpy(float) for c in X1_COLS[1:]])
         self.Z = products[[f"demand_instruments{k}" for k in range(N_ZD)]].to_numpy(float)
         self.set_weighting(np.linalg.inv(self.Z.T @ self.Z / self.n))
+        self.cue = os.environ.get("PCM_CUE", "0") == "1"
+        self.cluster = pd.factorize(products.clustering_ids.to_numpy())[0]
+        self.n_clusters = int(self.cluster.max()) + 1
         self.pool = ThreadPoolExecutor(workers)
         self.evals = 0
         self.last = None
@@ -194,16 +197,44 @@ class PCMProblem:
         delta, ddelta, ok, worst = self.delta(theta, grad=True)
         xi = self.M @ delta
         g = self.Z.T @ xi / self.n
-        q = float(self.n * g @ self.W @ g)
         G = self.Z.T @ (self.M @ ddelta) / self.n
-        dq = 2 * self.n * (G.T @ self.W @ g)
+        if self.cue:
+            # Continuously updated GMM: q = n g' S(theta)^-1 g with S the clustered covariance of
+            # z_j xi_j at the same theta. The PCM's utility scale is free (median alpha = 1 pins it
+            # to a non-buyer), so a fixed-W objective is quadratic in a nuisance scale and is
+            # minimised by sigma_p -> inf, sigma_x -> 0. CUE is invariant to xi -> kappa xi.
+            # beta is still concentrated out with the fixed 2SLS weighting (self.M), which keeps
+            # the gradient simple; that is a valid, if not fully efficient, GMM estimator.
+            dxi = self.M @ ddelta                                    # n x P
+            V = self._cluster_sum(self.Z * xi[:, None])              # C x K
+            dV = self._cluster_sum3(self.Z, dxi)                     # C x K x P
+            S = V.T @ V / self.n
+            a = np.linalg.solve(S, g)
+            q = float(self.n * g @ a)
+            Va = V @ a                                               # C
+            dVa = np.einsum("ckp,k->cp", dV, a)                      # C x P
+            dq = 2 * self.n * (G.T @ a) - 2 * (dVa.T @ Va)
+            self.W = np.linalg.inv(S)
+        else:
+            q = float(self.n * g @ self.W @ g)
+            dq = 2 * self.n * (G.T @ self.W @ g)
         self.last = dict(theta=theta.copy(), delta=delta, xi=xi, beta=self.beta_of @ delta, q=q, G=G, ok=ok)
         print(f"eval {self.evals:4d}  q={q:.6e}  |grad|={np.abs(dq).max():.2e}  inversions_ok={ok} "
-              f"worst_resid={worst:.1e}  {time.time() - t0:.1f}s\n"
+              f"worst_resid={worst:.1e}  sd_xi={xi.std():.4f}  {time.time() - t0:.1f}s\n"
               f"      theta={np.array2string(theta, precision=4, max_line_width=250)}", flush=True)
         if not ok:
             return 1e10, np.zeros_like(theta)
         return q, dq
+
+    def _cluster_sum(self, a):
+        out = np.zeros((self.n_clusters, a.shape[1]))
+        np.add.at(out, self.cluster, a)
+        return out
+
+    def _cluster_sum3(self, Z, dxi):
+        out = np.zeros((self.n_clusters, Z.shape[1], dxi.shape[1]))
+        np.add.at(out, self.cluster, Z[:, :, None] * dxi[:, None, :])
+        return out
 
     def standard_errors(self, theta, cluster):
         self.objective(theta)
@@ -292,10 +323,12 @@ def main():
                 best = res
             if not improved and not at_wall:
                 break
-        if step == 0:
+        if step == 0 and not prob.cue:
             _, S = prob.standard_errors(to_theta(best.x), products.clustering_ids.to_numpy())
             prob.set_weighting(np.linalg.inv(S))
             best.fun = prob.objective(to_theta(best.x))[0]
+        elif step == 0:
+            break                                   # CUE is one step
     theta = to_theta(best.x)
     print(best.message, f"{time.time() - t0:.0f}s")
     se, _ = prob.standard_errors(theta, products.clustering_ids.to_numpy())
@@ -309,7 +342,7 @@ def main():
     beta.to_csv(OUT / f"pcm_beta{tag}.csv")
     with open(OUT / f"pcm_estimates{tag}.json", "w") as fh:
         json.dump({"objective": float(best.fun), "message": str(best.message), "evaluations": prob.evals,
-                   "nu_per_agent": nu_per_agent}, fh, indent=2)
+                   "nu_per_agent": nu_per_agent, "cue": prob.cue, "body_sigma": BODY_SIGMA}, fh, indent=2)
 
 
 if __name__ == "__main__":
