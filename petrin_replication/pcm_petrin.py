@@ -53,7 +53,7 @@ SCALE = [("phi_low_inc", "low_inc"), ("phi_mid_inc", "mid_inc"), ("phi_high_inc"
 NAMES = [t[0] for t in TASTE] + [s[0] for s in SCALE] + ["sigma_p"]
 N_TASTE, N_SCALE = len(TASTE), len(SCALE)
 N_ZD = 22
-TOL = 1e-10          # max |s_model - s_data|; shares are 1e-5 to 5e-3, so this is 1e-5 relative at worst
+TOL = 1e-9           # max |s_model - s_data|; shares are 1e-5 to 5e-3. Newton on 4000-consumer shares stalls near 2e-10
 
 
 def split(theta):
