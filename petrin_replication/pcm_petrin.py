@@ -111,7 +111,7 @@ def build_markets(products: pd.DataFrame, agents: pd.DataFrame, nu_per_agent: in
 
 
 class PCMProblem:
-    def __init__(self, products, agents, nu_per_agent=4, workers=13, path_seconds=60.0):
+    def __init__(self, products, agents, nu_per_agent=4, workers=13, path_seconds=90.0):
         self.products = products
         self.path_seconds = path_seconds
         self.markets = build_markets(products, agents, nu_per_agent)
@@ -136,14 +136,14 @@ class PCMProblem:
         warm = m.delta if m.delta is not None else np.empty(0)
         # a trial point gets a short first try; most of the run's time was going into trial
         # points the optimizer then rejected
-        r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, warm, TOL, 8000 if m.delta is not None else 20000)
+        r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, warm, TOL, 2500 if m.delta is not None else 20000)
         stages.append(f"warm {time.time() - t_start:.0f}s")
-        if not r["converged"] and m.delta is not None:
+        if not r["converged"] and m.delta is not None and time.time() - t_start < self.path_seconds:
             t0 = time.time()
             d, tau, step = m.delta, 0.0, 0.5
-            while tau < 1.0 and step > 1e-3 and time.time() - t0 < self.path_seconds:
+            while tau < 1.0 and step > 1e-2 and time.time() - t_start < self.path_seconds:
                 t = min(1.0, tau + step)
-                rr = pd_cpp.invert(m.shares, m.cpp, *split(m.theta_ok + t * (theta - m.theta_ok)), d, TOL, 2000)
+                rr = pd_cpp.invert(m.shares, m.cpp, *split(m.theta_ok + t * (theta - m.theta_ok)), d, TOL, 1500)
                 if rr["converged"]:
                     d, tau, step = rr["delta"], t, min(0.5, 2 * step)
                 else:
@@ -267,7 +267,7 @@ def main():
     # sigma_p in [0.05, 2]: a log price-sensitivity sd above 2 (95% range of 3000x) makes the
     # inversion fail in every market; the other parameters are free
     sp_lo, sp_hi = np.log(0.05 / scale[-1]), np.log(2.0 / scale[-1])
-    radius = float(os.environ.get("PCM_TRUST", "0.3"))
+    radius = float(os.environ.get("PCM_TRUST", "0.15"))
 
     def trust_bounds(center):
         """Box of +-radius (in scaled units) around the last accepted point: L-BFGS-B has no
