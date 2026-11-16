@@ -154,3 +154,48 @@ and `SLSQP` support equality constraints but are not competitive with IPOPT at t
 **For the write-up.** The MPEC benefit for CUE is conceptually different from MPEC for fixed-W GMM.
 Papers that show MPEC speedups (Dube-Fox-Su 2012, Conlon-Gortmaker 2020) use fixed-W. For CUE the
 argument rests on inversion robustness only, and the case depends on how often cold restarts occur.
+
+## 11. The normalisation must be fixed on primitives, and counterfactual objects do not depend on it (2026-11-16)
+
+**Finding.** The PCM needs one scale normalisation because (delta, t, alpha) -> kappa (delta, t, alpha)
+leaves every choice unchanged. Writing log alpha_i = mu + sigma_p nu_i, the scaling is exactly a shift
+of mu, so the one free quantity is mu. Fixing median alpha = 1 (mu = 0) is a normalisation on a
+primitive of the model and is the right kind of normalisation. The pathology in entry 1 was never
+the normalisation; it was the fixed-weight objective, which rewarded a small xi. Under CUE the same
+median-alpha normalisation is harmless.
+
+Two tempting alternatives are wrong, and both were proposed in this project before being retracted.
+(a) Normalising the alpha of the average buyer or of the marginal buyer. Both are functions of the
+equilibrium (who buys depends on delta, prices and sigma_p), not of primitives. Taste dispersion
+moves the buy/no-buy margin: raising sigma_p puts more mass in the low-alpha tail that can afford a
+car, so the inside share changes with sigma_p. A normalisation anchored to such an object has to be
+re-anchored after every parameter change and after every counterfactual, which is to say it is not a
+normalisation but a moving target. (b) The claim that "the buyer population does not change with
+sigma_p" is false for the same reason.
+
+**Why counterfactuals do not need the anchor to survive.** Every object we report is invariant to
+kappa. Shares and the ranking of products are invariant by construction. Elasticities are ratios
+of share changes to price changes and carry no utility units. Marginal costs recovered from Nash
+first-order conditions are in dollars. Consumer surplus in dollars is computed per consumer as
+max_j u_ij / alpha_i; multiplying numerator and denominator by kappa leaves it unchanged. So a
+counterfactual that removes the minivan, moves the marginal buyer and changes the inside share
+produces the same dollar welfare change under any kappa, as long as theta (including mu and sigma_p)
+is held at its estimated value.
+
+Worked example. Anna has alpha = 0.5, Boris alpha = 2, one product with delta = 10 at p = $4.
+Anna's utility is 10 - 0.5 * 4 = 8, which is 8 / 0.5 = $16 in her dollars. Rescale by kappa = 2:
+delta = 20, alpha_A = 1, alpha_B = 4. Anna's utility is 20 - 4 = 16, which is 16 / 1 = $16. Boris
+has 10 - 8 = 2 before and 20 - 16 = 4 after, both $1 in his dollars, and if the product is removed
+both lose exactly what they had. The normalisation changes the labels on the utility axis, never a
+dollar figure.
+
+**What the normalisation does affect.** Only the interpretation of utility-denominated parameters:
+delta, xi and the taste spreads sigma_x are "dollars as valued by the consumer with alpha = 1".
+Under median alpha = 1 that consumer does not buy a car, so a sigma_x of $2,000 means $2,000 to a
+non-buyer and roughly $2,000 / alpha_i to buyer i. For reporting, convert spreads to buyer dollars
+post-estimation (divide by the mean alpha among predicted buyers at the estimate). That is a
+reporting convention applied once, not a normalisation to be carried into counterfactuals.
+
+**For the write-up.** State the normalisation as mu = 0, justify it as the unique free scale, and
+show the invariance of the reported objects. Report taste spreads in both median-consumer and
+buyer dollars. Do not describe any normalisation on buyers.
