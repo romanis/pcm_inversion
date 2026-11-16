@@ -384,8 +384,37 @@ micro moments included. q must stop being monotone in sigma_p. If it is still mo
 micro moments are not doing what this entry claims and the plan needs rethinking before any
 long estimation.
 
-**When MPEC becomes worth revisiting.** On the smoothed PCM (Berry and Pakes 2007 suggest a
-logit error with scale lambda sent toward zero) every share is positive, sigma is C-infinity,
-LICQ holds, and MPEC applies as in Dube, Fox and Su. Tasmanian sparse grids become usable at the
-same moment, since the earlier probe failed on the same kinks. That is a different model with
-lambda as one more object to defend, and not the paper's main specification.
+**Smoothing is not an escape route.** See entry 15: the smoothed PCM is rejected for this
+project, so MPEC and sparse grids stay off the table.
+
+## 15. The smoothed PCM (logit error with scale lambda -> 0) is rejected, permanently (2026-11-16)
+
+**Decision.** This project estimates the exact PCM. Adding a logit error with scale lambda and
+sending lambda toward zero (Berry and Pakes 2007) is not used for estimation, inversion or
+counterfactuals. The reasons are mathematical, computational and economic, and each one holds
+by itself.
+
+**Mathematical: the kinks become stiffness, not smoothness.** With the error, the share of a
+product that sits a utility gap g below a consumer's frontier is about exp(-g / lambda). Its
+derivative is about exp(-g / lambda) / lambda. Example: g = 0.5, lambda = 0.01 gives
+exp(-50) = 2e-22, below double-precision relevance next to shares of 1e-3. So the "full-rank
+Jacobian" of the smoothed model is numerically the same zero row as the exact PCM, and LICQ
+fails in floating point exactly where it fails in exact arithmetic. Near a hull crossing the
+second derivative is of order 1/lambda, so the Hessian is bounded only in theory. Smoothing
+moves the kink into the condition number.
+
+**Computational: the contraction dies as lambda -> 0.** The BLP contraction modulus tends to 1
+as the error scale shrinks (Berry and Pakes 2007 state this), and Newton steps scale with
+1/lambda. Small lambda means slow or unstable inversion; large lambda means a different model.
+There is no lambda that is both close to the PCM and well conditioned.
+
+**Economic: any lambda > 0 is the BLP love-of-variety term we are trying to measure without.**
+The logit error adds lambda * log(sum exp(.)) to expected surplus, which grows with the number
+of products regardless of characteristics. Entry 13 / the Petrin comparison is precisely about
+how much of the $367M minivan gain is that term. A smoothed PCM puts it back, with a size set
+by an unidentified tuning constant. If lambda is estimated, the model drifts back to BLP; if it
+is fixed, every welfare number depends on an arbitrary choice.
+
+**What is still allowed.** Using exact PCM structure inside our own algorithms (frontier lift,
+breakpoint-aware line search, see the custom optimizer plan) is the approach. Nothing that
+changes the model's shares is.
