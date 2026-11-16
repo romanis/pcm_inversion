@@ -194,11 +194,22 @@ class PCMProblem:
         out = {"delta": r["delta"], "converged": r["converged"], "resid": r["max_abs_residual"]}
         if grad:
             d = pd_cpp.shares(r["delta"], m.cpp, th, ph, sp, True)
+            # Regularise: products with zero share have an all-zero row in d_delta, making
+            # the system singular.  Add a small diagonal floor (1/n_consumers) to those rows
+            # so the solve is defined.  The gradient contribution from a zero-share product
+            # is negligible and the floor is well below the residual tolerance.
+            dD = d["d_delta"].copy()
+            zero_rows = np.flatnonzero(np.abs(dD).sum(1) == 0)
+            if len(zero_rows):
+                n_consumers = m.cpp.shape[0]        # rows = consumers
+                floor_val = 1.0 / max(n_consumers, 1)
+                dD[zero_rows, zero_rows] = floor_val
+                print(f"  {m.market_id}: {len(zero_rows)} zero-share rows regularised (floor={floor_val:.2e})", flush=True)
             try:
-                out["ddelta"] = -np.linalg.solve(d["d_delta"], d["d_theta"])
+                out["ddelta"] = -np.linalg.solve(dD, d["d_theta"])
             except np.linalg.LinAlgError:
-                zero = np.flatnonzero(np.abs(d["d_delta"]).sum(1) == 0)
-                print(f"  {m.market_id}: singular ds/ddelta at rows {zero.tolist()}", flush=True)
+                zero = np.flatnonzero(np.abs(dD).sum(1) == 0)
+                print(f"  {m.market_id}: singular ds/ddelta after regularisation at rows {zero.tolist()}", flush=True)
                 out["ddelta"] = np.full_like(d["d_theta"], np.nan)
                 out["converged"] = False
         return out
@@ -284,7 +295,8 @@ def start_values():
           "pi_mi_logfs_fv": 0.3, "pi_sw_logfs_fv": 0.3, "pi_su_logfs_fv": 0.3, "pi_pv_logfs_fv": 0.3,
           "phi_low_inc": 0.0, "phi_mid_inc": 0.0, "phi_high_inc": 0.0, "sigma_p": 0.7}
     for n, v in st.items():
-        th[NAMES.index(n)] = v
+        if n in NAMES:                        # skip names absent in the current spec (e.g. body sigmas)
+            th[NAMES.index(n)] = v
     if os.environ.get("PCM_START"):
         prev = pd.read_csv(os.environ["PCM_START"], index_col=0)["estimate"]
         for n, v in prev.items():
@@ -325,7 +337,7 @@ def main():
     # sigma_p in [0.05, 2]: a log price-sensitivity sd above 2 (95% range of 3000x) makes the
     # inversion fail in every market; the other parameters are free
     sp_lo, sp_hi = np.log(0.05 / scale[-1]), np.log(2.0 / scale[-1])
-    radius = float(os.environ.get("PCM_TRUST", "0.15"))
+    radius = float(os.environ.get("PCM_TRUST", "0.30"))
 
     def trust_bounds(center):
         """Box of +-radius (in scaled units) around the last accepted point: L-BFGS-B has no
@@ -342,7 +354,7 @@ def main():
         for restart in range(40):
             x_start = u0 if best is None else best.x
             res = minimize(scaled, x_start, jac=True, method="L-BFGS-B", bounds=trust_bounds(x_start),
-                           options={"gtol": 1e-6, "ftol": 1e-12, "maxiter": 300})
+                           options={"gtol": 1e-5, "ftol": 1e-15, "maxiter": 500})
             at_wall = np.any(np.abs(res.x - x_start) > radius - 1e-9)
             print(f"step {step} restart {restart}: q={res.fun:.6e} at_trust_wall={at_wall} {res.message}", flush=True)
             improved = best is None or res.fun < best.fun - 1e-6 * abs(best.fun)
