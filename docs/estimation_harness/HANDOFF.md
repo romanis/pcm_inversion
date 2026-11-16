@@ -1,0 +1,236 @@
+# Wave A handoff notes (verbatim from package reports, 2026-11-16)
+
+Integration check: build-rel2 builds clean; ctest 82/82; pytest 87 passed, 3 skipped (WP7, WP8, WP9a placeholders).
+
+## WP1
+
+Others are active. Let me check how WP3 handles the `Market` type in its binding.WP1 is finished and committed as `4357d95` on `feat/estimation-harness`. The push went through on the first try (`3295272..4357d95`). All WP1 acceptance tests pass. There are two deviations from DESIGN: one extra test file outside WP1's ownership list, and a variable finite-difference step in kernel test 2.
+
+**Files changed**
+- `/local/home/istomin/pcm_inversion/demand_model/pcm_kernel.hpp`
+- `/local/home/istomin/pcm_inversion/demand_model/pcm_kernel.cpp`
+- `/local/home/istomin/pcm_inversion/demand_model/pcm_kernel_test.cpp`
+- `/local/home/istomin/pcm_inversion/python_bindings/bind_solve.cpp`
+- `/local/home/istomin/pcm_inversion/demand_model/pcm_demand.hpp` and `/local/home/istomin/pcm_inversion/demand_model/pcm_demand.cpp`: only the move of `frontier_lift` and `cond_vertical` into `pcm_demand::detail`, with no behaviour change.
+- `/local/home/istomin/pcm_inversion/nfp_harness/tests/test_kernel_solve.py`: new file (deviation 1).
+
+I built in `$KIROCREW_SCRATCH/wp1-build` with googletest from `build-rel2/_deps`. The `pcm_kernel_py` target writes its `.so` into the shared, gitignored `nfp_harness/_native/`, as its CMake target is set up to do.
+
+**Acceptance outputs**
+```
+[ RUN      ] PcmKernel.NoHeterogeneityReturnsInitialGuess            [ OK ]
+[ RUN      ] PcmKernel.DdeltaDthetaMatchesFiniteDifferences
+  parameter 0: h 1e-05, relative error 1.152e-08
+  parameter 1: h 1e-07, relative error 5.239e-10
+  parameter 2: h 1e-06, relative error 1.206e-10
+  parameter 3: h 1e-05, relative error 1.537e-08
+  parameter 4: h 1e-07, relative error 3.850e-09
+  parameter 5: h 1e-05, relative error 7.555e-11
+  parameter 6: h 1e-05, relative error 1.860e-11
+  parameter 7: h 1e-05, relative error 1.846e-11
+  ddelta_dtheta max relative error vs FD: 1.537e-08                 [ OK ]
+[ RUN      ] PcmKernel.MicroPartsMatchSharesBruteForceAndFiniteDifferences
+  micro_d_delta rel error 4.588e-11, micro_d_theta rel error (worst column) 1.192e-08   [ OK ]
+[ RUN      ] PcmKernel.BitIdenticalAcrossThreadCounts                [ OK ]
+[ RUN      ] PcmKernel.WarmStageLiftsProductBelowEveryFrontier       [ OK ]
+[ RUN      ] PcmKernel.NearDuplicateProductsNeverGiveSilentNaN
+  gap 1e-03: ok, rcond 2.486e-03
+  gap 1e-06: ok, rcond 3.402e-06
+  gap 1e-09: ok, rcond 3.403e-09                                     [ OK ]
+[ RUN      ] PcmKernel.ThetaPathStageSolvesWhenWarmStageFails        [ OK ]
+[ RUN      ] PcmKernel.InvalidInputIsAStatusNotAnException           [ OK ]
+[  PASSED  ] 8 tests.
+
+ctest (whole tree, including pcm_demand_test, events, welfare): 100% tests passed, 0 tests failed out of 82
+
+pytest nfp_harness/tests/test_kernel_solve.py:
+serial 0.731s, two threads 0.419s, ratio 0.57
+2 passed
+```
+The GIL ratio is 0.57 rather than 0.5 because the two test markets take 0.42 s and 0.30 s alone, so the threaded run lasts as long as the slower one. I also timed a 200-product, 16,384-draw market at 16 threads. The kernel's draw pass took 0.068 s against 0.137 s for `pcm_demand::shares`, with identical `ds_ddelta` and a `ds_dtheta` difference of 2e-16.
+
+**Deviations from DESIGN**
+1. **Extra test file.** The GIL thread test lives in the new `nfp_harness/tests/test_kernel_solve.py`. WP1 owns no Python test file, and no other package owns this one, so it cannot collide with anyone's work.
+2. **Kernel test 2 uses a variable step.** A fixed h = 1e-5 gives errors of 2-4% on parameters 1 and 4 (the taste parameters on the 0-10 characteristic). This is an exact PCM kink: some draw's frontier changes inside the ±h interval. The test now starts at h = 1e-5 and shrinks it by 10 until no draw's frontier differs between theta - h, theta and theta + h. That brought every column under 1e-8.
+3. **Extra pieces.**
+   - Two kernel tests beyond 1-6: the theta-path stage and invalid input.
+   - A public `evaluate_market`, which is the draw pass at a fixed delta with no inversion, in C++ and Python. The micro finite-difference test uses it, and WP7 can too.
+   - `status_name()`, which turns a status into its lower-case string.
+4. **Faster draw pass.** The pass works only on each draw's frontier products, not the full N x N matrix. The results equal `pcm_demand::shares` (ds/ddelta bit-identical, ds/dtheta to 2e-16).
+
+**What WP7 (PCM adapter) needs to know**
+- **Call signature:** `solve_market(s_data, market, theta, phi, sigma_p, delta_warm=None, theta_warm=None, micro=None, *, tol, warm_evals, cold_evals, path_evals, path_seconds, n_threads, derivatives, price_derivatives, rcond_min)`.
+- **`theta_warm`** is the stacked `(P,)` vector `[theta, phi, sigma_p]`, the same column order as `ds_dtheta`.
+- **`market`** is a `pcm_kernel.Market(x, p, weights, taste_basis, taste_col, scale_basis)`, or any dict or object with those fields. `bind_solve` registers `Market` (module-local), and the WP2 and WP3 bindings rely on that registration.
+- **`micro`** is `None` or a dict `{"H": (R, L), "U": (N, Pm), "h_of_part": (Pm,)}`. U already holds v - v0. The parts are raw sums, `sum_i w_i h(i) u' s_i`. The outside value v0 H_t and the division by Den are left to Python.
+- **Status strings:** `"ok"`, `"not_converged"`, `"infeasible_start"`, `"singular_ds_ddelta"`, `"invalid_input"`. The adapter must map them to `EvalStatus`. Bad input never raises; it returns `invalid_input` with the reason in `stages`.
+- **Derivative fields** have shape `(0, 0)` unless the inversion converged and they were requested. With `singular_ds_ddelta`, `ddelta_dtheta` is NaN but the other derivatives are filled. `s` and `micro` are always computed at the returned delta, except for `invalid_input`.
+- **Threads:** `n_threads` sets the OpenMP team size for that call's thread only and is restored afterwards. Tests run with the default 192-thread team are much slower (1.8 s against 0.1 s), so production needs `OMP_WAIT_POLICY=PASSIVE` and explicit `n_threads` (DESIGN 1.3).
+- **`rcond`** is the smaller of the LU pivot ratio and Eigen's 1-norm estimate.
+
+The `chorus` MCP server failed to start in this session; nothing here needed it.
+
+## WP2
+
+**Deviations from DESIGN:**
+- **Two extra fields on `StepEvents`:** `buyer_mass` (B_j per product), and `product_draw = -1` when a draw has no event.
+- **New function `affected_mass`.** The 4.4 guard needs the realised max_j A_j, and per-draw hashes alone cannot give it. Signature: `affected_mass(delta, market, theta, phi, sigma_p, changed, n_threads)`, with `changed = sig_accepted != sig_trial` and F_i taken at the point you pass. It returns A_j for each product.
+- **Products with no buyer are skipped in `tau_vanish_lb`.** If no product has a buyer, it is tau_max. Only draws with a real event (kind != 0) count in `mass_profile`.
+- **Ties within one draw:** a leaving vertex (C1, C2) is reported before an entering product (C3, C4). Within each group the cheaper product comes first. DESIGN tests 1 and 2 are degenerate cases: in test 1, A is collinear with the origin and C, so A is not on the frontier; in test 2, four points become collinear at tau = 0.5. The expected answers still come out because of this rule.
+- **`n_threads` uses a `num_threads` clause, so the caller's OpenMP setting is unchanged.** `n_threads <= 0` means the OpenMP default.
+- **Binding defaults:** `tau_max=1.0` and `n_threads=1`.
+
+**For WP7 (PCM adapter):**
+- **Passing the market:** pass `market` as a dict or any object with `x`, `p`, `weights`, `taste_basis`, `taste_col`, and optionally `scale_basis`. If some module registers `pcm_demand::Market` as a pybind type, an instance of it is also accepted. I did not register the type, so it cannot clash with WP1.
+- **`dtheta`** must have M+Q+1 entries in [taste, scale, sigma_p] order. Only the taste part matters, and `sigma_p` is not used.
+- **Prices** must be positive and strictly increasing, the same requirement as `shares`. Invalid input raises `ValueError`.
+- **Expect a large share of draws to have early events.** On a random 210 x 16,000 market with N(0,1) directions, 36% of draws had an event by tau = 0.05, and max_j A_j was already 1.0. The cap will usually come from `q_mass` (DESIGN 8, risk 3).
+- **Predictions are exact when delta is held fixed.** In that case the predicted share of draws with an event matched the realised signature changes exactly (0.362875 for both).
+
+**For WP5 (optimizer):** `mass_profile` has 64 rows (`pcm_events::MASS_GRID`), with tau_g = tau_max g / 63, and it is non-decreasing. Interpolate it to find the tau at which it reaches `q_mass`. `tau_first` is close to 0 at realistic draw counts and should not be used as a cap.
+
+**MCP:** the `chorus` server failed to start. It was not needed.
+
+
+
+
+## WP3
+
+WP3 is done and all its acceptance tests pass, with one deviation. The kernel does **not** match `consumer_surplus` in `pcm_postestimation.py` to 1e-10, because that reference function is wrong. The kernel matches the reference with its bug corrected to 1.4e-14.
+
+**Commit:** `1a3b7bc` on `feat/estimation-harness`. The push succeeded (`cb26a76..1a3b7bc`).
+
+**Files changed (committed, only these four were staged):**
+- `/local/home/istomin/pcm_inversion/demand_model/pcm_welfare.hpp`
+- `/local/home/istomin/pcm_inversion/demand_model/pcm_welfare.cpp`
+- `/local/home/istomin/pcm_inversion/demand_model/pcm_welfare_test.cpp`
+- `/local/home/istomin/pcm_inversion/python_bindings/bind_welfare.cpp`
+
+**The bug in the reference.** The function in `/local/home/istomin/pcm_inversion/petrin_replication/pcm_postestimation.py` (lines 45-90) gives each frontier product the wrong range of price sensitivity a. Its docstring has the right formula, `(e_{k+1}, e_k)`. A consumer buys the cheapest product rather than nothing when a < q/p. The code instead sets the cheapest product's range to (q/p, ∞), which is the consumers who prefer nothing.
+
+A worked example from DESIGN test 1: one product with q = 2, p = 1, sigma_p = 0.5.
+- The correct CS is 2·E(1/a; a < 2) − 1·P(a < 2) = 1.28198. Simpson quadrature of max(q/a − p, 0) gives the same value.
+- The reference returns −0.01568. That is the surplus of the consumers who do not buy, and it is negative.
+
+**Acceptance outputs.** The C++ gtest suite passes (`ctest -R pcm_welfare`: 100% of 7 tests passed). It covers:
+- DESIGN 3.6 welfare 1, the closed form above, also checked against quadrature to 1e-11.
+- Welfare 2, scale invariance for kappa in {0.37, 3.7, 25}, to 1e-12.
+- Welfare 3, in two parts: dropping a dominated product leaves CS unchanged to 1e-12, and with no products CS is 0.
+- Three extra tests:
+  - Roy's identity, dCS/dp_j = −s_j against `pcm_demand::shares`, to 1e-7.
+  - Results bit-identical with 1 and 8 threads.
+  - Bad input throws.
+
+The Python check was run on a random 30-product, 500-draw market:
+
+```
+kernel total                    42.717565055738156
+pcm_postestimation (as is)      3.897513804340491   |diff| 3.882e+01
+pcm_postestimation (fixed)      42.717565055738170   |diff| 1.421e-14
+per-draw max |kernel - fixed|   4.263e-14
+per-draw max |kernel - quad|    4.527e-07   (independent quadrature)
+per-draw max |as-is - quad|     1.729e+02
+min per-draw CS: kernel 3.1679, as-is reference -12.3577
+python_pcm_demand.Market input: |diff| 0.0 per-draw equal: True
+Roy: max |dCS/dp + s| = 1.720e-08 (shares from python_pcm_demand)
+ValueError on unsorted prices: pcm_welfare::consumer_surplus: prices must be strictly increasing
+ALL WP3 PYTHON ACCEPTANCE CHECKS PASSED
+```
+
+**Other deviations from DESIGN:**
+- **Bit-identical results.** Instead of 64-draw block sums, each draw's CS is computed in parallel and the weighted total is summed in draw order. This gives the same guarantee.
+- **Python module tested in scratch.** I did not build the `pcm_kernel_py` target, because it writes into the shared `nfp_harness/_native`. The other agents' `bind_solve` was still being edited, and building would race their builds. I compiled `bind_welfare.cpp` and `pcm_welfare.cpp` into a standalone module under `$KIROCREW_SCRATCH/wp3`. In my own cmake tree, `bind_welfare.cpp.o` for the real target compiles with no warnings.
+- **Build setup.** My build tree is `$KIROCREW_SCRATCH/wp3-build`. It reuses googletest from `build-rel2/_deps` and needed `-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DPYTHON_EXECUTABLE=...` to configure.
+
+**What WP8 (postestimation) must know:**
+- **Old results are invalid.** Every old PCM CS number comes from the buggy function and is wrong, including `petrin_replication/results/pcm_vs_blp_body_nu16.csv`, which reports a minivan gain of −$1.25M. Do not use them as a numeric fixture for CS. Elasticities and margins come from other code and are not affected.
+- **Call signature.** It is `consumer_surplus(delta, market, theta, phi, sigma_p, n_threads=1)` and returns `{"total", "per_draw"}`.
+  - `total` is the weighted sum of w_i·CS_i, in $1000 per household.
+  - `per_draw` is each draw's CS_i, not multiplied by its weight, ready for tables by alpha quintile and family size.
+- **The `market` argument.** It can be any registered `pcm_demand::Market` (from `python_pcm_demand` or from WP1's binding if it registers one). It can also be a dict or object with `x, p, weights, taste_basis, taste_col, scale_basis`.
+- **Input rules.** The GIL is released during the call. Prices must be positive and strictly increasing, so re-sort counterfactual prices before calling. Invalid input raises `ValueError`.
+
+**Unavailable MCP server:** `chorus` failed to start. It was not needed.
+
+
+
+
+## WP4
+
+**Deviations from DESIGN and why:**
+- `LinearIV` also refuses a rank-deficient Z. Without that check, the default weight (Z'Z/n)^{-1} would be a near-singular inverse that returns garbage instead of an error.
+- The moment count uses rank(Z) + micro rows, not the column count, so a duplicated instrument cannot pass the check.
+- `NFPGMMProblem` takes an optional `W`. Without one it uses the aggregate block of the linear fit and the identity on micro rows; `initial_weighting(theta0)` gives pyblp's W1.
+- `set_weighting` refuses a W that couples aggregate and micro rows, because concentrating beta with the aggregate block alone is only exact for block-diagonal W (DESIGN 2.4).
+- The problem requires exactly one aggregate IV block with the same Z as `LinearIV`, and one micro moment object per dataset, since covariances across moment objects are taken as zero.
+- `max_step` exists on the problem instance only when the model has it, so the optimizer's `hasattr` check reflects what the model can do.
+- Extra methods beyond DESIGN: `full_jacobian(ev)` gives the (beta, theta) Jacobian for standard errors, and `cue_fixed_covariance(ev)`, `micro_covariance(ev)` and `objective(g)` are helpers. `CUE(hold_micro_block=False)` raises `NotImplementedError` (DESIGN 8.9).
+- `sobol_normal_draws` refuses an n that is not a power of two unless `require_power_of_two=False` (owner decision 6). `cross_agents(..., nu_per_agent=None)` splits R draws into consecutive per-agent blocks of 4 or 5 draws (4,096 draws over 1,000 agents), each with weight w_a / count_a, so every agent keeps its total weight.
+- The micro moment sign follows DESIGN, g = model minus data. pyblp uses data minus model; this makes no difference to q or S.
+
+**What WP7 (PCM adapter) must know:**
+1. **Micro output contract** (top of `moments.py`): `sol.outputs["micro_parts"][part.name]` is a list with one dict per market, in `model.markets` order. Each dict has:
+   - `sum`: sum over draws of w_i h(i) times the sum over products of u_j s_ij, with u = v - v0;
+   - `d_delta`: (J_t,), the partial in delta;
+   - `d_theta`: (P,), the partial in theta;
+   - `h_sum`: the sum of w_i h(i);
+   - `w_sum`: the sum of w_i.
+   h is the product of `agent_columns` and v the product of `product_columns`. Product parts arrive by name, `"a*b"`, with the columns concatenated and v0 = v1_0 v2_0. The kernel just multiplies the columns, so age times age equals age for the binary age column.
+2. **D:** `sol.D` is a per-market (J_t, P) list in `model.markets` order. The problem maps it to rows through `MarketIndex.rows`.
+3. **Covariance re-solve:** `problem.covariance(ev)` re-solves the model once (no Jacobian) with the product parts if the evaluation did not request them. That solve overwrites the trial state at the same theta, so the next `evaluate` must not depend on that trial state surviving.
+4. **Evaluation aux:** `ev.aux["solution"]` holds the InnerSolution, which `max_step` and covariance use. `ev.aux` also carries `delta`, `xi`, `beta`, `D` (n x P), `sd_xi`, `q` and `q_blocks`.
+5. **Optional hooks:** `state_dict`, `load_state_dict`, `commit` and `restore` on the model are called if present.
+
+
+## WP5
+
+**Deviations from DESIGN and why:**
+- **Ridge only when ill-conditioned.** `mu = 1e-10 max(d)^2` is applied only when the Jacobi-scaled A has `s_min/s_max < 1e-2`. Applied on every step, it biased each step by about 1e-10 × cond², which made test 1's 1e-10 tolerance fail.
+- **CUE model.** The Gauss-Newton residual is shifted inside range(A), so the step model has the exact CUE gradient while the Hessian stays `2n G'S^{-1}G`.
+- **`max_step` cap.** `tau_cap` also takes the min with the model's own `StepLimit.tau_cap`, so WP7 should return 1 there unless it has a hard cap. "Mass reaches q_mass" means the first grid point where the mass is at least q_mass. q_mass has a floor of 1e-3. Realised mass is read from `ev.aux["realised_mass"]`.
+- **Additions to my own files.** `OptimizerOptions` gained `stage`, `theta0`, `record_cue`, `q_mass_min`, `two_step_gate` and `two_step_require_converged`. Step 2 of a two-step run starts only if step 1 converged. `classify` gained a `Delta` keyword and returns None when no stopping rule fires.
+- **Checkpoint files.** The checkpoint is a token-matched pair: `checkpoint.npz` and `checkpoint.json`, plus `checkpoint.prev.npz` so a crash between the two file replacements still loads. Finished stages are stored in `stages/<stage>.npz` and `.json`. `--new-run` renames the old directory to `<dir>.old-<UTC timestamp>` and never deletes it.
+- **`detach`.** It uses `start_new_session=True`, the `setsid(2)` system call, rather than the `setsid` binary. The binary forks when its caller is already a session leader, and then the pid it reports is wrong.
+
+**Contract WP4/WP7 must provide** (`problem.py` is WP4's; WP7 supplies what it delegates to the model; all duck-typed):
+- **Units:** `problem.units` as an array if present, else `problem.layout.units(problem.data)`, with None passed when `data` is absent. Start, bounds, `cap` and `free` come from `layout.specs`.
+- **n:** `problem.n`, else `problem.n_products`, else `ev.aux["n"]`, else 1.
+- **Weighting:** a W array, the string `"cue"`, or an object with `mode` in {fixed, two_step, cue} or a class named `Fixed`/`TwoStep`/`CUE`. Fixed needs `.W`, TwoStep needs `.W1`, and CUE may have `.W1` (used only for the q_fixed column).
+- **CUE terms:** `cue_terms` must return `(V: C×k cluster sums, dV: C×k×P)` with `S = V'V/n`.
+- **Optional hooks:** a hook that returns None or raises `NotImplementedError` is treated as absent. `ev.aux["xi"]` is optional and feeds sd(xi).
+
+**CLI and resume contract for WP9:**
+```python
+rd = RunDirectory(base, spec_name, spec_hash, hash_options(result_changing_cli_opts),
+                  new_run=args.new_run, options=opts)   # raises SpecMismatchError on hash change
+if args.detach:
+    runtime.detach(rd.path / "log.txt")   # parent prints pid and exits 0; no-op in the child
+runtime.setup_logging(rd.path / "log.txt"); runtime.check_environment()
+res = minimize(problem, weighting, OptimizerOptions(stage="step1"), checkpoint=rd)
+res2 = minimize(problem, Fixed(W2), OptimizerOptions(stage="step2", theta0=res.theta), checkpoint=rd)
+# `status` subcommand: runtime.status(rd.path)
+```
+- **Resuming:** relaunch the identical command. `minimize` resumes the named stage from the checkpoint, or returns a finished stage's stored result after one evaluation.
+- **Stage names:** use a different name for each stage. A TwoStep weighting runs `<stage>.step1` and `<stage>.step2` itself.
+- **Problem state:** the problem must implement `state_dict()` and `load_state_dict()` with nested dicts, lists, scalars and numpy arrays only (no pickle). This is what makes the warm deltas survive a restart.
+
+
+## WP6
+
+## Deviations from DESIGN and why
+1. **Order condition added.** The Z'X1 rank check alone does not catch the real Petrin case. There, Z'X1 is 22 x 13 with full rank 13, but 22 moments face 31 unknowns. I added `order_condition_block`, which fails with UNDER_IDENTIFIED and the counts, and a flag, X1_NOT_IN_Z, for X1 columns outside span(Z). Both appear in the report.
+2. **Weak-identification column scale.** DESIGN says "sd_k the column scale" without defining it. `run_diagnostics` scales by natural units, so the statistic is the precision of the worst one-natural-unit move. Without units it falls back to the column root mean square.
+3. **UNITS verdict for in-between ratios.** A direction with a natural-units ratio between 1e-6 and 1e-4 that is fine in Jacobi units is also labelled UNITS. DESIGN only defines UNITS below 1e-6.
+4. **Fewer than 10% gain in RUN_TO_INFINITY.** It is measured against (1 + q) at the start of the window, the scale of the DESIGN 4.6 stopping rules. Otherwise a q near 0 that keeps halving (DESIGN 4.8 test 4) would never count as little gain. "Above 5 times its start" is read as |theta| > 5·max(|start|, unit).
+5. **Standardisation and correlations.** Columns are scaled to unit norm without centring, so the constant in X1 survives. Canonical correlations and Jacobian-column correlations are uncentred.
+6. **Integration status key.** The integration block keeps DESIGN's `"status": "STABLE"/"UNSTABLE"` and stores the block status as `block_status`.
+7. **Cap shown as NOTE.** NORMALISATION_CAP_ACTIVE is rendered as `NOTE:`, not `FLAG:`, because DESIGN calls it "not a failure".
+8. **Non-finite JSON values.** NaN is written as null and infinity as the strings "inf"/"-inf", so the files are strict JSON.
+9. **Extra keyword arguments.** Some stub signatures gained optional keyword arguments (`units`, `binary_columns`, `x1_names`, `converged`, `names`, `headlines`, `thresholds`). Calls with the original positional arguments still work.
+10. **`DiagnosticInputs` and `build_report`.** I added these to `diagnostics/__init__.py`. `run_diagnostics` fills the inputs from options, then spec attributes, then `evaluation.aux`.
+
+Things the later packages need to know:
+- **Missing WP5/WP8 code:** if `convergence_block` (WP5) or `economics_block` (WP8) raises NotImplementedError, the report falls back to the DESIGN 5.1 message and an economics block marked not run.
+- **Gradient for RUN_TO_BOUND:** it defaults to 2n·G'Wg, which is not the true CUE gradient. WP9 should pass the exact gradient through options.
+- **Linear-coefficient SEs:** these need `G_full` in `aux` or options. Without it, SEs cover theta only, and the report says so.
+
