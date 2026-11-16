@@ -199,3 +199,58 @@ reporting convention applied once, not a normalisation to be carried into counte
 **For the write-up.** State the normalisation as mu = 0, justify it as the unique free scale, and
 show the invariance of the reported objects. Report taste spreads in both median-consumer and
 buyer dollars. Do not describe any normalisation on buyers.
+
+## 12. Song's PCM normalisations: price-coefficient location and the outside option over time (2026-11-16)
+
+**Source.** Minjae Song, "The Quality Adjusted Price Index in the Pure Characteristics Demand
+Model", Simon School WP FR 09-04 (2008), CPU market 1993-2000, 321 product-quarters. The
+estimation method is in Song (2007, RAND 38:429-446) and Song (2008, "Estimating the Pure
+Characteristics Demand Model: A Computational Note"). The utility is
+u_ijt = x_jt beta_i - alpha_i p_jt + xi_t + dxi_jt, u_i0t = delta_0t.
+
+**Normalisation 1: log alpha ~ N(0, theta), location fixed at zero.** Song fixes the location of
+the lognormal price coefficient at 0 and estimates only its spread (theta = 0.89 and 0.54 in the
+two specifications; 0.84 and 0.50 with a second random coefficient). This is the same median
+alpha = 1 normalisation as entry 11 and is a published precedent for it. The estimated constant in
+delta is negative (-1.08, -0.73), i.e. the alpha = 1 consumer values the base CPU below the outside
+good, exactly the pattern we see in Petrin: the normalising consumer is not a buyer, and that is
+fine. His welfare objects are CV_it = (u_it - u_it-1) / alpha_i, which is our formula and is scale
+invariant for the reason given in entry 11. He reports "the average consumer" as the one with
+alpha_i equal to the mean; this is a reporting convention, not a normalisation.
+
+**Normalisation 2: the outside-option level over time is not identified from shares.** Time
+dummies in delta pick up the sum of two things, the mean of unobserved quality xi_t and the utility
+of the outside option delta_0t, and shares cannot separate them. Song runs three identifying
+assumptions and shows they matter enormously:
+
+| assumption | time dummies identify | CPU index 96Q2 -> 00Q3 |
+|---|---|---|
+| delta_0t = 0 for all t | xi_t | rises to 905 (nonsense: more people bought better chips at lower prices) |
+| xi_t = 0 for all t | delta_0t | falls to 1.4 |
+| PBL (1993): mean dxi_jt of continuing products unchanged | delta_0t from continuing products | falls to 2.1 |
+
+The third is the one he adopts. The change in delta_0t is read off the mean change of
+(delta_jt - delta_0t) across products present in both t-1 and t, on the assumption that their
+unobserved quality did not move on average. This matters more in the PCM than in BLP because the
+buy / no-buy margin is a hard cutoff in alpha: whoever is assigned to the outside good is pinned by
+delta_jt - delta_0t for the cheapest product, so a misassigned delta_0t relabels buyers as
+non-buyers across years rather than shifting a smooth probability.
+
+**Normalisation 3: period-mean unobservables xi_t can contaminate group welfare.** When products
+enter or exit, xi_t moves even if every continuing product's unobserved quality is fixed, and that
+shifts the surplus of consumers whose choice set did not change. Song recomputes group indices
+with xi_t subtracted. He also runs a "dxi_jt fixed at the first-period value" variant that treats
+residual movement as measurement error.
+
+**What applies to Petrin.** (a) Keep mu = 0; cite Song as precedent alongside Berry and Pakes.
+(b) Our X1 holds Petrin's pgnp, trend, trend2 with u_i0 = 0 in every year. That is Song's first
+row, the assumption he rejects for CPUs. It is harmless for the 1984 no-minivan counterfactual,
+which compares two choice sets in one year with one delta_0, so delta_0,1984 cancels. It is not
+harmless for anything compared across years (welfare paths, a quality-adjusted car price index,
+or the cross-year stability of sigma_x in buyer dollars), and for those the PBL continuing-product
+assumption should replace the trend. (c) The group-by-alpha-quantile welfare table (Song's Table 6)
+is the natural PCM deliverable for the minivan: who gained, by price-sensitivity quintile and
+family size, which BLP cannot produce cleanly because the logit draw reassigns consumers each
+period. (d) Song's one-RC model gave cache WTP of $80-110 and the two-RC model $200-400, matching
+observed price gaps. The one-RC model forced a horizontal attribute to be vertical and understated
+it. Same mechanism as entries 4 and 7.
