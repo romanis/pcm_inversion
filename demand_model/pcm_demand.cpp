@@ -27,6 +27,12 @@ inline LnTerms ln_terms(double e, double sigma) {
     return {0.5 * std::erfc(-z / std::sqrt(2.0)), phi / (e * sigma), -phi * z / sigma};
 }
 
+bool feasible(const ArrayXd & s) { return (s > 0).all() && s.sum() < 1.0; }
+
+}  // namespace
+
+namespace pcm_demand::detail {
+
 // Vertical model for one draw, written into global-index outputs (which must be zeroed).
 // Products off the frontier get zero share and zero derivatives.
 void cond_vertical(const ArrayXd & d, const ArrayXd & p, double sigma,
@@ -72,14 +78,12 @@ void cond_vertical(const ArrayXd & d, const ArrayXd & p, double sigma,
     }
 }
 
-bool feasible(const ArrayXd & s) { return (s > 0).all() && s.sum() < 1.0; }
-
 // For every product, the smallest increase in delta_j that puts it on at least one consumer's
 // frontier. For draw i the frontier is the increasing part of the upper convex hull of the points
 // (p_k, dc_ik) together with the origin; a product below the hull by g (in conditional-quality units)
 // needs delta_j raised by c_i * g for that consumer. The lift is the minimum over draws. Products
 // already on some frontier get zero. Cost: one hull per draw, about one share evaluation.
-ArrayXd frontier_lift(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm)
+ArrayXd frontier_lift(const ArrayXd & delta, const Market & mk, const Params & prm)
 {
     const int N = static_cast<int>(delta.size());
     const int K = static_cast<int>(mk.x.cols());
@@ -140,7 +144,7 @@ ArrayXd frontier_lift(const ArrayXd & delta, const pcm_demand::Market & mk, cons
     return lift;
 }
 
-}  // namespace
+}  // namespace pcm_demand::detail
 
 namespace pcm_demand {
 
@@ -202,8 +206,8 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
 
             s_c.setZero();
             if (with_derivatives) { Jd.setZero(); Jp.setZero(); dsig.setZero(); }
-            cond_vertical(dc, mk.p, prm.sigma_p, s_c,
-                          with_derivatives ? &Jd : nullptr, &dsig, &Jp);
+            detail::cond_vertical(dc, mk.p, prm.sigma_p, s_c,
+                                  with_derivatives ? &Jd : nullptr, &dsig, &Jp);
 
             const double w = mk.weights[i];
             acc.s += w * s_c;
@@ -315,7 +319,7 @@ InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Par
         for (int k = 0; k < 60 && !feasible(s) && evals < max_evals; ++k) {
             const double span = std::max(delta.maxCoeff() - delta.minCoeff(), 1e-3 * delta.abs().maxCoeff() + 1e-8);
             if (s.sum() >= 1.0) delta -= 0.05 * span;
-            const ArrayXd lift = frontier_lift(delta, mk, prm);
+            const ArrayXd lift = detail::frontier_lift(delta, mk, prm);
             ++evals;
             for (int j = 0; j < N; ++j)
                 if (s[j] <= 0 && std::isfinite(lift[j])) delta[j] += lift[j] + margin * span;

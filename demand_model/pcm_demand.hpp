@@ -67,6 +67,29 @@ InversionResult invert(const Eigen::ArrayXd & s_data, const Market & m, const Pa
                        const Eigen::ArrayXd & delta0, double tol = 1e-12,
                        unsigned max_share_evaluations = 5000);
 
+/**
+ * Per-draw building blocks, exposed for the estimation harness kernel (pcm_kernel.cpp).
+ * Not part of the stable interface of this module.
+ */
+namespace detail {
+
+/**
+ * Vertical model for one draw in conditional qualities d (N), prices p (N, increasing) and
+ * LogNormal(0, sigma) price sensitivity. Writes into global-index outputs, which must be zeroed:
+ * s (N) shares, and when Jd is not null also Jd (N x N) ds/dd, dsig (N) ds/dsigma and Jp (N x N)
+ * ds/dp. Products off the frontier get zero share and zero derivatives.
+ */
+void cond_vertical(const Eigen::ArrayXd & d, const Eigen::ArrayXd & p, double sigma,
+                   Eigen::ArrayXd & s, Eigen::MatrixXd * Jd, Eigen::ArrayXd * dsig, Eigen::MatrixXd * Jp);
+
+/**
+ * For every product, the smallest increase in delta_j that puts it on at least one consumer's
+ * frontier (zero for products already on some frontier, +inf if none is reachable).
+ */
+Eigen::ArrayXd frontier_lift(const Eigen::ArrayXd & delta, const Market & mk, const Params & prm);
+
+}  // namespace detail
+
 }  // namespace pcm_demand
 
 #endif
