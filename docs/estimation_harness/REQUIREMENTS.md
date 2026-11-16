@@ -81,3 +81,11 @@ margins, 1984 no-minivan counterfactual) against the BLP columns already in
 Only when an objective genuinely converged (per the diagnostic report) is the result analysed
 economically and econometrically, and alternative specifications proposed and run, aiming at a
 specification as close to BLP as possible with stable normalisations.
+
+## Repository hygiene (owner instruction, 2026-11-16)
+
+Each replication folder tracks exactly two scripts: `estimate_blp.py` and `estimate_pcm.py`.
+Each produces all meaningful analysis for its model (estimation, diagnostics report,
+postestimation, counterfactuals) from the harness. Logs, results, probe and check scripts stay
+local and untracked; `.gitignore` enforces this. Reusable code lives in the harness package,
+not in replication folders.

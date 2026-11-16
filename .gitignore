@@ -2,9 +2,19 @@ build
 .venv
 .vscode
 *.json
-__pycache__build-dbg
+__pycache__
+build-dbg
 nevo_replication/.vendor
 nevo_replication/results/*.pkl
 nevo_replication/results/*.npz
 build-rel
 __pycache__
+build-rel2
+# Replication folders: only the two final scripts per paper are tracked
+# (estimate_blp.py, estimate_pcm.py). Logs, results, probes and checks stay local.
+petrin_replication/*
+!petrin_replication/estimate_blp.py
+!petrin_replication/estimate_pcm.py
+nevo_replication/*
+!nevo_replication/estimate_blp.py
+!nevo_replication/estimate_pcm.py

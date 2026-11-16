@@ -6,7 +6,7 @@ Two fits with identical demand and supply specifications:
 Both report the 1984 consumer-surplus change from removing minivans (Petrin's $367M headline),
 so the PCM fit without any micro data can be placed against both.
 
-Run: PYTHONPATH=nevo_replication/.vendor python petrin_replication/blp_baseline.py [micro|nomicro]
+Run: PYTHONPATH=nevo_replication/.vendor python petrin_replication/estimate_blp.py [micro|nomicro]
 """
 from __future__ import annotations
 
