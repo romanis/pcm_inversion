@@ -1178,3 +1178,21 @@ and WP9a in parallel; then WP9; then WP10.
 11. **Oversubscription.** 13 OpenMP teams plus OpenBLAS threads on 192 cores. The environment lines
     in 1.3 address it; WP7 measures CPU utilisation in its Petrin smoke test.
 12. **Unavailable tool in this session.** The `chorus` MCP server failed to start; it was not needed.
+
+## 9. Owner decisions on the open questions (2026-11-16)
+
+1. F1 is confirmed independently (rank 22 vs 35) and recorded as LEARNINGS 16. WP9 also runs the
+   sigma_p ray profile without micro moments but with Z = [X1, Z_excl], so the effect of the full
+   instrument set and of the micro moments are reported separately.
+2. Body-sigma cap: the pooled price range, $66.1k. One primitive number, fixed across years and
+   counterfactuals, reported as a normalisation.
+3. PCM keeps its own scrambled Sobol standard normals for tastes, crossed with pyblp's agent
+   demographics. pyblp's nodes are not used for the PCM. The difference is stated in the write-up.
+4. No PCM supply block. `petrin_replication/estimate_blp.py` adds a demand-only BLP fit (same
+   moments as the PCM: aggregate + micro, no supply), reported beside the two existing BLP columns,
+   so the headline comparison is like for like.
+5. sigma_p upper bound 3.0. Hitting it is reported by the bound detector, not hidden.
+6. Draws per market are powers of two: 4,096 for development, 16,384 for the reported run, 32,768
+   for the draws-doubling check.
+7. The plausible ranges in 6.6 are accepted.
+8. CUE may hold the micro covariance block fixed; CUE is not used for the Petrin headline.

@@ -418,3 +418,30 @@ is fixed, every welfare number depends on an arbitrary choice.
 **What is still allowed.** Using exact PCM structure inside our own algorithms (frontier lift,
 breakpoint-aware line search, see the custom optimizer plan) is the approach. Nothing that
 changes the model's shares is.
+
+## 16. Every Petrin PCM estimate so far was under-identified by construction (2026-11-16)
+
+**Finding.** `petrin_replication/estimate_pcm.py` used Z = demand_instruments0..21 (22 columns)
+as the only instruments, and concentrated out the 13 linear coefficients of X1 (constant,
+characteristics, body dummies, pgnp, trend, trend2) by IV on that Z. pyblp builds
+ZD = [demand_instruments, exogenous X1] (35 columns). On the 2,407 Petrin products,
+rank(Z) = 22 and rank([Z, X1]) = 35, so X1 is not in the span of Z. The moment count was 22 against
+13 + 14 = 27 unknowns (base spec) or 13 + 18 = 31 (body-sigma spec). Five to nine directions of
+theta were unidentified by the moment conditions themselves.
+
+**What this changes.** The flat directions, the drift between 4,000 and 16,000 draws, and the
+near-singular SEs (entries 1 and 13) all have this as a direct cause. The scale mechanism of
+entry 1 is still correct mathematics (q is quadratic in the scale of xi under fixed W and the PCM
+has a free scale), and the CUE shape mechanism of entry 13 is still correct, but neither run can
+be read as evidence about what the data identify. The fixed-W and CUE endpoints are results of an
+estimator with too few moments, not of the PCM on Petrin's data.
+
+**Lesson for the paper.** Use the full instrument matrix [exogenous X1, excluded instruments],
+check rank(Z) and rank(Z'X1) before any estimation, and count moments against unknowns
+(concentrated linear coefficients included). The estimation harness runs this check before every
+estimation and refuses to start when moments < unknowns. Found by the harness design review
+(docs/estimation_harness/DESIGN.md, F1).
+
+**Nevo.** The Nevo PCM absorbs brand fixed effects by within transformation, so there is no
+concentrated X1 apart from the absorbed effects, and its 20 instruments are not affected in the
+same way. The harness check will confirm this when Nevo is ported.
