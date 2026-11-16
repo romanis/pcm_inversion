@@ -11,6 +11,9 @@ set(CMAKE_CXX_STANDARD 17)
 
 include_directories(${ROOT})
 
+# Lets ctest run every subdirectory's gtests from the top of the build tree.
+enable_testing()
+
 include(FetchContent)
 FetchContent_Declare(
   googletest

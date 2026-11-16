@@ -60,6 +60,14 @@ if(pybind11_FOUND)
     pybind11_add_module(python_pcm_demand "${ROOT}/python_bindings/pcm_demand_python.cpp")
     target_include_directories(python_pcm_demand PUBLIC "${ROOT}/market_share/" "${ROOT}/demand_model/")
     target_link_libraries(python_pcm_demand PUBLIC pcm_demand Eigen3::Eigen)
+
+    # Estimation harness kernel module (docs/estimation_harness/DESIGN.md 1.2), written into the package.
+    pybind11_add_module(pcm_kernel_py
+        ${ROOT}/python_bindings/pcm_kernel_python.cpp ${ROOT}/python_bindings/bind_solve.cpp
+        ${ROOT}/python_bindings/bind_events.cpp ${ROOT}/python_bindings/bind_welfare.cpp)
+    target_link_libraries(pcm_kernel_py PRIVATE pcm_kernel)
+    set_target_properties(pcm_kernel_py PROPERTIES OUTPUT_NAME pcm_kernel
+        LIBRARY_OUTPUT_DIRECTORY ${ROOT}/nfp_harness/_native)
     
 
 

@@ -18,3 +18,7 @@ petrin_replication/*
 nevo_replication/*
 !nevo_replication/estimate_blp.py
 !nevo_replication/estimate_pcm.py
+
+# Estimation harness: compiled module and pytest cache
+nfp_harness/_native/*.so
+.pytest_cache
