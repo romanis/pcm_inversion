@@ -125,6 +125,30 @@ class PCMProblem:
         self.pool = ThreadPoolExecutor(workers)
         self.evals = 0
         self.last = None
+        # Per-market OpenMP thread budget: each Python thread gets a slice of the available CPUs.
+        # Inversion work per market scales roughly as J * I (products x consumers), so we allocate
+        # threads proportionally to empirical timing (which varies 10x across markets at same J),
+        # falling back to product count. This equalises wall-clock time across parallel market calls,
+        # cutting the bottleneck from ~430s (1 OMP thread/market at nu16) toward ~30s.
+        try:
+            import ctypes
+            self._gomp = ctypes.CDLL("libgomp.so.1")
+            omp_total = int(os.environ.get("PCM_OMP_TOTAL", str(os.cpu_count() or 13)))
+            # Allocation weight: J^2 per market (Newton work per consumer scales as J^2 for the
+            # Jacobian linear solve). This is nu-agnostic; empirical timing from one nu is a
+            # poor proxy for another because the per-market rank order changes substantially.
+            sizes = np.array([len(m.shares) ** 2 for m in self.markets], dtype=float)
+            raw = omp_total * sizes / sizes.sum()
+            # floor to int >= 1, then give leftover to the slowest market
+            alloc = np.maximum(raw.astype(int), 1)
+            alloc[np.argmax(sizes)] += omp_total - int(alloc.sum())
+            self._omp_threads = {m.market_id: int(t) for m, t in zip(self.markets, alloc)}
+            print(f"OMP thread budget (total={omp_total}): "
+                  + ", ".join(f"{mid}={t}" for mid, t in sorted(self._omp_threads.items())),
+                  flush=True)
+        except OSError:
+            self._gomp = None
+            self._omp_threads = {}
 
     def set_weighting(self, W):
         self.W = W
@@ -136,6 +160,9 @@ class PCMProblem:
     def _solve_market(self, m: MarketData, theta, grad):
         th, ph, sp = split(theta)
         t_start, stages = time.time(), []
+        # Set per-market OMP thread count so the slowest market gets proportionally more cores.
+        if self._gomp is not None and m.market_id in self._omp_threads:
+            self._gomp.omp_set_num_threads(self._omp_threads[m.market_id])
         warm = m.delta if m.delta is not None else np.empty(0)
         # a trial point gets a short first try; most of the run's time was going into trial
         # points the optimizer then rejected

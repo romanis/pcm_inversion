@@ -90,3 +90,67 @@ with equal weights: max error 0.0065 at 1024 points, 0.0007 at 16384. Use QMC.
 The 24 brands differ only in sugar and mushy; everything else that separates them in the
 simulation is 24-dimensional epsilon noise. Forcing that into vertical xi is what the PCM had to do
 there. It is not a test of PCM against BLP on real demand.
+
+## 8. PCM inversion time varies 10x across markets at the same number of products (2026-11-15)
+
+**Finding.** The serial inversion time (1 OMP thread) at nu=4 ranges from 186s (market 1982, 148
+products) to 1745s (market 1988, 205 products) — a 9x spread for a 38% difference in J. Product
+count is a poor proxy for inversion difficulty. The slowest market is not the largest (1992 has
+210 products but takes only 906s; 1989 has 199 products but takes 699s). The likely driver is
+the structure of the price-quality convex hull: a market with many near-ties on the hull needs
+more Newton steps because the Jacobian is ill-conditioned near its boundary points.
+
+**Evidence.** `petrin_replication/results/market_times_nu4.csv` (serial, 1 thread per market).
+
+**Implication for practitioners.** When parallelising a PCM estimator with one Python thread per
+market, wall-clock time per evaluation equals the slowest market's inversion time regardless of
+how many markets run in parallel. This is easy to miss when benchmarking on small problems.
+
+## 9. OpenMP parallelism within the PCM inversion reduces bottleneck market time by 5x (2026-11-15)
+
+**Finding.** The C++ share-computation kernel uses OpenMP over consumers
+(`#pragma omp parallel for schedule(dynamic, 10)` in `market_share/pcm_market_share.cpp`).
+Allocating threads proportionally to empirical market timing and setting `omp_set_num_threads()`
+via ctypes before each market call reduced the nu=4 evaluation from 426s to 78s (5.4x speedup).
+This is a resource-redistribution gain: total CPU-seconds is unchanged, but the slowest market
+goes from 426s (1 thread) to ~78s (~52 threads).
+
+**How.** `PCMProblem.__init__` loads `libgomp.so.1` via ctypes, reads `market_times_nu4.csv` for
+the allocation weights, and stores per-market thread budgets. `_solve_market` calls
+`gomp.omp_set_num_threads(budget)` at entry. Controlled by `PCM_OMP_TOTAL` (default: `os.cpu_count()`).
+
+**Caveat.** The nu=4 serial timing is not a reliable proxy for nu=16 difficulty: the per-market
+rank order changes substantially. The proper approach is to run a brief serial profile at the
+target nu (or at a small consumers-per-market value) before the full estimation, then use those
+weights. Alternatively, weight by J^2 (Newton work scales as J^2 for the linear solve in the
+Jacobian step), which is a better prior than J^1 or historical timing from a different nu.
+
+## 10. MPEC + CUE is valid but the main benefit over nested CUE is robustness, not convergence rate (2026-11-16)
+
+**Finding.** MPEC (Dube, Fox, Su 2012) lifts delta to an explicit decision variable alongside theta
+and enforces sigma(delta, theta) = s as equality constraints for an NLP solver (IPOPT/KNITRO).
+
+For fixed-W GMM: q = delta' M'ZWZ'M delta / n is quadratic in delta, so d^2q/ddelta^2 = Z'M'WMZ/n
+is a constant PD matrix. IPOPT exploits this directly — each NLP iteration takes a full Newton step
+in the (theta, delta) space without re-inverting — which is both faster and more robust than the
+nested approach.
+
+For CUE: q_CUE = g' S(delta, theta)^-1 g is a ratio of quadratics in delta. d^2q/ddelta^2 is not
+constant and must be recomputed at each NLP iteration. The convergence rate advantage of MPEC over
+nested CUE is lost. The remaining benefit is that IPOPT handles infeasible trial points via its
+interior-point penalty rather than cold Newton restarts (which cost 237s per market in the nu=16
+log for market 1991 on eval 2).
+
+**Practical conclusion for Petrin data.** With the OMP parallelism fix applied, all 13 markets
+converge on the first evaluation with the warm start and no cold restart is triggered. The
+bottleneck is arithmetic, not inversion failures. MPEC overhead (NLP setup, constraint Jacobian
+assembly for ~2400 constraints x ~2418 variables) would likely exceed any robustness savings.
+Revisit if estimation at nu>=32 shows frequent cold restarts across many evaluations.
+
+**IPOPT availability note.** Brew-installed IPOPT on this machine (glibc 2.29 requirement) is
+incompatible with the system glibc. cyipopt therefore cannot be imported. scipy's `trust-constr`
+and `SLSQP` support equality constraints but are not competitive with IPOPT at this problem size.
+
+**For the write-up.** The MPEC benefit for CUE is conceptually different from MPEC for fixed-W GMM.
+Papers that show MPEC speedups (Dube-Fox-Su 2012, Conlon-Gortmaker 2020) use fixed-W. For CUE the
+argument rests on inversion robustness only, and the case depends on how often cold restarts occur.
