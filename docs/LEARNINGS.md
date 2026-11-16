@@ -445,3 +445,29 @@ estimation and refuses to start when moments < unknowns. Found by the harness de
 **Nevo.** The Nevo PCM absorbs brand fixed effects by within transformation, so there is no
 concentrated X1 apart from the absorbed effects, and its 20 instruments are not affected in the
 same way. The harness check will confirm this when Nevo is ported.
+
+## 17. The earlier PCM consumer-surplus numbers came from a buggy function and are void (2026-11-16)
+
+**Bug.** `consumer_surplus` in the old local `petrin_replication/pcm_postestimation.py` walked
+the upper hull of (0,0), (p_k, q_k) and gave each frontier product the alpha interval
+(e_lo, previous e), starting with previous e = infinity. For the first segment, from the outside
+good to the cheapest frontier product, e_lo = q/p is the cutoff below which a consumer buys. The
+code therefore assigned that product the consumers with alpha > q/p, who buy nothing, and every
+later product inherited an interval shifted by one segment.
+
+**Example.** One product, q = 2, p = 1, log alpha ~ N(0, 0.5^2). Buyers are alpha < 2, and
+CS = 2 E[1/alpha; alpha < 2] - P(alpha < 2) = 1.282. Quadrature of max(q/alpha - p, 0) gives the
+same number. The old function returned -0.016, the "surplus" of the non-buyers, which is negative.
+On a random 30-product, 500-draw market it gave 3.90 against the correct 42.72, and produced
+negative per-draw surplus.
+
+**Consequence.** The PCM minivan CS gain of about -$1M (entry 13 era, file
+pcm_vs_blp_body_nu16.csv) is void on two counts: this bug, and the under-identified estimator of
+entry 16. The economic reading built on it ("the PCM says the minivan added almost nothing, so
+Petrin's $367M is mostly logit variety") is withdrawn until the harness re-estimates and recomputes
+CS with the tested kernel. Elasticities and margins came from other code and are affected only by
+entry 16.
+
+**Fix.** `demand_model/pcm_welfare.cpp` (harness WP3, commit 1a3b7bc) computes CS by the frontier
+formula with the correct intervals, tested against a closed form, independent quadrature,
+scale invariance, dominated-product invariance and Roy's identity (dCS/dp_j = -s_j).
