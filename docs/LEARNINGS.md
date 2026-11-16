@@ -314,3 +314,78 @@ moments in place, use two-step GMM with W from a bounded, interior point (sigma 
 at the price range, say $50k, as a normalisation of an unidentified direction, not a prior), and
 report that cap. (d) Treat a falling q together with a rising sd(xi) as the diagnostic for this
 artifact, as a falling q with a falling sd(xi) was for entry 1.
+
+## 14. MPEC does not apply to the exact PCM, with or without micro moments, and it is not the cure for the degenerate estimates (2026-11-16)
+
+**Setting.** Entry 13 left the plan at nested two-step GMM with aggregate moments plus Petrin's
+CEX micro moments, from an interior start, with sigma on the body-type dummies capped at the
+price range. The question was whether an MPEC formulation (Dube, Fox and Su 2012: treat delta
+as decision variables, impose sigma(delta, theta) = s as equality constraints, hand the problem
+to an interior-point NLP solver) would help there. Entry 10 answered for CUE in general terms;
+this entry is the sharper answer for the exact PCM.
+
+**The results are an identification problem, not an optimisation problem.** Both the fixed-W
+run (entry 1) and the CUE runs (entry 13) converged to genuine minima or plateaus of the
+objective they were given. The fixed-W descent toward sigma_p -> infinity is a real descent
+direction of that objective, and the CUE point at q = 0.80 is a real flat region of that
+objective. An algorithm that reaches the same points faster changes nothing. The fix is to
+change what the moments reward, which is what the micro moments do.
+
+**Three properties of BLP that MPEC relies on and the exact PCM lacks.**
+
+1. *Smooth constraints.* In BLP every consumer buys every product with positive probability, so
+   shares are C-infinity in delta. In the PCM, for one taste draw, a product B priced between A
+   and C has share zero while it lies below the A-C line in (price, delta) space and share
+   F(e_AB) - F(e_BC) once above it. Example: p = 10, 12, 14 for A, B, C with delta_A = 5 and
+   delta_C = 7; B is on the hull only when delta_B > 6. At delta_B = 5.99 the share and its
+   derivative are both zero; at 6.01 the derivative is about f(e)(1/2 + 1/2) = 0.4 per $1,000.
+   The second derivative is a spike at 6. With 16,000 draws the constraint Hessian is a sum of
+   16,000 spikes per product. IPOPT's Newton step on the Lagrangian uses a Hessian that jumps
+   between iterates, so the second-order convergence that MPEC is bought for does not arrive.
+
+2. *LICQ.* A product below the frontier for every draw has d sigma_j / d delta = 0 as a whole
+   row while its constraint sigma_j = s_j > 0 is violated. The gradient gives the solver no
+   direction in which to raise delta_j. This is the singular Jacobian that stalled the nu=16
+   run on markets 1991-1993. The nested code recovers with the frontier lift, a combinatorial
+   step (compute the exact delta_j that puts j on some consumer's hull). An NLP solver has no
+   such step, and because MPEC iterates are infeasible by design, this state is visited at most
+   iterations rather than only at bad trial points.
+
+3. *A fixed quadratic objective in delta.* With fixed W and aggregate moments only,
+   q = delta' M' Z W Z' M delta / n has a constant Hessian. Micro moments are nonlinear in delta
+   (predicted E[family size | minivan buyer] is a ratio of share sums) and pool across years, so
+   they couple delta across markets. The objective Hessian stays low rank (22 aggregate plus
+   about 10 micro moments), so this is a mild loss, but it removes the one piece of MPEC
+   structure that would otherwise have survived. Adding micro moments moves the MPEC verdict in
+   the wrong direction, not the right one.
+
+**Ceiling on what MPEC could save.** Per evaluation, the nested code pays one share-and-Jacobian
+pass per Newton iteration, 3 to 6 iterations on a warm start. MPEC pays one pass per NLP
+iteration and needs roughly as many outer iterations as L-BFGS. The ceiling is therefore a 3-6x
+saving on smooth stretches, with a loss on kinked ones. The actual wall-clock cost is the
+16k-draw share pass on markets 1985, 1988 and 1990, which MPEC pays identically; entry 9 already
+addressed that cost with OMP threads.
+
+**What the micro moments do and do not identify.** P(buy | income quartile) pins the alpha
+distribution against income: at sigma_p -> infinity the unobserved spread swamps the income
+gradient and purchase probability goes flat across quartiles, which closes the fixed-W escape
+route of entry 1. E[family size | body type] and the age moments identify pi_body x fs and the
+ratio pi / sigma_body: with sigma_sw = $117k the wagon pool is assigned by the random draw, so
+wagon buyers would have the population mean family size, contrary to the data. They do not pin
+the absolute level of sigma_body: a corner with pi and sigma both scaled up keeps the pools
+sorted by family size and matches these moments. Second-choice data would pin it; Petrin has
+none. What rules that corner out is the fixed-W penalty on the lumpy xi it produces (sd(xi)
+rose 1.4 -> 10 at the CUE corner). So fixed W with micro moments is the right pairing, CUE is
+not, and the price-range cap on sigma_body is the stated normalisation for the direction the
+data leave quiet.
+
+**Check before the full run.** Rerun the sigma_p ray profile (profile_sigma_ray.py) with the
+micro moments included. q must stop being monotone in sigma_p. If it is still monotone, the
+micro moments are not doing what this entry claims and the plan needs rethinking before any
+long estimation.
+
+**When MPEC becomes worth revisiting.** On the smoothed PCM (Berry and Pakes 2007 suggest a
+logit error with scale lambda sent toward zero) every share is positive, sigma is C-infinity,
+LICQ holds, and MPEC applies as in Dube, Fox and Su. Tasmanian sparse grids become usable at the
+same moment, since the earlier probe failed on the same kinks. That is a different model with
+lambda as one more object to defend, and not the paper's main specification.
