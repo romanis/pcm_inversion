@@ -254,3 +254,63 @@ family size, which BLP cannot produce cleanly because the logit draw reassigns c
 period. (d) Song's one-RC model gave cache WTP of $80-110 and the two-RC model $200-400, matching
 observed price gaps. The one-RC model forced a horizontal attribute to be vertical and understated
 it. Same mechanism as entries 4 and 7.
+
+## 13. CUE has the mirror-image artifact: it rewards a large, lumpy xi, reached through infinite taste spread on body-type dummies (2026-11-16)
+
+**What happened.** Both CUE runs (4,000 and 16,000 consumers per market, warm start theta at
+q = 39.6, sigma around $2-4k, sigma_p = 1.9) walked for 1,900-2,300 evaluations in the same
+direction. The nu=4 run stopped with the L-BFGS convergence message at q = 0.803 after 8,550 s;
+|grad| was still 0.38, so it is a flat region, not a stationary point. The nu=16 run was at
+q = 1.146 and still descending when the process died at evaluation 2,288 (no error in the log;
+the session that launched it was recycled). End points, in $1000:
+
+| | nu=4 (stopped) | nu=16 (eval 2288) | start |
+|---|---|---|---|
+| sigma_sw | 117 | 126 | 3.8 |
+| sigma_su | 107 | 132 | 2.1 |
+| sigma_const | 27.3 | 0.36 | 3.8 |
+| sigma_hpwt | 8.1 | 27.9 | 4.2 |
+| sigma_air | 17.0 | 16.8 | 2.1 |
+| sigma_pv | 19.5 | 32.0 | 2.1 |
+| sigma_p (log alpha sd) | 0.20 | 0.14 | 1.89 |
+| sd(xi) | 10.1 | 11.3 | 1.38 |
+| q_CUE | 0.80 | 1.15 | 39.6 |
+
+Where the spread landed differs between the two runs (sigma_const in one, sigma_hpwt in the
+other), so the point is not stable in the number of draws either. Clustered SEs are NaN or 10^5.
+
+**What the point means economically.** A station-wagon taste sd of $117k on a dummy, against
+cars priced $5-50k, means 67% of consumers have a wagon taste larger in absolute value than
+any price. Each consumer is either wagon-only or never-wagon by their draw; the same for SUVs
+(64%). The market is cut into separate body-type pools, and beta_sw = -$251k, beta_su = -$220k
+set the pool sizes to the observed body-type shares. Within a pool sigma_p = 0.2 gives alpha a
+5th-95th range of 0.72-1.39, which is the near-vertical model again. At the nu=4 point the median
+own-price elasticity is -219 (fixed-W gave -56), the median product has nonzero cross-elasticity
+with 7 of about 185 rivals, and under 0.3% of cross-elasticity mass crosses a body type. The
+ownership-weighted share Jacobian in 1984 is singular, so the Nash first-order condition and the
+minivan counterfactual cannot be computed.
+
+**Mechanism.** CUE is q = g' S(theta)^-1 g with g = Z'xi/n and S the clustered covariance of
+z_j xi_j at the same theta. Entry 1 showed q is invariant to xi -> kappa xi. It is not invariant
+to the shape of xi. g averages xi across products, S squares it product by product. Make a few
+products' xi very large and S grows faster than g'g, so q falls, with no improvement in how xi
+correlates with the instruments. This is the known weakness of CUE (Hansen, Heaton and Yaron
+1996; Newey and Smith 2004): the objective can be lowered by making the moments noisy. The
+optimizer found the route: sd(xi) rose from $1.4k to $10k while q fell from 39.6 to 0.8.
+
+**Why the route is open.** Nothing in aggregate shares with characteristics-of-rivals instruments
+pins how much substitution crosses body types. Fixed-W GMM takes one degenerate exit (shrink xi,
+vertical model, entry 1) and CUE takes the other (inflate xi, segmented near-vertical model).
+BLP never faces this because the logit error forces positive cross-body substitution for every
+consumer. Petrin faced it and solved it with micro moments: E[minivan | family size], E[SUV |
+age] and so on from the CEX, which are exactly moments on body-type choice by demographic.
+Those moments are in the pyblp Petrin data and we have not used them.
+
+**Implication for the estimation plan.** (a) Neither fixed-W nor CUE on aggregate moments alone
+is a usable estimator for this specification. (b) Add Petrin's micro moments to the moment
+vector; they are the economically right identification for the body-type spreads and make the
+PCM spec match BLP-with-micro-moments, which is the comparison the paper wants. (c) With micro
+moments in place, use two-step GMM with W from a bounded, interior point (sigma on dummies capped
+at the price range, say $50k, as a normalisation of an unidentified direction, not a prior), and
+report that cap. (d) Treat a falling q together with a rising sd(xi) as the diagnostic for this
+artifact, as a falling q with a falling sd(xi) was for entry 1.
