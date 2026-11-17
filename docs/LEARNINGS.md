@@ -471,3 +471,42 @@ entry 16.
 **Fix.** `demand_model/pcm_welfare.cpp` (harness WP3, commit 1a3b7bc) computes CS by the frontier
 formula with the correct intervals, tested against a closed form, independent quadrature,
 scale invariance, dominated-product invariance and Roy's identity (dCS/dp_j = -s_j).
+
+## 18. The trust-radius collapse came from exponentiating price-over-income, not from the price tie break (2026-11-17)
+
+**Symptom.** In the harness prefit (Petrin, 4,096 draws per market) trial points 1.5e-6 from the
+accepted point failed to invert, mostly in market 1993, and the trust radius fell from 0.2 to
+1.5e-6. The failing products were the most expensive cars (positions 188-198 of 202, neighbour
+price gaps $277 to $2,931), not the tie-broken pairs ($10 gaps).
+
+**Cause.** The PCM spec carried Petrin's BLP price interactions low/income, mid/income,
+high/income into the exponent: log c_i = phi_low low_i/income_i + .... In BLP these enter
+linearly, alpha_i = pi_g g_i/income_i, so the lowest CEX income in the data (0.0036, against a
+low-group median of 5.8 and an overall maximum of 359) only multiplies alpha by 280.
+In the PCM the same ratio is exponentiated: low/income reaches 280, and phi_low = -0.091 gives
+c_i = exp(-25.6) = 7e-12. A handful of draws (0.1% have c_i < 1e-6) become price-insensitive by
+eleven orders of magnitude. Such a consumer buys the car with the highest delta + x.t at any
+price, and switches between luxury cars when delta changes by about c_i times a price gap, around
+1e-11. Each switch moves a share of about 1e-4 by one draw weight (2.4e-4). The share map is then
+discontinuous at the inversion tolerance of 1e-9.
+
+**Evidence (market 1993, prefit theta).**
+
+| | c_i min | cond(ds/ddelta) | cold solve | warm solve at +1e-6 |
+|---|---|---|---|---|
+| prefit phi | 7.3e-12 | 1.7e11 at the accepted delta | infeasible_start, 636 s | not_converged, residual 1.2e-9 |
+| phi_low = 0 | 0.26 | 2.5e4 | ok in 18 s | ok in 5 evaluations, residual 4e-14 |
+
+The prefit also has the wrong sign economically: phi_low < 0 makes the poorest households the
+least price-sensitive, while Petrin's alpha_i proportional to 1/income makes them the most.
+
+**Price ties.** Not the cause here. The kernel requires strictly increasing prices because the
+alpha cutoff between adjacent frontier products is (difference in conditional quality)/(price
+gap). Exact ties can be handled exactly: at equal prices, for each taste draw only the product
+with the higher delta + x.t can be on the frontier. With horizontal tastes the products still
+compete, through the taste draws. The $10 spread is a convenience, not a requirement.
+
+**Lesson.** Moving a BLP demographic interaction into a PCM exponent changes its scale from
+linear to exponential. Check the range of every regressor that enters log alpha, and use
+log(income) rather than 1/income, so that the price-sensitivity range is bounded by the income
+range.
