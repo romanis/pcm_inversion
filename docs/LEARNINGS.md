@@ -697,3 +697,30 @@ was clipped at the minima (share_mc_nonpositive 0 at every point).
 
 The main estimation (extensive, step 1, step 2, post, stability) was launched at 16,384 draws per
 market from the prefit point.
+
+## 24. Step 1 at 16,384 draws slid back into the scale artifact through the price-sensitivity distribution (2026-11-17)
+
+**Run.** Main estimation (extensive, then step 1 with fixed W1 on aggregate + micro + supply, 73
+moments, 14 nonlinear and 25 linear parameters) from the prefit point, nu = 16 (run
+petrin_pcm_8cdfbfe173).
+
+**Result.** Step 1 ended STALLED at q = 23.85 (aggregate 5.6, micro 11.6, supply 6.7) from 332.7,
+with projected gradient 437 and 10 consecutive rejections at a trust radius of 7e-9. Step 2 was
+refused. The diagnostics named it: SCALE_ARTIFACT (q_fixed 333 to 23.9 while q_cue rose 287 to 310;
+sd(xi) 1.21 to 0.15) and WEAK_IDENTIFICATION (Cragg-Donald-style 4.1 against 79.1).
+
+**Mechanism.** At the stall sigma_p = 2.30 and phi_high = -0.76 (from -0.42), so buyers sit far in
+the low-alpha tail: mean alpha among buyers is 0.053 against median 1 in the low group. Every
+utility-scale parameter shrank in median-consumer dollars (sigma_const 0.48, sigma_hpwt 0.68 per
+unit, beta_hpwt -0.45), so delta and xi shrank with them and the fixed-W aggregate block fell
+quadratically. This is entry 1's route, reached here through phi_high and sigma_p jointly. In buyer
+dollars the spreads stayed sensible ($2k to $13k per sd), which is why the scale artifact looks like
+a normalisation question. The supply block did not stop it: its 6.7 at the stall is lower than the
+gate's 8 to 10.
+
+**Economics at the stall (not interpreted, did not converge).** Median own elasticity -25.6, 58% of
+products below -20, margin 7.1%, minivan diversion to haulers 0.51 of inside, car-to-hauler ratio
+0.010.
+
+**Next.** The fixed-W aggregate block must be scale-free when every nonlinear parameter is free:
+the Sargan form (entry 19 fallback) with the micro and supply blocks, gate first at nu = 4.
