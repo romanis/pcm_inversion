@@ -768,3 +768,14 @@ rising 3.84 at both ends) or calibrated (the band is the result). Fallback: fixe
 moment binding, sigma_p fixed at 2.0, lambda free, band over m*.
 
 Full analysis kept locally at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v3.keep.md.
+
+## 26. Sargan aggregate block with micro and supply: the gate prefers larger horizontal spreads (2026-11-17)
+
+Same gate as entry 23 (nu = 4, phi concentrated, 21 points, all inverted) with the aggregate block in
+Sargan form. q_fixed has an interior minimum in every slice: lambda 0.5 at sigma_p 2.5 (336.8),
+lambda 1 at 2.0 (252.1), lambda 2 at 1.5 (213.2). Under fixed W the ranking was the reverse (lambda
+0.5 best at 212.7, lambda 2 worst at 1,057.8), because the fixed-W block rewarded the small xi of
+narrow spreads. With a scale-free aggregate block the objective prefers the widest spreads tried,
+which is the direction BLP-like substitution needs. Elasticities at the minima: -10.4, -12.3 and
+-13.6; margins 0.18, 0.16, 0.14. The supply-only both-ends rule still fails (flat left), as entry 25
+explains: supply bounds markups only from above. These are the starting points for the margin band.
