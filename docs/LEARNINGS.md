@@ -946,3 +946,60 @@ few quadrature nodes) MPEC is a sound and fast estimator, with the same lift-at-
 dimensions integrated analytically: 0 gives step functions, 1 (alpha) gives C0 with a Lipschitz-like aggregate
 Jacobian at large R, 2 gives C1, the population model is C1. Objects that are functions of the share Jacobian
 (markups, elasticities) are one order rougher than shares and are the real nonsmoothness of the estimator.
+
+## 32. Economist review round 5: under a lower bound the own elasticity is set by the buyers' log-alpha range, not by sigma_p; phi_high at -3 was the pooled bound; bound the unobserved factor under Petrin's income law (2026-11-17)
+
+Fifth review by the economist agent (claude-fable-5.1), on market 1984 at the 16,384-draw band points
+(sigma_p 2.5 and 3.0, alpha_lo = 0.2), with a per-draw frontier decomposition that reproduces the kernel's
+shares and own-price derivatives to 1e-15, and re-inversions of 1984 under other bounds.
+
+**No mass point.** The kernel truncates and renormalises, so no draw has mass at the bound. The high-income
+group (phi_high = -3, parent median alpha 0.05) has 71% of its parent mass cut and a density at the bound 2.7x
+the low group's, but buyers are not there: median buyer alpha is 2.5-4.5 x alpha_lo in every group, own
+elasticities by group are -25 / -24 / -23, dropping the high group at fixed delta moves the median by 0.3, and
+7% of the own-price derivative comes from window edges within 1.5 alpha_lo.
+
+**The bounded elasticity law.** For a buying draw the frontier products share the log-alpha range
+log(e_0 / a_lo,i) between the cheapest cutoff and the bound; a product's own elasticity contribution is
+(p / hull gap) / (its window width in log alpha). 1984 at the band-2.5 theta: 4.2 products per buying draw,
+range 2.6, sales-weighted window width 1.03, own elasticity x width = 24; re-inverted at alpha_lo = 0.05:
+width 1.67, -12.3, product 20.5; at alpha_lo = 0: -6.6, margin 0.35. The frontier structure does not move with
+the bound; the width does. sigma_p no longer stretches the range, so it no longer lowers elasticities: between
+sigma_p 2.5 and 3.0 the estimator shrank sigma_const (3.4 -> 0.1) and sigma_fam along the scale direction,
+frontiers grew from 4.2 to 4.7 products, and the median own elasticity went from -23 to -26. Entry 29's
+prediction (margin 0.24 near sigma_p 3-3.5) assumed the entry 21 law, which the bound repeals.
+
+**phi_high at -3.** Under a bound on alpha_i a group shift acts through the truncation: lowering phi_high
+raises the high-income purchase rate only by piling the kept tail against alpha_lo, 0.011 per unit of phi_high
+near -2 at fixed delta, so matching 0.158 needs about -2.2 and the joint fit goes to the layout bound. All three
+blocks push it there (phi_high -3 -> -2.4: aggregate +2.2, micro +3.9, supply +5.3), the supply block most,
+because compressed windows mean larger ds/dp, smaller markups and smoother implied costs. With the bound on
+a_i the same moment is matched at phi_high = -0.63.
+
+**Fix.** Petrin's income law with the bound on the unobserved factor: log alpha_i = log(ybar / clip(y_i, 1,
+150)) + phi_mid mid_i + phi_high high_i + log a_i, a_i >= a_lo, so alpha_lo,i = a_lo c_i is proportional to
+1 / income and the WTP cap is proportional to income. Petrin's pi ratios imply phi_mid 1.14, phi_high 1.80;
+re-solved on the 1984 rates at the band tastes they are 1.86 and 1.13. The alpha log(y - p) form is rejected:
+36% of CEX households have income below the cheapest car while the low group buys at 10%, and it adds
+curvature without touching the range mechanism. At the band tastes the fix gives -20.7 / margin 0.098 / 1984
+gain $566M against -23.3 / 0.083 / $398M; the pure income law without phi gives -12.7 / 0.18 / $1.4B but a
+mid-income purchase rate of 0.130 against 0.079, so the two income moments pull the groups back together.
+
+**a_lo is a calibration of the welfare tail.** Same spec, phi re-solved: a_lo 0.4 -> -29.8 / 0.068 / $266M;
+0.2 -> -20.7 / 0.098 / $566M; 0.1 -> -18.2 / 0.108 / $743M; 0.05 -> -14.3 / 0.157 / $1,219M. Elasticity and
+welfare move together because both are the depth of the price-sensitivity tail below the marginal buyer, and
+no moment in hand pins it. Report an a_lo band (headline 0.2, welfare at BLP's size) in place of the sigma_p
+band; estimate sigma_p. A median own elasticity inside (-15, -5) together with a gain near $400M is not
+available from the bound. Products per frontier is the other lever (elasticity about 5.8 x products per
+buying draw / range): product-specific horizontal dispersion, e.g. the capped body sigmas, is the only route
+to -12 at a_lo = 0.2.
+
+**The step-2 crawl.** After a terminal probe wins (gains 0.5-1.1 against a noise floor of 0.004, at steps of
+0.01-0.1 units along coordinates or the Gauss-Newton direction), the restart kept the collapsed trust radius
+(1.2e-5), so each following iteration re-probed at 84 evaluations: four restarts, 42 minutes, q 240.2 ->
+238.1. Below the supply secant step (1e-3) the Gauss-Newton model predicts the slope of a piece narrower than
+the kink spacing and every trial is rejected whatever the direction. Fixes: reset Delta to the winning probe
+step on a restart, floor Delta at the secant step, make the probe a compass-search fallback, recompute the
+More scales after a restart.
+
+Full analysis kept locally at $KIROCREW_SCRATCH/fable_r5/ROUND5.md.
