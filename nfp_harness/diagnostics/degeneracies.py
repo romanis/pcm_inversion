@@ -47,6 +47,7 @@ DEGENERACY_DEFAULTS: dict[str, float] = {
     "scale_q_fixed_fall": 10.0,
     "scale_q_cue_change": 2.0,
     "scale_sd_xi_fall": 2.0,
+    "scale_alpha_buyers_fall": 2.0,
     "blowup_q_fall": 0.5,
     "blowup_sd_xi_rise": 2.0,
     "blowup_kurtosis": 10.0,
@@ -104,11 +105,27 @@ def _ratio(a: float, b: float) -> float:
 
 def scale_artifact(history: Sequence[HistoryRecord], thresholds: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """SCALE_ARTIFACT (LEARNINGS 1): q_fixed falls by more than 10x while q_cue changes by less than 2x
-    and sd(xi) falls by more than 2x. Compares the first and the last accepted point."""
+    and sd(xi) falls by more than 2x; or (LEARNINGS 25) the mean price sensitivity of predicted buyers
+    (``HistoryRecord.mean_alpha_buyers``) falls by more than 2x, the composition route by which buyers move into
+    the low-alpha tail. Compares the first and the last accepted point (each rule on the points that carry
+    its columns)."""
     th = _merge(thresholds)
-    acc = [h for h in _accepted(history) if np.isfinite(h.q_fixed) and np.isfinite(h.q_cue) and np.isfinite(h.sd_xi)]
+    accepted = _accepted(history)
+    alpha = [h for h in accepted if np.isfinite(getattr(h, "mean_alpha_buyers", float("nan")))]
+    alpha_ev: dict[str, Any] = {}
+    alpha_det = False
+    if len(alpha) >= 2:
+        a0, a1 = alpha[0].mean_alpha_buyers, alpha[-1].mean_alpha_buyers
+        fall = _ratio(a0, a1) if a1 > 0 else math.inf
+        alpha_ev = {"mean_alpha_buyers": [a0, a1], "mean_alpha_buyers_fall_factor": fall}
+        alpha_det = fall > th["scale_alpha_buyers_fall"]
+    alpha_msg = (f"The mean price sensitivity of predicted buyers fell {alpha_ev.get('mean_alpha_buyers_fall_factor', 0):.3g}x "
+                 f"({alpha_ev.get('mean_alpha_buyers', [0, 0])[0]:.3g} to {alpha_ev.get('mean_alpha_buyers', [0, 0])[1]:.3g}): "
+                 f"buyers moved into the low-alpha tail, the route by which delta and xi shrink (LEARNINGS 25)."
+                 if alpha_det else "")
+    acc = [h for h in accepted if np.isfinite(h.q_fixed) and np.isfinite(h.q_cue) and np.isfinite(h.sd_xi)]
     if len(acc) < 2:
-        return _result("SCALE_ARTIFACT", False, {"accepted_points": len(acc)}, "")
+        return _result("SCALE_ARTIFACT", alpha_det, {"accepted_points": len(acc), **alpha_ev}, alpha_msg)
     a, b = acc[0], acc[-1]
     qf = _ratio(a.q_fixed, b.q_fixed)
     qc = max(_ratio(a.q_cue, b.q_cue), _ratio(b.q_cue, a.q_cue))
@@ -118,8 +135,9 @@ def scale_artifact(history: Sequence[HistoryRecord], thresholds: Mapping[str, An
     det = qf > th["scale_q_fixed_fall"] and qc < th["scale_q_cue_change"] and sd > th["scale_sd_xi_fall"]
     msg = (f"q fell with sd(xi)^2 while the scale-free objective did not: the fixed-W objective is rewarding a "
            f"small xi through the utility scale (q_fixed {a.q_fixed:.3g} to {b.q_fixed:.3g}, q_cue {a.q_cue:.3g} "
-           f"to {b.q_cue:.3g}, sd(xi) {a.sd_xi:.3g} to {b.sd_xi:.3g}).")
-    return _result("SCALE_ARTIFACT", det, ev, msg)
+           f"to {b.q_cue:.3g}, sd(xi) {a.sd_xi:.3g} to {b.sd_xi:.3g}).") if det else ""
+    ev.update(alpha_ev)
+    return _result("SCALE_ARTIFACT", det or alpha_det, ev, " ".join(m for m in (msg, alpha_msg) if m))
 
 
 def sd_xi_blowup(history: Sequence[HistoryRecord], xi: np.ndarray | None,

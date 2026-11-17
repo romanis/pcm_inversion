@@ -469,3 +469,28 @@ def test_run_diagnostics_end_to_end() -> None:
     assert d["integration"]["status"] == "STABLE"
     assert d["identification"]["order_condition"]["verdict"] == "OVERIDENTIFIED"
     assert render_text(rep).startswith("RESULT: CONVERGED")
+
+
+def test_scale_artifact_fires_on_a_fall_in_mean_alpha_of_buyers() -> None:
+    """LEARNINGS 25: buyers moving into the low-alpha tail (mean alpha of buyers down more than 2x) is the
+    scale artifact's composition route, even when q_fixed, q_cue and sd(xi) do not show the pure rescaling."""
+    import dataclasses
+
+    flat = [rec(i, 10.0 - 0.1 * i) for i in range(4)]
+    alphas = (0.24, 0.20, 0.11, 0.053)
+    hist = [dataclasses.replace(h, mean_alpha_buyers=a) for h, a in zip(flat, alphas)]
+    out = scale_artifact(hist)
+    assert out["detected"] and out["evidence"]["mean_alpha_buyers_fall_factor"] == pytest.approx(0.24 / 0.053)
+    assert "low-alpha tail" in out["message"]
+    mild = [dataclasses.replace(h, mean_alpha_buyers=a) for h, a in zip(flat, (0.24, 0.22, 0.2, 0.15))]
+    assert not scale_artifact(mild)["detected"]
+    assert not scale_artifact(flat)["detected"]   # no alpha column: the old rule alone
+
+
+def test_vertical_tail_flag_above_the_plausible_range() -> None:
+    from nfp_harness.diagnostics.economics import plausible_flags
+
+    flags, _, checked = plausible_flags({"own_elasticity_times_sigma_p": 58.8},
+                                        {"own_elasticity_times_sigma_p": (17.0, 55.0)})
+    assert flags and "own_elasticity_times_sigma_p" in flags[0]
+    assert checked["own_elasticity_times_sigma_p"]["hi"] == 55.0

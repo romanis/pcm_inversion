@@ -12,7 +12,11 @@ micro block of W1 and S fixed at Petrin's sample covariances (PETRIN_COVARIANCES
 log-cost supply side, 28 moments (round-2 analysis, LEARNINGS 21): Nash markups from the PCM's own ds/dp with
 the ownership of firm_ids, log mc = w gamma + omega on w = [1, log hpwt, log wt, log mpg, air, fwd, trend, jp,
 eu, jp x trend, eu x trend, log q], Z_s = [w, supply_instruments0..15]; an evaluation with any mc <= 0 fails.
-73 moments for 13 + 12 linear and 14 nonlinear parameters. "demand" drops the supply block. Taste spreads
+73 moments for 13 + 12 linear and 14 nonlinear parameters. "demand" drops the supply block. The aggregate block
+is in Sargan form (``SarganIVMoments``, scale-free; LEARNINGS 24, 25) unless ``--robustness fixed_w``. With
+``--margin m`` one calibration row binds the markup level: the 25th-75th percentile trimmed mean of the Nash
+margins (p - mc)/p equals m (``MarginMoment``, weight 1e4 / (n 0.01^2); LEARNINGS 25). The supply Jacobian is
+the central secant over 1e-3 natural units. Taste spreads
 start at $3k on const, $2k on fam and $1k per sd on the other five; sigma_p starts at 1.5 in [0.1, 4]. Normalisations: median alpha = 1 in the low-income group (mu = 0,
 LEARNINGS 11); sigma_fam capped at $25k; taste spreads non-negative; u_i0 = 0 in every year with pgnp and
 trends in X1. Data: the 17 same-firm exact twins (identical price and characteristics) are merged into one
@@ -20,16 +24,22 @@ row with summed shares, then the remaining price ties are spread to a $10 gap. C
 agents per market crossed with scrambled Sobol standard normal taste draws, 2^ceil(log2(1000 nu)) draws per
 market. Exact PCM shares, no smoothing (LEARNINGS 15). Specification: LEARNINGS 19. Stages and their
 files: nfp_harness.pipeline (DESIGN 6.4); the gate is a sigma_p profile concentrated in (phi_mid, phi_high),
-read on q_fixed and on its supply block.
+read on q_fixed and on its supply block. step1 starts from the gate minimum (lambda = 1 slice, lowest q_fixed)
+with pi_b re-solved on the eight body micro moments; ``margin_band`` estimates everything at m* in
+{0.10, 0.15, 0.20, 0.24, 0.30} (headline 0.24, Petrin's BLP median margin).
 
 Robustness switches (each changes the run directory): ``--robustness body_sigma`` frees taste spreads on
 mi, sw, su, pv (cap $25k); ``--robustness income_winsor`` adds phi_y log(ybar / clip(income, 1, 150)) to
-log alpha with phi_y fixed at 1 (Petrin's alpha ~ 1/income, winsorised).
+log alpha with phi_y fixed at 1 (Petrin's alpha ~ 1/income, winsorised); ``--robustness fixed_w`` uses the
+fixed-W aggregate block (IVMoments) instead of the Sargan form; ``--robustness sargan`` is accepted as a no-op
+alias (Sargan is the default) so commands and run directories written with it keep their run key.
 
 Run (results under petrin_replication/results/harness/, untracked):
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage prefit --nu 4
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage gate --nu 4 [--detach]
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage all --nu 16 --detach
+  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage margin_band --nu 16 \
+      --start-gate <gate dir> --detach
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py status --nu 16
 Resume a killed run by relaunching the identical command.
 """
@@ -59,8 +69,8 @@ from nfp_harness.data import break_price_ties  # noqa: E402
 from nfp_harness.linear import LinearIV  # noqa: E402
 from nfp_harness.models import pcm_post as pp  # noqa: E402
 from nfp_harness.models.pcm import PCMModel, PCMSpec  # noqa: E402
-from nfp_harness.moments import (IVMoments, SarganIVMoments, MicroDataset, MicroPart, RatioMicroMoment,  # noqa: E402
-                                 SupplyMoments)
+from nfp_harness.moments import (IVMoments, MarginMoment, SarganIVMoments, MicroDataset, MicroPart,  # noqa: E402
+                                 RatioMicroMoment, SupplyMoments)
 from nfp_harness.params import ParameterLayout, ParameterSpec  # noqa: E402
 from nfp_harness.problem import NFPGMMProblem  # noqa: E402
 from nfp_harness.profile import NotMonotoneDecreasing, RisesAtBothEnds  # noqa: E402
@@ -107,7 +117,15 @@ TWIN_KEYS = ("market_ids", "firm_ids", "prices", "hpwt", "space", "air", "mpd", 
 # at sigma_p 3-4 it is 94-336, and the log-cost residual of a clipped product (log 0.5 against about 2.5)
 # is the supply block's penalty on that region (LEARNINGS 22).
 MC_FLOOR = 0.5
-ROBUSTNESS = ("body_sigma", "income_winsor", "sargan")
+ROBUSTNESS = ("body_sigma", "income_winsor", "sargan", "fixed_w")
+# Markup-level calibration (round-3 analysis 5.2-5.3, LEARNINGS 25)
+MARGIN_TRIM = (0.25, 0.75)
+MARGIN_SD = 0.01          # declared sd of the margin row: W1 entry 1 / (n 0.01^2)
+MARGIN_BINDING = 1e4      # binding W entry = 1e4 x that, so one margin point off costs 1e4
+MARGIN_BAND = (0.10, 0.15, 0.20, 0.24, 0.30)
+MARGIN_HEADLINE = 0.24    # median margin of Petrin's BLP with micro and supply (post/comparison.txt)
+SUPPLY_FD_STEP = 1e-3     # natural units, central secant, no shrink (round-3 analysis 4 (i))
+BODY_MICRO_ROWS = 8       # E[age | b], E[fs | b] for b in mi, sw, su, pv: the first 8 micro rows
 MICRO_COVARIANCE_SOURCE = "pyblp.data.PETRIN_COVARIANCES_LOCATION, fixed"
 BLP_SUMMARIES = {"BLP micro": "blp_micro_summary.json", "BLP no micro": "blp_nomicro_summary.json",
                  "BLP demand micro": "blp_demand_micro_summary.json"}
@@ -175,9 +193,17 @@ class PetrinSpec:
     prefit_max_iterations = 10
     extensive_free = ("phi_mid", "phi_high", "sigma_p", "sigma_const")
     gate_concentrate_iterations = 20
+    # step1 and every margin_band point start at the gate minimum with pi_b re-solved on the body micro moments
+    start_from_gate = True
+    start_concentrate = tuple(f"pi_{b}" for b in BODY)
+    start_slice = GATE_SLICE
+    start_column = "q_fixed"
+    margin_band_values = MARGIN_BAND
 
     def __init__(self, robustness: tuple[str, ...] = ()) -> None:
         self.robustness: tuple[str, ...] = tuple(sorted(set(robustness)))
+        self.margin: float | None = None
+        self.start_gate: str | None = None
         self.products, self.agents, self.price_range, self.n_merged_twins = load_data()
         p = self.products
         self.sigma_starts = per_sd_spreads(p)
@@ -213,6 +239,7 @@ class PetrinSpec:
             "relative_quality_dispersion_buyer_dollars_median": (1.0, 6.0),
             "sd_xi_over_sd_delta": (None, 1.0), "xi_kurtosis": (None, 10.0),
             "spread_buyer_dollars": {"sigma_fam": (None, FAM_CAP), "sigma_const": (None, 15.0)},
+            "own_elasticity_times_sigma_p": (17.0, 55.0),   # above 55: VERTICAL_TAIL (LEARNINGS 25)
         }
 
     # ------------------------------------------------------------------ robustness switches and CLI
@@ -222,6 +249,8 @@ class PetrinSpec:
         unknown = [x for x in r if x not in ROBUSTNESS]
         if unknown:
             raise ValueError(f"unknown robustness switches {unknown}; known: {ROBUSTNESS}")
+        if "sargan" in r and "fixed_w" in r:
+            raise ValueError("robustness sargan (the default aggregate block) and fixed_w exclude each other")
         self.robustness = r
         self.normalisations[2] = (
             "taste spreads on the body dummies mi, sw, su, pv fixed at 0 (only second-choice data would pin "
@@ -232,14 +261,43 @@ class PetrinSpec:
     def add_arguments(self, parser: Any) -> None:
         parser.add_argument("--robustness", action="append", choices=ROBUSTNESS, default=None,
                             help="robustness switch (repeatable): body_sigma frees the 4 body taste spreads "
-                                 "(cap 25); income_winsor adds phi_y = 1 on log(ybar / clip(income, 1, 150))")
+                                 "(cap 25); income_winsor adds phi_y = 1 on log(ybar / clip(income, 1, 150)); "
+                                 "fixed_w uses the fixed-W aggregate block; sargan is a no-op alias of the default")
+        parser.add_argument("--margin", type=float, default=None,
+                            help="calibrated markup level m*: one binding row, trimmed mean (25th-75th percentile) "
+                                 "of the Nash margins = m*; absent: no margin row")
+        parser.add_argument("--start-gate", default=None,
+                            help="gate directory or profile.csv whose minimum (lambda = 1, lowest q_fixed) starts "
+                                 "step1 and margin_band; default the gate of the --gate-nu run")
 
     def configure(self, args: Any) -> None:
         self.set_robustness(getattr(args, "robustness", None))
+        self.set_margin(getattr(args, "margin", None))
+        sg = getattr(args, "start_gate", None)
+        self.start_gate = str(pathlib.Path(sg).resolve()) if sg else None
+
+    def set_margin(self, margin: float | None) -> None:
+        """Set the calibrated markup level m* (None: no margin row) and the report's normalisation line."""
+        if margin is not None and not 0.0 < float(margin) < 1.0:
+            raise ValueError(f"margin must lie in (0, 1), got {margin}")
+        self.margin = None if margin is None else float(margin)
+        self.normalisations = [x for x in self.normalisations if not x.startswith("margin calibration")]
+        if self.margin is not None:
+            self.normalisations.append(self.margin_normalisation(self.margin))
+
+    @staticmethod
+    def margin_normalisation(m: float) -> str:
+        return (f"margin calibration m* = {m:g}: the {100 * MARGIN_TRIM[0]:g}th-{100 * MARGIN_TRIM[1]:g}th percentile "
+                f"trimmed mean of the Nash margins (p - mc)/p over all products equals m*, one moment row with W "
+                f"entry {MARGIN_BINDING:g} / (n {MARGIN_SD:g}^2) so it binds (LEARNINGS 25)")
 
     def run_key(self) -> dict[str, Any]:
-        """Result-changing options beyond nu and seed: the robustness switches (none: the main run)."""
-        return {"robustness": list(self.robustness)} if self.robustness else {}
+        """Result-changing options beyond nu and seed: the robustness switches (none: the main run) and the
+        margin calibration."""
+        out: dict[str, Any] = {"robustness": list(self.robustness)} if self.robustness else {}
+        if self.margin is not None:
+            out["margin"] = self.margin
+        return out
 
     # ------------------------------------------------------------------ parameters and moments
 
@@ -310,7 +368,10 @@ class PetrinSpec:
     # Trust radius in natural units (DESIGN 4.3 defaults 0.3 and 5). A 0.6-unit phi step at 4,096 draws sent
     # one market's warm start into the cold fallback for over 30 minutes; smaller boxes keep trial points
     # within reach of the warm start and the theta path.
-    optimizer_options = {"Delta_0": 0.1, "Delta_max": 0.5}
+    # Round 3 (analysis 4 (ii)-(iii)): the noise floor from +-1e-5-unit probes at every stage start and the
+    # CONVERGED_NOISE stop on it, and Levenberg-Marquardt damping on rejections with rho < 0.
+    optimizer_options = {"Delta_0": 0.1, "Delta_max": 0.5, "noise_probe": 1e-5, "noise_Delta": 1e-4,
+                         "noise_rejections": 3, "lm_damping": True}
 
     def pcm_spec(self) -> PCMSpec:
         # At a trial phi step from the pre-fit's second point, markets 1990-1993 failed the warm stage (2,500
@@ -328,7 +389,20 @@ class PetrinSpec:
                            "markups": "Nash, ownership firm_ids, model ds/dp, data shares",
                            "mc_guard": f"NUMERICAL if rcond < {NASH_RCOND_MIN:g} or any mc <= 0",
                            "gamma": "concentrated, IV with the supply block of W", "jacobian": "central FD at fixed "
-                           "inversions, kink-free steps (SupplyMoments)", "moments": "all = aggregate + micro + supply"},
+                           f"inversions, h = {SUPPLY_FD_STEP:g} natural units, no shrink, frontier-change count kept "
+                           "as a diagnostic (SupplyMoments fd_scale='unit')",
+                           "moments": "all = aggregate + micro + supply (+ margin)"},
+                "aggregate": "IVMoments (fixed W)" if "fixed_w" in self.robustness else
+                             "SarganIVMoments (scale-free); W2 block diagonal across aggregate and supply",
+                "margin": {"moment": f"trimmed mean over products of (p - mc)/p between percentiles {MARGIN_TRIM} "
+                                     "minus m*, same Nash markups and FD pass as the supply block",
+                           "target": self.margin, "sd": MARGIN_SD, "binding": MARGIN_BINDING,
+                           "band": list(MARGIN_BAND), "headline": MARGIN_HEADLINE},
+                "start": {"from_gate": self.start_from_gate, "slice": self.start_slice, "column": self.start_column,
+                          "concentrate": list(self.start_concentrate),
+                          "weighting": f"first {BODY_MICRO_ROWS} micro rows x 1e4, calibration rows 0"},
+                "convergence": "CONVERGED_NOISE: 3 rejections with Delta < 1e-4 units and |q_trial - q| below the "
+                               "max block change over +-1e-5-unit probes at the stage start; counts as converged",
                 "phi_by_income_moments": "income rows x 1e4 in prefit and gate concentration",
                 "mc_floor": MC_FLOOR,
                 "layout": [dataclasses.asdict(s) for s in self.layout().specs],
@@ -360,20 +434,55 @@ class PetrinSpec:
         W[np.ix_(idx, idx)] *= 1e4
         return W
 
+    def binding_weighting(self, problem: NFPGMMProblem, W: np.ndarray) -> np.ndarray:
+        """W with every calibration row (the margin row) set to its binding entry and decoupled from the rest."""
+        W = np.array(W, dtype=float)
+        for m in getattr(problem, "calibration", ()):
+            rows = problem.blocks[m.name]
+            idx = np.arange(rows.start, rows.stop)
+            W[idx, :] = 0.0
+            W[:, idx] = 0.0
+            W[idx, idx] = m.binding_block()
+        return W
+
+    def start_concentrate_weighting(self, problem: NFPGMMProblem, W: np.ndarray) -> np.ndarray:
+        """W for re-solving pi_b at the start: the eight body micro rows (E[age | b], E[fs | b]) up-weighted by 1e4,
+        as phi is on the income rows (round-3 analysis 4 (iv)), calibration rows at zero so the start does not
+        depend on m*."""
+        W = np.array(W, dtype=float)
+        rows = problem.blocks.get("micro")
+        if rows is not None:
+            idx = np.arange(rows.start, rows.start + BODY_MICRO_ROWS)
+            W[np.ix_(idx, idx)] *= 1e4
+        for m in getattr(problem, "calibration", ()):
+            r = problem.blocks[m.name]
+            W[r, :] = 0.0
+            W[:, r] = 0.0
+        return W
+
     def build_problem(self, nu: int, seed: int, threads: int | None, moments: str,
-                      layout_changes: dict[str, Any] | None = None) -> NFPGMMProblem:
+                      layout_changes: dict[str, Any] | None = None, margin: float | None = None) -> NFPGMMProblem:
         layout = self.layout()
         if layout_changes:
             layout = layout.replace(layout_changes)
         model = PCMModel(self.pcm_spec(), {"products": self.products, "agents": self.agents}, layout, nu, seed,
                          total_threads=threads)
-        iv = SarganIVMoments if "sargan" in self.robustness else IVMoments   # LEARNINGS 19 fallback
+        iv = IVMoments if "fixed_w" in self.robustness else SarganIVMoments   # LEARNINGS 24, 25
         ms: list[Any] = [iv(self.Z, self.clusters)]
         if moments in ("all", "demand", "prefit"):
             ms.append(self.micro_moment("income" if moments == "prefit" else "all"))
+        m_star = self.margin if margin is None else float(margin)
         if moments in ("all", "supply"):
-            ms.append(self.supply_moment())
-        return NFPGMMProblem(model, ms, LinearIV(self.X1, self.Z, names=X1_COLS), layout, max_step=self.use_max_step)
+            sup = self.supply_moment()
+            ms.append(sup)
+            if m_star is not None:
+                ms.append(MarginMoment(sup, m_star, trim=MARGIN_TRIM, sd=MARGIN_SD, binding_weight=MARGIN_BINDING))
+        prob = NFPGMMProblem(model, ms, LinearIV(self.X1, self.Z, names=X1_COLS), layout, max_step=self.use_max_step)
+        norms = [x for x in self.normalisations if not x.startswith("margin calibration")]
+        if m_star is not None and moments in ("all", "supply"):
+            norms.append(self.margin_normalisation(m_star))
+        prob.normalisations = norms   # type: ignore[attr-defined]   # read by the pipeline's reports
+        return prob
 
     def supply_moment(self) -> SupplyMoments:
         """Petrin's log-cost supply block: Nash markups from the PCM's own ds/dp with the ownership of firm_ids,
@@ -381,7 +490,7 @@ class PetrinSpec:
         analysis, change 2)."""
         return SupplyMoments(self.Z_supply, self.cost_basis, self.products[self.firm_column].to_numpy(),
                              self.clusters, name="supply", w_names=[f"gamma[{c}]" for c in COST_BASIS],
-                             rcond_min=NASH_RCOND_MIN, mc_floor=MC_FLOOR)
+                             rcond_min=NASH_RCOND_MIN, mc_floor=MC_FLOOR, fd_step=SUPPLY_FD_STEP, fd_scale="unit")
 
     def named_directions(self, theta: np.ndarray, units: np.ndarray) -> dict[str, np.ndarray]:
         """Known flat directions in natural units at theta (DESIGN 5.2): the utility-scale direction
@@ -416,7 +525,7 @@ class PetrinSpec:
                 "share_mc_nonpositive", "nash_rcond_min", "nonzero_cross_median",
                 "minivan_diversion_haulers_share_of_inside", "car_to_hauler_diversion_over_hauler_inside_share",
                 "relative_quality_dispersion_buyer_dollars_median", "inside_share_mean", "inside_share_semi_elasticity",
-                "phi_mid", "phi_high"]
+                "phi_mid", "phi_high", "mean_alpha_buyers", "sd_delta"]
         q_cols = ["q_fixed", "q_cue", "q_fixed:aggregate", "q_fixed:micro", "q_fixed:supply", "q_cue:aggregate"]
         rules = {
             "q_fixed": {"rule": NotMonotoneDecreasing(
@@ -435,8 +544,8 @@ class PetrinSpec:
               "concentrate": ("phi_mid", "phi_high"), "economics": self.gate_economics, "rules": rules}
         return [(self.gate_name, "all", kw)]
 
-    gate_required = ("q_fixed", "supply")   # any of them; both failed means the sigma_p_band fallback
-    fallback_stage = "sigma_p_band"
+    gate_required = ("q_fixed", "supply")   # any of them; both failed means the margin_band fallback
+    fallback_stage = "margin_band"
     band_parameter = "sigma_p"
     band_values = BAND_SIGMA_P
     band_moments = "demand"
@@ -452,10 +561,11 @@ class PetrinSpec:
                                  group_other=self.group_other)
         summ = comparison.summarise(post["products"], post["group_matrix"], post["group_names"])
         own = np.asarray(post["products"]["own_elasticity"], dtype=float)
+        sigma_p = float(theta[problem.layout.names.index("sigma_p")])
         row: dict[str, Any] = {
             "label": f"headline (calibration, sigma_p = {BAND_HEADLINE:g})" if value == BAND_HEADLINE else "",
             "own_elasticity_median": summ["own_elasticity_median"],
-            "own_elasticity_times_sigma_p": -summ["own_elasticity_median"] * value,
+            "own_elasticity_times_sigma_p": -summ["own_elasticity_median"] * sigma_p,
             "share_own_elasticity_below_-20": float(np.mean(own[np.isfinite(own)] < -20.0)),
             "margin_median": summ["margin_median"],
             "inside_share_semi_elasticity": float(np.mean([m["inside_share_elasticity"] for m in post["markets"]])),
@@ -468,6 +578,30 @@ class PetrinSpec:
                                            "nash_status_1984")})
         row.update({f"q:{b}": float(v) for b, v in (ev.aux.get("q_blocks") or {}).items()})
         row.update({f"theta:{n}": float(x) for n, x in zip(problem.layout.names, theta)})
+        return row
+
+    def margin_band_row(self, pipe: Any, problem: Any, result: Any, value: float) -> dict[str, Any]:
+        """One row of margin_band/band.csv at m* = ``value``: the ``band_row`` statistics (elasticities, margins,
+        market semi-elasticity, minivan diversion to haulers, 1984 minivan CS gain at fixed and Nash prices, q by
+        block, theta), plus sigma_p, the taste spreads as multiples of the reference direction
+        (``lambda:<spread>``, 1 = the gate's lambda = 1 ray), mean alpha of buyers, sd(delta) and the margin row."""
+        row = self.band_row(pipe, problem, result, float("nan"))
+        row["label"] = f"headline (margin calibration m* = {MARGIN_HEADLINE:g})" if value == MARGIN_HEADLINE else ""
+        theta = np.asarray(result.theta, dtype=float)
+        names = problem.layout.names
+        row["sigma_p"] = float(theta[names.index("sigma_p")])
+        lam = {n: float(theta[names.index(n)]) / v for n, v in self.sig_ref.items() if n in names and v > 0}
+        row.update({f"lambda:{n}": x for n, x in lam.items()})
+        row["lambda_median"] = float(np.median(list(lam.values()))) if lam else float("nan")
+        ev = result.evaluation
+        delta = np.asarray(ev.aux["delta"])
+        row["mean_alpha_buyers"] = float(pp.spread_in_buyer_dollars(problem.model, theta, delta)["mean_alpha_buyers"])
+        row["sd_delta"] = float(np.std(delta))
+        row["sd_xi"] = float(ev.aux.get("sd_xi", float("nan")))
+        mg = ev.aux.get("margin") or {}
+        row.update({k: mg[k] for k in ("margin_trimmed_mean", "margin_moment") if k in mg})
+        sup = ev.aux.get("supply") or {}
+        row.update({k: sup[k] for k in ("share_mc_clipped", "fd_kink_columns") if k in sup})
         return row
 
     def band_reference_rows(self) -> list[dict[str, Any]]:
@@ -510,6 +644,9 @@ class PetrinSpec:
                     "relative_quality_dispersion_buyer_dollars_median":
                         pp.relative_quality_dispersion(problem.model, ev.theta, ev.aux["delta"])["median"],
                     "inside_share_mean": float(np.mean([m["inside_share"] for m in post["markets"]])),
+                    "mean_alpha_buyers": float(pp.spread_in_buyer_dollars(problem.model, ev.theta,
+                                                                          ev.aux["delta"])["mean_alpha_buyers"]),
+                    "sd_delta": float(np.std(ev.aux["delta"])),
                     "inside_share_semi_elasticity": float(np.mean([m["inside_share_elasticity"]
                                                                    for m in post["markets"]]))})
         gd = {str(g): {**{str(h): float(post["group_matrix"][a, b]) for b, h in enumerate(post["group_names"])},

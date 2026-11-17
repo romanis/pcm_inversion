@@ -10,7 +10,12 @@ import numpy as np
 from ..types import DiagnosticBlock, OptimizeResult, Problem
 
 __all__ = ["economics_block", "economics_values", "plausible_flags", "summary", "PLAUSIBLE_STATS",
-           "OWN_ELASTICITY_EXTREME"]
+           "OWN_ELASTICITY_EXTREME", "VERTICAL_TAIL_STAT"]
+
+#: Statistic whose value above its declared plausible upper bound raises the VERTICAL_TAIL flag: -median own
+#: elasticity x sigma_p, about 25 to 55 in the exact PCM on Petrin's products; above it the buyers are the far
+#: low-alpha tail and substitution is vertical (LEARNINGS 21, 25).
+VERTICAL_TAIL_STAT = "own_elasticity_times_sigma_p"
 
 OWN_ELASTICITY_EXTREME = -50.0
 
@@ -20,6 +25,7 @@ OWN_ELASTICITY_EXTREME = -50.0
 #: ``diversion_leaving_group_median:<group>`` is the median over the products of one group.
 PLAUSIBLE_STATS = (
     "own_elasticity_median",
+    "own_elasticity_times_sigma_p",
     "share_own_elasticity_below_-50",
     "share_own_elasticity_below_-20",
     "nonzero_cross_median",
@@ -172,6 +178,12 @@ def economics_values(model: Any, theta: np.ndarray, delta: np.ndarray, spec: Any
     values["price_range"] = price_range
     sb = pcm_post.spread_in_buyer_dollars(model, theta, delta)
     values["mean_alpha_buyers"] = sb["mean_alpha_buyers"]
+    med = values["own_elasticity"]["median"]
+    try:
+        sp = float(model.kernel_params(np.asarray(theta, dtype=float))[2])
+    except (AttributeError, TypeError, IndexError):
+        sp = float("nan")
+    values["own_elasticity_times_sigma_p"] = None if med is None or not np.isfinite(sp) else -float(med) * sp
     values["spread_buyer_dollars"] = sb["spreads"]
     values["quality_dispersion_buyer_dollars"] = summary(pcm_post.quality_dispersion(model, theta, delta)["per_product"])
     values["relative_quality_dispersion_buyer_dollars"] = summary(
@@ -215,6 +227,7 @@ def economics_block(problem: Problem, result: OptimizeResult, spec: Any) -> Diag
                                        spec, ev.aux.get("xi"))
     stats: dict[str, float | None] = {
         "own_elasticity_median": values["own_elasticity"]["median"],
+        "own_elasticity_times_sigma_p": values.get("own_elasticity_times_sigma_p"),
         "share_own_elasticity_below_-50": values["share_own_elasticity_below_-50"],
         "nonzero_cross_median": values["nonzero_cross"]["median"],
         "diversion_leaving_group_median": (values.get("diversion_leaving_group") or {}).get("median"),
@@ -234,6 +247,10 @@ def economics_block(problem: Problem, result: OptimizeResult, spec: Any) -> Diag
     for nm, v in values["spread_buyer_dollars"].items():
         stats[f"spread_buyer_dollars:{nm}"] = v
     flags, notes, checked = plausible_flags(stats, dict(_get(spec, "plausible", {}) or {}), values["price_range"])
+    vt = checked.get(VERTICAL_TAIL_STAT) or {}
+    if vt.get("hi") is not None and vt.get("value") is not None and np.isfinite(vt["value"]) and vt["value"] > vt["hi"]:
+        flags.append(f"FLAG: VERTICAL_TAIL: -median own elasticity x sigma_p = {vt['value']:.4g} exceeds {vt['hi']:.4g}; "
+                     f"buyers sit in the far low-alpha tail and substitution is vertical (LEARNINGS 25).")
     own = values["own_elasticity"]
     head = (f"Median own-price elasticity {own['median']:.3g} (5th {own['p05']:.3g}, 95th {own['p95']:.3g}); "
             f"median nonzero cross-elasticities per product {values['nonzero_cross']['median']:.3g}; "

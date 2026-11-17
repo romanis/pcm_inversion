@@ -37,7 +37,7 @@ from .types import (
 from .weighting import cluster_sums, clustered_covariance
 
 __all__ = ["Moment", "IVMoments", "SarganIVMoments", "MicroDataset", "MicroPart", "RatioMicroMoment", "MICRO_OUTPUTS",
-           "product_part", "SupplyMoments", "SupplyDomainError"]
+           "product_part", "SupplyMoments", "SupplyDomainError", "MarginMoment"]
 
 #: A micro part, a pair (agent weight h, product weight v with outside value v0); see ``types.MicroPartRequest``.
 MicroPart = MicroPartRequest
@@ -394,10 +394,17 @@ class SupplyMoments:
     Jacobian. ``y = log mc`` depends on theta through ds/dp at (theta, delta(theta)). Its total derivative is
     taken by central differences at fixed inversions: market t is evaluated at ``(theta + h e_k, delta_t + h
     D_t[:, k])`` and ``(theta - h e_k, delta_t - h D_t[:, k])`` with ``pcm_kernel.evaluate_market`` (no
-    re-inversion; the shares there differ from the data by O(h^2)). ds/dp jumps where a draw's frontier
-    changes, so h starts at ``fd_step * max(1, |theta_k|)`` and is divided by 10, at most ``fd_shrink``
-    times, until the frontier signatures at both ends equal the base point's; a column still crossing a
-    frontier change is counted in ``info["fd_kink_columns"]``. ``MomentBlock.d_theta`` holds this total
+    re-inversion; the shares there differ from the data by O(h^2)). Step rule ``fd_scale``:
+
+    - ``"theta"`` (default): h starts at ``fd_step * max(1, |theta_k|)`` and is divided by 10, at most
+      ``fd_shrink`` times, until the frontier signatures at both ends equal the base point's (the slope of
+      the smooth piece the base point sits on);
+    - ``"unit"``: h = ``fd_step * unit_k`` in the layout's natural units (``bind(..., units)``), never shrunk,
+      so the derivative is the secant over a step of the size the trust region takes (round-3 analysis 4 (i):
+      ds/dp jumps where a draw's frontier changes, and a slope over 1e-6 is not the change over 1e-3).
+
+    Either way a column whose ends cross a frontier change is counted in ``info["fd_kink_columns"]``
+    (market-column pairs), a diagnostic only under ``"unit"``. ``MomentBlock.d_theta`` holds this total
     derivative and ``d_delta`` is None: the block never needs D from the framework.
 
     ``bind(model, P)`` attaches the PCM model (``kernel_market``, ``kernel_params``, ``markets``,
@@ -412,9 +419,10 @@ class SupplyMoments:
 
     def __init__(self, Z: np.ndarray, w: np.ndarray, firm_ids: np.ndarray, clustering_ids: np.ndarray | None = None,
                  name: str = "supply", w_names: Sequence[str] | None = None, rcond_min: float = 1e-12,
-                 fd_step: float = 1e-6, fd_shrink: int = 2, mc_floor: float | None = None) -> None:
+                 fd_step: float = 1e-6, fd_shrink: int = 2, mc_floor: float | None = None,
+                 fd_scale: str = "theta") -> None:
         """SupplyMoments(Z, w, firm_ids, clustering_ids=None, name="supply", w_names=None, rcond_min=1e-12,
-        fd_step=1e-6, fd_shrink=2, mc_floor=None). Z = [w, excluded supply instruments] (n, k_s), w the cost
+        fd_step=1e-6, fd_shrink=2, mc_floor=None, fd_scale="theta"). Z = [w, excluded supply instruments] (n, k_s), w the cost
         basis (n, K_s). ``mc_floor`` (price units) clips FOC costs from below as pyblp's ``costs_bounds``: a
         product whose Nash markup exceeds its price (|own elasticity| < 1) gets mc = mc_floor and zero cost
         derivative, and the count is reported as ``share_mc_clipped``. None keeps the hard mc > 0 guard."""
@@ -446,6 +454,10 @@ class SupplyMoments:
         self.rcond_min = float(rcond_min)
         self.fd_step = float(fd_step)
         self.fd_shrink = int(fd_shrink)
+        if fd_scale not in ("theta", "unit"):
+            raise ValueError(f"fd_scale must be 'theta' or 'unit', got {fd_scale!r}")
+        self.fd_scale = fd_scale
+        self.units: np.ndarray | None = None
         self.mc_floor = None if mc_floor is None else float(mc_floor)
         self.ZtW = self.Z.T @ self.w / self.n  # (k, K) = -d g_s / d gamma
         self.model: object | None = None
@@ -456,10 +468,15 @@ class SupplyMoments:
 
     # ------------------------------------------------------------------ setup
 
-    def bind(self, model: object, P: int) -> None:
-        """Attach the inner model (a ``PCMModel``) and the number of nonlinear parameters."""
+    def bind(self, model: object, P: int, units: np.ndarray | None = None) -> None:
+        """Attach the inner model (a ``PCMModel``), the number of nonlinear parameters and their natural units
+        (needed by ``fd_scale="unit"``)."""
         self.model = model
         self.P = int(P)
+        self.units = None if units is None else np.asarray(units, dtype=float).ravel()
+        if self.fd_scale == "unit" and (self.units is None or self.units.shape != (self.P,)
+                                        or not np.all(self.units > 0)):
+            raise ValueError(f"{self.name}: fd_scale='unit' needs {self.P} positive natural units, got {self.units}")
         if int(getattr(model, "n_products")) != self.n:
             raise ValueError(f"supply block has {self.n} rows, model has {getattr(model, 'n_products')} products")
         spec = getattr(model, "spec")
@@ -581,9 +598,15 @@ class SupplyMoments:
             sig0 = np.asarray(pcm_kernel.frontier_signature(d0, km, *model.kernel_params(theta), nt))
             out = np.zeros((rows.size, self.P))
             kinks = shrinks = 0
+            unit_rule = self.fd_scale == "unit"
+            shrink = 0 if unit_rule else self.fd_shrink
             for k in range(self.P):
-                h = self.fd_step * max(1.0, abs(float(theta[k])))
-                for attempt in range(self.fd_shrink + 1):
+                if unit_rule:
+                    assert self.units is not None
+                    h = self.fd_step * float(self.units[k])
+                else:
+                    h = self.fd_step * max(1.0, abs(float(theta[k])))
+                for attempt in range(shrink + 1):
                     ys, same = [], True
                     for sgn in (1.0, -1.0):
                         th = theta.copy()
@@ -595,10 +618,10 @@ class SupplyMoments:
                         mc, _ = self._market_costs(t, s, p, firms, np.asarray(r["ds_dp"]))
                         with np.errstate(invalid="ignore", divide="ignore"):
                             ys.append(np.log(mc))
-                        if attempt < self.fd_shrink:
+                        if attempt < shrink or unit_rule:
                             same &= bool(np.array_equal(np.asarray(pcm_kernel.frontier_signature(dl, km, *kp, nt)),
                                                         sig0))
-                    if same or attempt == self.fd_shrink:
+                    if same or attempt == shrink:
                         if not same:
                             kinks += 1
                         break
@@ -648,3 +671,103 @@ class SupplyMoments:
         """covariance_block(sol, linear) -> clustered S_supply at the omega of ``sol`` (2SLS-type gamma)."""
         y, _, _ = self.log_costs(sol, False)
         return self.covariance_from(self.concentrate(y)[1])
+
+
+class MarginMoment:
+    """A calibration row on the markup level (round-3 analysis 5.2): ``g = m(theta) - target`` with ``m`` the
+    trimmed mean over all products of the Nash margin ``(p - mc) / p``, between the ``trim`` percentiles
+    (25th to 75th by default).
+
+    The margins come from the same Nash markups and the same finite-difference pass as the supply block
+    (``supply.log_costs``, cached per solution), so the row adds no kernel work: with ``mc = exp(y)``,
+    ``d margin_j = -(mc_j / p_j) dy_j``, and the trimmed mean's derivative is the mean over the products in the
+    trimmed set (the order statistics are continuous in the margins, so the value is too; its derivative jumps
+    where the set changes). Clipped costs (``mc_floor``) enter at the floor with zero derivative.
+
+    The covariance block is a declared constant ``n sd^2`` (the moment's sd is taken as ``sd``, one margin
+    point by default), so ``W1``'s entry is ``1 / (n sd^2)`` and the row contributes ``((m - target) / sd)^2``
+    to q. A spec makes it bind by setting that entry to ``binding_block()`` = ``binding_weight / (n sd^2)``.
+    ``is_calibration`` marks the row for ``NFPGMMProblem.initial_weighting`` and for reports.
+    """
+
+    is_aggregate = False
+    is_micro = False
+    is_supply = False
+    is_calibration = True
+
+    def __init__(self, supply: SupplyMoments, target: float, trim: tuple[float, float] = (0.25, 0.75),
+                 sd: float = 0.01, name: str = "margin", binding_weight: float = 1e4) -> None:
+        """MarginMoment(supply, target, trim=(0.25, 0.75), sd=0.01, name="margin", binding_weight=1e4)."""
+        if not 0.0 <= trim[0] < trim[1] <= 1.0:
+            raise ValueError(f"trim must satisfy 0 <= lo < hi <= 1, got {trim}")
+        if not sd > 0 or not binding_weight > 0:
+            raise ValueError("sd and binding_weight must be positive")
+        self.supply = supply
+        self.target = float(target)
+        self.trim = (float(trim[0]), float(trim[1]))
+        self.sd = float(sd)
+        self.binding_weight = float(binding_weight)
+        self.name = name
+        self.k = 1
+        self.labels = (f"trimmed mean margin ({100 * self.trim[0]:g}th to {100 * self.trim[1]:g}th percentile) - "
+                       f"{self.target:g}",)
+        self._last: tuple[InnerSolution, dict[str, Any]] | None = None
+
+    def requests(self) -> KernelRequests:
+        return KernelRequests(price_derivatives=True)
+
+    def covariance_requests(self) -> KernelRequests:
+        return self.requests()
+
+    def _prices(self) -> np.ndarray:
+        model: Any = self.supply.model
+        if model is None:
+            raise RuntimeError(f"{self.name}: the supply block is not bound")
+        p = np.empty(self.supply.n)
+        for t, m in enumerate(model.markets):
+            p[np.asarray(m.rows)] = np.asarray(model.kernel_market(t).p, dtype=float)
+        return p
+
+    def trimmed_set(self, margin: np.ndarray) -> np.ndarray:
+        """Indices of the products whose margin ranks between the trim percentiles (stable order)."""
+        n = margin.size
+        lo = int(np.floor(self.trim[0] * n))
+        hi = max(lo + 1, int(np.ceil(self.trim[1] * n)))
+        return np.argsort(margin, kind="stable")[lo:hi]
+
+    def margins(self, sol: InnerSolution, need_jacobian: bool) -> tuple[float, np.ndarray | None, dict[str, Any]]:
+        """(m, dm/dtheta (P,) or None, info) with ``margin_trimmed_mean``, ``margin_median`` and the set size."""
+        y, dy, _ = self.supply.log_costs(sol, need_jacobian)
+        p = self._prices()
+        mc = np.exp(y)
+        margin = 1.0 - mc / p
+        idx = self.trimmed_set(margin)
+        m = float(np.mean(margin[idx]))
+        dm = None
+        if need_jacobian:
+            assert dy is not None
+            dm = np.mean(-(mc / p)[idx, None] * dy[idx], axis=0)
+        info = {"margin_trimmed_mean": m, "margin_target": self.target, "margin_moment": m - self.target,
+                "margin_median": float(np.median(margin)), "margin_trimmed_products": int(idx.size)}
+        self._last = (sol, info)
+        return m, dm, info
+
+    def evaluate(self, sol: InnerSolution, linear: LinearFit, need_jacobian: bool) -> MomentBlock:
+        """evaluate(sol, linear, need_jacobian) -> MomentBlock(value = [m - target], d_theta (1, P), d_delta None)."""
+        m, dm, _ = self.margins(sol, need_jacobian)
+        return MomentBlock(name=self.name, value=np.array([m - self.target]), d_delta=None,
+                           d_theta=None if dm is None else dm[None, :], data=None)
+
+    def summary(self, sol: InnerSolution) -> dict[str, Any]:
+        """The scalars of the last evaluation at ``sol`` (for ``Evaluation.aux[name]``)."""
+        if self._last is not None and self._last[0] is sol:
+            return dict(self._last[1])
+        return dict(self.margins(sol, False)[2])
+
+    def covariance_block(self, sol: InnerSolution | None, linear: LinearFit | None) -> np.ndarray:
+        """The declared constant ``[[n sd^2]]`` (class docstring)."""
+        return np.array([[self.supply.n * self.sd ** 2]])
+
+    def binding_block(self) -> float:
+        """The binding W entry ``binding_weight / (n sd^2)``: a deviation of one ``sd`` costs ``binding_weight``."""
+        return self.binding_weight / (self.supply.n * self.sd ** 2)

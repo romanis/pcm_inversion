@@ -55,6 +55,17 @@ class OptimizerOptions:
     start (e.g. step 2 from theta_hat_1). ``two_step_gate(step1_result) -> reason | None`` blocks step 2
     when it returns a reason (DESIGN 4.5: SCALE_ARTIFACT, SD_XI_BLOWUP); step 2 also needs a converged
     step 1 unless ``two_step_require_converged`` is False.
+
+    Noise floor (round-3 analysis 4 (ii)): with ``noise_probe`` set (natural units, e.g. 1e-5), the stage
+    start evaluates theta +- noise_probe unit_k for every free k without a Jacobian and records the largest
+    change of any block of q (``OptimizeResult.noise_floor``); the stage then ends CONVERGED_NOISE after
+    ``noise_rejections`` consecutive rejections tried with Delta < ``noise_Delta`` whose q differs from the
+    accepted q by less than that floor (``diagnostics.convergence.noise_stop``). None: no probes, no rule.
+
+    Levenberg-Marquardt damping (4 (iii)): with ``lm_damping``, a rejected trial with rho < 0 multiplies the
+    step's damping ``lm`` by ``lm_factor`` (starting at ``lm_start``, at most ``lm_max``); an accepted step
+    resets it to 0. The step solves ``min ||r + A d||^2 + (mu + lm) ||diag(d_k) d||^2`` in the box; the
+    stopping test keeps the undamped Gauss-Newton decrease.
     """
 
     Delta_0: float = 0.3  # initial box radius, natural units
@@ -77,6 +88,13 @@ class OptimizerOptions:
     record_cue: bool = True  # compute q_cue from problem.covariance at accepted points
     two_step_gate: Callable[[OptimizeResult], str | None] | None = None
     two_step_require_converged: bool = True
+    noise_probe: float | None = None  # natural units; None: no noise floor and no CONVERGED_NOISE
+    noise_Delta: float = 1e-4  # natural units
+    noise_rejections: int = 3
+    lm_damping: bool = False
+    lm_start: float = 1e-3
+    lm_factor: float = 10.0
+    lm_max: float = 1e8
 
 
 # ------------------------------------------------------------------------------------------------
@@ -346,16 +364,68 @@ def _sd_xi(ev: Evaluation) -> float:
     return float(np.std(xi)) if xi is not None and np.size(xi) else float("nan")
 
 
+def _extras(problem: Any, ev: Evaluation, accepted: bool) -> dict[str, float]:
+    """``problem.history_extras(ev, accepted)`` (optional hook): sd_delta and, at accepted points,
+    mean_alpha_buyers. A failing hook leaves the columns NaN rather than losing the step."""
+    fn = _hook(problem, "history_extras")
+    if fn is None:
+        return {}
+    try:
+        return {k: float(v) for k, v in dict(fn(ev, accepted) or {}).items()}
+    except NotImplementedError:
+        return {}
+    except Exception as exc:  # noqa: BLE001 - a diagnostic column must not end the stage
+        log.warning("history_extras failed: %s: %s", type(exc).__name__, exc)
+        return {}
+
+
 def _record(stage: str, it: int, accepted: bool, q: float, ev: Evaluation | None, obj: _Objective, rho: float,
             Delta: float, tau_cap: float, status: EvalStatus, seconds: float, theta: np.ndarray,
             pred_mass: float = float("nan"), real_mass: float = float("nan")) -> HistoryRecord:
     ok = ev is not None and status is EvalStatus.OK
     q_fixed = obj.q_fixed(ev, q) if ok else float("nan")
     q_cue = obj.q_cue(ev, q) if (ok and accepted) else float("nan")
+    ex = _extras(obj.problem, ev, accepted) if ok else {}
     return HistoryRecord(iteration=it, accepted=accepted, q=q, q_fixed=q_fixed, q_cue=q_cue,
                          sd_xi=_sd_xi(ev) if ok else float("nan"), rho=rho, Delta=Delta, tau_cap=tau_cap,
                          status=status, seconds=seconds, theta=np.array(theta, dtype=float),
-                         predicted_mass=pred_mass, realised_mass=real_mass, stage=stage)
+                         predicted_mass=pred_mass, realised_mass=real_mass, stage=stage,
+                         sd_delta=ex.get("sd_delta", float("nan")),
+                         mean_alpha_buyers=ex.get("mean_alpha_buyers", float("nan")))
+
+
+def _probe_noise(problem: Any, obj: _Objective, theta: np.ndarray, ev: Evaluation, arr: dict[str, np.ndarray],
+                 h: float, heartbeat: Any = None, path: Any = None, stage: str = "", it: int = 0) -> tuple[float, int]:
+    """(noise floor, evaluations): the largest change of any block of q over evaluations at theta +- h unit_k for
+    every free k (no Jacobian), against the accepted point ``ev`` (fixed weighting; NaN under CUE). The model
+    is restored to the accepted state after every probe."""
+    if obj.mode == "cue" or obj.W is None:
+        return float("nan"), 0
+    n = _n_of(problem, ev)
+    W = obj.W
+    blocks = dict(ev.blocks) or {"all": slice(0, ev.g.size)}
+
+    def block_q(g: np.ndarray) -> dict[str, float]:
+        return {b: float(n * g[sl] @ W[sl, sl] @ g[sl]) for b, sl in blocks.items()}
+
+    base = block_q(ev.g)
+    floor, nev = 0.0, 0
+    for k in np.nonzero(arr["free"])[0]:
+        for sgn in (1.0, -1.0):
+            th = np.array(theta, dtype=float)
+            th[k] = min(max(theta[k] + sgn * h * arr["units"][k], arr["lower"][k]), arr["upper"][k])
+            if th[k] == theta[k]:
+                continue
+            e = problem.evaluate(th, False)
+            nev += 1
+            _call_hook(problem, "restore", theta)
+            if heartbeat is not None:
+                heartbeat(path, it, stage=stage)
+            if not e.ok or not np.all(np.isfinite(e.g)):
+                continue
+            qb = block_q(e.g)
+            floor = max(floor, max(abs(qb[b] - base[b]) for b in blocks))
+    return floor, nev
 
 
 def _bound_note(theta: np.ndarray, arr: dict[str, np.ndarray], pg_raw: np.ndarray) -> tuple[bool, str]:
@@ -374,7 +444,8 @@ def _bound_note(theta: np.ndarray, arr: dict[str, np.ndarray], pg_raw: np.ndarra
 def _state(stage: str, mode: str, it: int, acc: int, nev: int, elapsed: float, theta: np.ndarray, Delta: float,
            q_mass: float, dk: np.ndarray | None, kink: int, W: np.ndarray | None, W1: np.ndarray | None,
            history: list[HistoryRecord], problem: Any, q: float, done: bool = False,
-           result: dict[str, Any] | None = None) -> dict[str, Any]:
+           result: dict[str, Any] | None = None, lm: float = 0.0,
+           noise_floor: float = float("nan")) -> dict[str, Any]:
     from .checkpoint import history_to_state
 
     ps = _call_hook(problem, "state_dict")
@@ -384,6 +455,7 @@ def _state(stage: str, mode: str, it: int, acc: int, nev: int, elapsed: float, t
         "dk": None if dk is None else np.array(dk), "kink_limited_steps": kink, "q": q,
         "W": None if W is None else np.array(W), "W1": None if W1 is None else np.array(W1),
         "history": history_to_state(history), "problem_state": ps, "done": done, "result": result,
+        "lm": float(lm), "noise_floor": float(noise_floor),
     }
 
 
@@ -424,6 +496,8 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         Delta, q_mass = float(resume["Delta"]), float(resume["q_mass"])
         dk = None if resume["dk"] is None else np.array(resume["dk"], dtype=float)
         kink = int(resume["kink_limited_steps"])
+        lm = float(resume.get("lm", 0.0))
+        noise_floor = float(resume.get("noise_floor", float("nan")))
         history = history_from_state(resume["history"])
         if resume.get("problem_state") is not None:
             _call_hook(problem, "load_state_dict", resume["problem_state"])
@@ -432,6 +506,7 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
     else:
         theta = np.clip(np.array(theta0, dtype=float), lower, upper)
         it = acc = nev = kink = 0
+        lm, noise_floor = 0.0, float("nan")
         prior = 0.0
         Delta, q_mass, dk = options.Delta_0, options.q_mass_0, None
         history = []
@@ -463,8 +538,17 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         history.append(rec)
         if checkpoint is not None:
             checkpoint.append_history(rec)
-            checkpoint.save(_state(stage, mode, it, acc, nev, elapsed(), theta, Delta, q_mass, dk, kink, W, W1,
-                                   history, problem, q))
+    probed = False
+    if options.noise_probe is not None and options.noise_probe > 0 and not math.isfinite(noise_floor) and f.any():
+        noise_floor, n_probe = _probe_noise(problem, obj, theta, ev, arr, float(options.noise_probe), heartbeat,
+                                            None if checkpoint is None else checkpoint.path, stage, it)
+        nev += n_probe
+        probed = True
+        log.info("stage %s: noise floor %.3e from %d probes of +-%g units", stage, noise_floor, n_probe,
+                 options.noise_probe)
+    if checkpoint is not None and (resume is None or probed):
+        checkpoint.save(_state(stage, mode, it, acc, nev, elapsed(), theta, Delta, q_mass, dk, kink, W, W1,
+                               history, problem, q, lm=lm, noise_floor=noise_floor))
 
     model: _Model | None = None
     while True:
@@ -495,15 +579,17 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
             limit = "iterations"
         elif options.max_seconds is not None and elapsed() >= options.max_seconds:
             limit = "time"
-        cls = classify(history, pg, dq_gn, q, options, at_cap=at_cap, limit=limit, Delta=Delta)
+        cls = classify(history, pg, dq_gn, q, options, at_cap=at_cap, limit=limit, Delta=Delta,
+                       noise_floor=noise_floor)
         if cls is None and not f.any():
             cls = ConvergenceClass.CONVERGED
         if cls is not None:
             return _finish(problem, cls, theta, ev, q, model, history, acc, nev, elapsed(), Delta, q_mass, kink, stage,
-                           mode, W, "", options, checkpoint, arr, it, dk, W1, pg=pg, dq_gn=dq_gn)
+                           mode, W, "", options, checkpoint, arr, it, dk, W1, pg=pg, dq_gn=dq_gn,
+                           noise_floor=noise_floor, lm=lm)
 
         # trust-region step in natural units
-        d = _box_lsq(model.A, model.r, dk, mu, np.maximum(-Delta, u_lo), np.minimum(Delta, u_hi))
+        d = _box_lsq(model.A, model.r, dk, mu + lm, np.maximum(-Delta, u_lo), np.minimum(Delta, u_hi))
         tau_cap, pred_mass = 1.0, float("nan")
         dtheta = np.zeros_like(theta)
         dtheta[f] = d * units[f]
@@ -549,6 +635,11 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         else:
             rho = 1.0 if q_trial < q else -math.inf
         accept = rho >= options.rho_accept
+        if options.lm_damping:
+            if accept:
+                lm = 0.0
+            elif rho < 0:
+                lm = options.lm_start if lm <= 0 else min(lm * options.lm_factor, options.lm_max)
         if rho < 0.25:
             Delta = 0.25 * dinf
         elif rho > 0.75 and dinf >= 0.9 * Delta:
@@ -571,24 +662,29 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
             model = None
             if checkpoint is not None:
                 checkpoint.save(_state(stage, mode, it, acc, nev, elapsed(), theta, Delta, q_mass, dk, kink, W, W1,
-                                       history, problem, q))
+                                       history, problem, q, lm=lm, noise_floor=noise_floor))
         else:
             _call_hook(problem, "restore", theta)
-        log.info("stage %s it %d: %s q %.10g rho %.3f Delta %.3e tau_cap %.3g", stage, it,
-                 "accepted" if accept else "rejected", q_trial, rho, Delta, tau_cap)
+        log.info("stage %s it %d: %s q %.10g rho %.3f Delta %.3e tau_cap %.3g lm %.1e", stage, it,
+                 "accepted" if accept else "rejected", q_trial, rho, Delta, tau_cap, lm)
 
 
 def _finish(problem: Any, cls: ConvergenceClass, theta: np.ndarray, ev: Evaluation | None, q: float,
             model: _Model | None, history: list[HistoryRecord], acc: int, nev: int, wall: float, Delta: float,
             q_mass: float, kink: int, stage: str, mode: str, W: np.ndarray | None, msg: str,
             options: OptimizerOptions, checkpoint: Any, arr: dict[str, np.ndarray], it: int, dk: np.ndarray | None,
-            W1: np.ndarray | None, pg: float = float("nan"), dq_gn: float = float("nan")) -> OptimizeResult:
+            W1: np.ndarray | None, pg: float = float("nan"), dq_gn: float = float("nan"),
+            noise_floor: float = float("nan"), lm: float = 0.0) -> OptimizeResult:
     pg_thr, gn_thr = thresholds(q, options)
     notes = [msg] if msg else []
     if model is not None:
         _, bound_msg = _bound_note(theta, arr, model.grad)
         if bound_msg:
             notes.append(bound_msg)
+    if cls is ConvergenceClass.CONVERGED_NOISE:
+        notes.append(f"Stopped on the noise floor: the last {options.noise_rejections} rejections, tried with a trust "
+                     f"radius below {options.noise_Delta:g} natural units, changed q by less than the floor "
+                     f"{noise_floor:.3e} measured at the stage start.")
     if cls is ConvergenceClass.STALLED:
         notes.append(f"Stopped: trust radius {Delta:.2e} or {options.max_rejections} consecutive rejections.")
     elif cls is ConvergenceClass.FLAT_PROGRESS:
@@ -599,13 +695,13 @@ def _finish(problem: Any, cls: ConvergenceClass, theta: np.ndarray, ev: Evaluati
                          accepted_steps=acc, evaluations=nev, wall_seconds=wall, projected_gradient=pg, pg_tol=pg_thr,
                          gn_decrease=dq_gn, gn_tol=gn_thr, Delta=Delta, q_mass=q_mass, kink_limited_steps=kink,
                          stage=stage, weighting=mode, W=None if W_out is None else np.array(W_out),
-                         message=" ".join(notes))
+                         message=" ".join(notes), noise_floor=noise_floor)
     log.info("stage %s finished: %s q %.10g pg %.3e dq_gn %.3e", stage, cls.value, q, pg, dq_gn)
     if checkpoint is not None:
         summary = {"convergence": cls.value, "q": q, "projected_gradient": pg, "pg_tol": pg_thr, "gn_decrease": dq_gn,
-                   "gn_tol": gn_thr, "wall_seconds": wall, "message": res.message}
+                   "gn_tol": gn_thr, "wall_seconds": wall, "message": res.message, "noise_floor": noise_floor}
         state = _state(stage, mode, it, acc, nev, wall, theta, Delta, q_mass, dk, kink, res.W, W1, history,
-                       problem, q, done=True, result=summary)
+                       problem, q, done=True, result=summary, lm=lm, noise_floor=noise_floor)
         checkpoint.save_stage(stage, state)
         checkpoint.save(state)
     return res
@@ -635,7 +731,8 @@ def _rebuild_done(problem: Any, mode: str, st: dict[str, Any], options: Optimize
                           projected_gradient=float(r["projected_gradient"]), pg_tol=float(r["pg_tol"]),
                           gn_decrease=float(r["gn_decrease"]), gn_tol=float(r["gn_tol"]), Delta=float(st["Delta"]),
                           q_mass=float(st["q_mass"]), kink_limited_steps=int(st["kink_limited_steps"]),
-                          stage=st["stage"], weighting=mode, W=W, message=r["message"])
+                          stage=st["stage"], weighting=mode, W=W, message=r["message"],
+                          noise_floor=float(r.get("noise_floor", float("nan"))))
 
 
 # ------------------------------------------------------------------------------------------------

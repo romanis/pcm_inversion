@@ -87,6 +87,7 @@ class NFPGMMProblem:
 
         self.aggregate = [m for m in self.moments if getattr(m, "is_aggregate", False)]
         self.micro = [m for m in self.moments if getattr(m, "is_micro", False)]
+        self.calibration = [m for m in self.moments if getattr(m, "is_calibration", False)]
         datasets = [m.dataset.name for m in self.micro]  # type: ignore[attr-defined]
         if len(set(datasets)) != len(datasets):
             raise ValueError(f"one micro moment object per dataset (cross-object covariances are taken as zero): "
@@ -100,11 +101,17 @@ class NFPGMMProblem:
             raise ValueError(f"at most one supply moment block, got {len(supply)}")
         self.supply: Any = supply[0] if supply else None
         self.supply_rows: slice | None = self.blocks[self.supply.name] if self.supply is not None else None
+        # the step-2 W keeps the aggregate-supply cross terms of S only where they can be concentrated jointly
+        # (plain IVMoments); with SarganIVMoments W2 is block diagonal across the two blocks
         self.coupled_blocks: tuple[tuple[str, ...], ...] = (
-            ((self.agg.name, self.supply.name),) if self.supply is not None else ())
+            ((self.agg.name, self.supply.name),) if self.supply is not None and type(self.agg) is IVMoments else ())
         self._joint: dict[str, Any] | None = None
         if self.supply is not None:
-            self.supply.bind(model, self.P)
+            try:
+                units = np.asarray(layout.units(), dtype=float)
+            except ValueError:
+                units = None
+            self.supply.bind(model, self.P, units=units)
             if self.supply.n != self.n:
                 raise ValueError(f"supply block has {self.supply.n} rows, model has {self.n} products")
         if isinstance(linear, LinearIV):
@@ -276,6 +283,10 @@ class NFPGMMProblem:
             aux["note"] = "non-finite values in g or G"
             return self._failed(theta, EvalStatus.NUMERICAL, t0, aux)
 
+        for m in self.calibration:
+            summary = getattr(m, "summary", None)
+            if callable(summary):
+                aux[m.name] = summary(sol)
         aux["q"] = self.objective(g)
         aux["q_blocks"] = {name: float(self.n * g[s] @ self.W[s, s] @ g[s]) for name, s in self.blocks.items()}
         return Evaluation(theta=theta, g=g, G=G, status=EvalStatus.OK, blocks=dict(self.blocks), aux=aux,
@@ -379,6 +390,9 @@ class NFPGMMProblem:
         if self.supply is not None:
             Zs = self.supply.Z
             W[self.supply_rows, self.supply_rows] = weight_from_covariance(Zs.T @ Zs / self.n)
+        for m in self.calibration:   # a calibration row's covariance is a declared constant
+            rows = self.blocks[m.name]
+            W[rows, rows] = weight_from_covariance(np.atleast_2d(m.covariance_block(None, None)))  # type: ignore
         if self.micro and all(getattr(m, "fixed_covariance", None) is not None for m in self.micro):
             for m in self.micro:   # a fixed V_micro needs no evaluation at theta0
                 rows = self.blocks[m.name]
@@ -496,6 +510,21 @@ class NFPGMMProblem:
         return S
 
     # ------------------------------------------------------------------ optional hooks
+
+    def history_extras(self, ev: Evaluation, accepted: bool) -> dict[str, float]:
+        """history_extras(ev, accepted) -> {"sd_delta", "mean_alpha_buyers"} for the optimizer's history: the sd
+        of delta at every evaluated point and, at accepted points of a PCM model (one with ``kernel_market``),
+        the mean price sensitivity of predicted buyers (``pcm_post.spread_in_buyer_dollars``, LEARNINGS 25)."""
+        out: dict[str, float] = {}
+        delta = ev.aux.get("delta") if ev.aux else None
+        if delta is None:
+            return out
+        out["sd_delta"] = float(np.std(delta))
+        if accepted and hasattr(self.model, "kernel_market") and hasattr(self.model, "kernel_params"):
+            from .models.pcm_post import spread_in_buyer_dollars
+
+            out["mean_alpha_buyers"] = float(spread_in_buyer_dollars(self.model, ev.theta, delta)["mean_alpha_buyers"])
+        return out
 
     def _max_step(self, ev: Evaluation, dtheta: np.ndarray) -> StepLimit:
         """max_step(ev, dtheta) -> StepLimit, delegated to the model."""

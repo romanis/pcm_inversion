@@ -293,7 +293,7 @@ class ProfilePoint:
 
     @property
     def ok(self) -> bool:
-        return self.status == "ok" or self.convergence in ("CONVERGED", "CONVERGED_AT_CAP")
+        return self.status == "ok" or self.convergence in ("CONVERGED", "CONVERGED_AT_CAP", "CONVERGED_NOISE")
 
     def to_json(self) -> dict[str, Any]:
         return {"index": self.index, "grid_index": list(self.grid_index), "coords": _floats_out(self.coords),
@@ -619,6 +619,8 @@ def _record_values(problem: Any, s: _Setup, ev: Evaluation) -> tuple[dict[str, f
         values["sd_xi"] = float(ev.aux["sd_xi"])
     elif ev.aux.get("xi") is not None:
         values["sd_xi"] = float(np.std(ev.aux["xi"]))
+    if ev.aux.get("delta") is not None:
+        values["sd_delta"] = float(np.std(ev.aux["delta"]))
     if s.economics is not None:
         try:
             for k, v in dict(s.economics(problem, ev)).items():

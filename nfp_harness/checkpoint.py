@@ -47,9 +47,9 @@ __all__ = [
 ]
 
 HISTORY_FIELDS = ("stage", "iteration", "accepted", "q", "q_fixed", "q_cue", "sd_xi", "rho", "Delta", "tau_cap",
-                  "status", "seconds", "predicted_mass", "realised_mass")
+                  "status", "seconds", "predicted_mass", "realised_mass", "sd_delta", "mean_alpha_buyers")
 _FLOAT_FIELDS = ("q", "q_fixed", "q_cue", "sd_xi", "rho", "Delta", "tau_cap", "seconds", "predicted_mass",
-                 "realised_mass")
+                 "realised_mass", "sd_delta", "mean_alpha_buyers")
 _ARRAY_TAG = "__ndarray__"
 
 
@@ -181,8 +181,11 @@ def history_to_state(records: Sequence[HistoryRecord]) -> dict[str, Any]:
 
 
 def history_from_state(d: dict[str, Any]) -> list[HistoryRecord]:
-    """history_from_state(d) -> records written by ``history_to_state``."""
+    """history_from_state(d) -> records written by ``history_to_state``. Float fields a state written before
+    they existed lacks (``sd_delta``, ``mean_alpha_buyers``) read as NaN."""
     out = []
+    n = len(d["stage"])
+    d = {**{f: np.full(n, np.nan) for f in _FLOAT_FIELDS if f not in d}, **d}
     for i in range(len(d["stage"])):
         out.append(HistoryRecord(
             iteration=int(d["iteration"][i]), accepted=bool(d["accepted"][i]),
@@ -190,6 +193,12 @@ def history_from_state(d: dict[str, Any]) -> list[HistoryRecord]:
             **{f: float(d[f][i]) for f in _FLOAT_FIELDS},
         ))
     return out
+
+
+def _reorder(row: list[str], old: list[str], new: list[str]) -> list[str]:
+    """A history.csv row under header ``old`` rewritten under header ``new`` (missing columns empty)."""
+    by_name = dict(zip(old, row))
+    return [by_name.get(c, "") for c in new]
 
 
 def _sib(stem: pathlib.Path, suffix: str) -> pathlib.Path:
@@ -329,6 +338,8 @@ class RunDirectory:
         """append_history(record): one row of history.csv per trial (header written on first use)."""
         path = self.path / "history.csv"
         new = not path.exists() or path.stat().st_size == 0
+        if not new:
+            self._upgrade_header(self._header(len(record.theta)))
         with open(path, "a", newline="") as fh:
             w = csv.writer(fh)
             if new:
@@ -349,6 +360,10 @@ class RunDirectory:
             header, body = rows[0], rows[1:]
             kept = [r for r in body if r and r[0] != stage]
         records = list(records)
+        if records and header is not None and header != self._header(len(records[0].theta)):
+            new_header = self._header(len(records[0].theta))
+            kept = [_reorder(r, header, new_header) for r in kept]
+            header = new_header
         if header is None and records:
             header = self._header(len(records[0].theta))
         if header is None:
@@ -358,6 +373,22 @@ class RunDirectory:
         w.writerow(header)
         w.writerows(kept)
         w.writerows(self._row(r) for r in records)
+        atomic_write(path, buf.getvalue().encode())
+
+    def _upgrade_header(self, header: list[str]) -> None:
+        """Rewrite history.csv under ``header`` when the file was written with other columns (e.g. by a version
+        without ``sd_delta``), carrying each old row's values over by column name, so rows stay aligned."""
+        path = self.path / "history.csv"
+        with open(path, newline="") as fh:
+            first = next(csv.reader(fh), None)
+        if first is None or first == header:
+            return
+        with open(path, newline="") as fh:
+            rows = list(csv.reader(fh))
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(header)
+        w.writerows(_reorder(r, rows[0], header) for r in rows[1:] if r)
         atomic_write(path, buf.getvalue().encode())
 
     def read_history(self) -> list[dict[str, str]]:

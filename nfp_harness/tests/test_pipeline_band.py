@@ -8,6 +8,7 @@ second run on the same directory reads every point back instead of estimating it
 from __future__ import annotations
 
 import csv
+import json
 import pathlib
 from typing import Any
 
@@ -108,3 +109,109 @@ def test_gate_failure_is_a_typed_refusal(tmp_path: pathlib.Path) -> None:
         pipe._check_gate()   # one passing verdict of the tuple is enough
     finally:
         pipe.close()
+
+
+class ToyMarginSpec:
+    """Synthetic PCM with aggregate (Sargan), supply and an optional margin row: the margin_band stage."""
+
+    name = "toy_margin_band"
+    normalisations: list[str] = ["toy"]
+    margin_band_values = (0.25, 0.3)
+    max_iterations = 4
+    optimizer_options: dict[str, Any] = {"noise_probe": 1e-5, "lm_damping": True}
+    start_from_gate = True
+    start_concentrate = ("pi_x1_demo",)
+    start_slice = {"lambda": 1.0}
+    start_column = "q_fixed"
+    gate_concentrate_iterations = 3
+
+    def __init__(self, syn: dict[str, Any], gate: pathlib.Path) -> None:
+        self.syn, self.start_gate, self.calls = syn, str(gate), 0
+
+    def hash_payload(self) -> dict[str, Any]:
+        return {"toy": 2}
+
+    def build_problem(self, nu: int, seed: int, threads: int | None, moments: str,
+                      layout_changes: dict[str, Any] | None = None, margin: float | None = None) -> NFPGMMProblem:
+        from nfp_harness.moments import MarginMoment, SarganIVMoments, SupplyMoments
+        from nfp_harness.tests.test_supply import _supply_inputs
+
+        syn = self.syn
+        n = syn["data"]["products"]["prices"].size
+        firms = np.arange(n) // 2
+        syn["data"]["products"]["firm_ids"] = firms
+        layout = synthetic_layout(THETA_TRUE)
+        model = PCMModel(PCMSpec(CHARS, tol=1e-12), syn["data"], layout, syn["nu"], syn["seed"], total_threads=8)
+        Zs, w = _supply_inputs(syn)
+        sup = SupplyMoments(Zs, w, firms, w_names=("c0", "c1", "c2"), fd_step=1e-3, fd_scale="unit")
+        ms: list[Any] = [SarganIVMoments(syn["Z"]), sup]
+        if margin is not None:
+            ms.append(MarginMoment(sup, margin))
+        prob = NFPGMMProblem(model, ms, LinearIV(syn["X1"], syn["Z"]), layout)
+        prob.normalisations = ["toy", f"margin calibration m* = {margin}"]  # type: ignore[attr-defined]
+        return prob
+
+    def binding_weighting(self, problem: Any, W: np.ndarray) -> np.ndarray:
+        W = np.array(W, dtype=float)
+        for m in getattr(problem, "calibration", ()):
+            r = problem.blocks[m.name]
+            W[r, :] = 0.0
+            W[:, r] = 0.0
+            W[r, r] = m.binding_block()
+        return W
+
+    def named_directions(self, theta: np.ndarray, units: np.ndarray) -> dict[str, np.ndarray]:
+        return {}
+
+    def margin_band_row(self, pipe: Any, problem: Any, result: Any, value: float) -> dict[str, Any]:
+        self.calls += 1
+        return {"margin_trimmed_mean": result.evaluation.aux["margin"]["margin_trimmed_mean"]}
+
+    def band_reference_rows(self) -> list[dict[str, Any]]:
+        return [{"label": "reference"}]
+
+
+def test_margin_band_rows_start_and_resume(tmp_path: pathlib.Path) -> None:
+    """margin_band: the start is the gate minimum on lambda = 1 with pi re-solved, one problem per m* with a
+    binding margin row, rows in band.csv, a report per stage, and a second run reads every point back."""
+    syn = make_synthetic(2, 8, 32, 8, seed=2, price_shift=12.0, delta_shift=2.0)
+    names = synthetic_layout().names
+    gate = tmp_path / "gate" / "profile_sigma_ray"
+    gate.mkdir(parents=True)
+    start = THETA_TRUE * np.array([1.02, 0.98, 1.2, 1.0, 1.03])
+    other = THETA_TRUE * 1.1
+    with open(gate / "profile.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["lambda", "sigma_p", "status", "q_fixed"] + [f"theta:{n}" for n in names])
+        w.writerow([1.0, start[4], "ok", 5.0] + list(start))
+        w.writerow([0.5, other[4], "ok", 1.0] + list(other))    # lower q, other slice: not the start
+        w.writerow([1.0, other[4], "inversion_failed", 0.1] + list(other))
+    spec = ToyMarginSpec(syn, tmp_path / "gate")
+    cfg = RunConfig(base=tmp_path / "runs", nu=syn["nu"], seed=syn["seed"], threads=8)
+    pipe = Pipeline(spec, cfg)
+    try:
+        rows = pipe.margin_band()
+        g0 = pipe.rd.load_stage("margin_band.gate_minimum")
+        np.testing.assert_allclose(g0["theta"], start)
+        st = pipe.rd.load_stage("margin_band.start")["theta"]
+        assert np.array_equal(np.delete(st, 2), np.delete(start, 2)) and st[2] != start[2]   # only pi moved
+    finally:
+        pipe.close()
+    assert [r["margin_target"] for r in rows] == [0.25, 0.3] and spec.calls == 2
+    for r in rows:
+        assert r["step1_convergence"] and np.isfinite(r["q"]) and np.isfinite(r["J"])
+    W1 = pipe.rd.load_stage("weights.mband.0.25.W1")["W"]
+    assert W1[-1, -1] == pytest.approx(1e4 / (syn["data"]["products"]["prices"].size * 1e-4))
+    rep = json.loads((pipe.path / "reports" / "margin_band.0.25.step1" / "report.json").read_text())
+    assert "margin calibration m* = 0.25" in rep["spec"]["normalisations"]
+    with open(pipe.path / "margin_band" / "band.csv") as fh:
+        table = list(csv.DictReader(fh))
+    assert len(table) == 3 and table[-1]["label"] == "reference"
+
+    spec2 = ToyMarginSpec(syn, tmp_path / "gate")
+    pipe2 = Pipeline(spec2, cfg)
+    try:
+        rows2 = pipe2.margin_band()
+    finally:
+        pipe2.close()
+    assert spec2.calls == 0 and rows2 == rows

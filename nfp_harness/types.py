@@ -285,6 +285,9 @@ class ConvergenceClass(enum.Enum):
 
     CONVERGED = "CONVERGED"
     CONVERGED_AT_CAP = "CONVERGED_AT_CAP"
+    # stopped on the objective's measured noise floor: the last rejections at a tiny trust radius changed q by
+    # less than the jumps measured at the stage start (``OptimizerOptions.noise_probe``). Counts as converged.
+    CONVERGED_NOISE = "CONVERGED_NOISE"
     STALLED = "STALLED"
     FLAT_PROGRESS = "FLAT_PROGRESS"
     ITERATION_LIMIT = "ITERATION_LIMIT"
@@ -293,7 +296,8 @@ class ConvergenceClass(enum.Enum):
 
     @property
     def converged(self) -> bool:
-        return self in (ConvergenceClass.CONVERGED, ConvergenceClass.CONVERGED_AT_CAP)
+        return self in (ConvergenceClass.CONVERGED, ConvergenceClass.CONVERGED_AT_CAP,
+                        ConvergenceClass.CONVERGED_NOISE)
 
 
 @dataclass(frozen=True, eq=False)
@@ -315,6 +319,8 @@ class HistoryRecord:
     predicted_mass: float = float("nan")  # max_step affected mass at tau_cap
     realised_mass: float = float("nan")  # from frontier_signature at the trial point
     stage: str = ""
+    sd_delta: float = float("nan")  # sd of the mean utilities (``Problem.history_extras``)
+    mean_alpha_buyers: float = float("nan")  # mean price sensitivity of predicted buyers, accepted points only
 
 
 @dataclass(eq=False)
@@ -340,6 +346,7 @@ class OptimizeResult:
     weighting: str = ""  # "fixed", "two_step", "cue"
     W: np.ndarray | None = None
     message: str = ""
+    noise_floor: float = float("nan")  # largest block change of q over the stage-start probes (NaN: not probed)
 
 
 # --------------------------------------------------------------------------------------------

@@ -13,12 +13,17 @@ latest one is also copied to the run directory root):
   profile whose ``concentrate`` is a tuple of parameter names re-optimises only those at every point (the
   others held), with the spec's optimizer options and at most ``spec.gate_concentrate_iterations`` (20)
   trial steps per point.
-- ``extensive``: only if the spec has ``extensive_free``: those parameters alone from the prefit point with
-  W1 on all moments (refused unless the gate passed, as step1). step1 then starts from its endpoint.
+- ``extensive``: only if the spec has ``extensive_free`` and no ``start_from_gate``: those parameters alone from
+  the prefit point with W1 on all moments (refused unless the gate passed, as step1). step1 then starts from
+  its endpoint.
 - ``step1``: fixed W1 = ``initial_weighting(theta_prefit)`` from the extensive (else prefit) point. Refused unless the gate
-  tagged ``spec.gate_required`` passed in the run with ``--gate-nu`` draws per agent (same seed).
-- ``step2``: W2 = S(theta_hat_1)^{-1} from theta_hat_1. Refused unless step 1 converged and its report
-  shows none of TwoStep's blocking degeneracies (DESIGN 4.5).
+  tagged ``spec.gate_required`` passed in the run with ``--gate-nu`` draws per agent (same seed). With
+  ``spec.start_from_gate`` step1 starts instead from the gate minimum (``start_point``: the gate profile's
+  lowest ``spec.start_column`` on ``spec.start_slice``, read from ``spec.start_gate`` or else from the gate of
+  the ``--gate-nu`` run, then ``spec.start_concentrate`` re-solved alone with
+  ``spec.start_concentrate_weighting``), and W1 is formed there.
+- ``step2``: W2 = S(theta_hat_1)^{-1} from theta_hat_1. Refused unless step 1 converged (CONVERGED_NOISE
+  counts) and its report shows none of TwoStep's blocking degeneracies (DESIGN 4.5).
 - ``post``: at the last finished estimate (step2, else step1): the report again and ``spec.post``, whose
   summary goes to ``post/summary.json``.
 - ``stability``: at most 20 optimizer iterations from the estimate with ``2 nu`` draws per agent and new
@@ -29,6 +34,17 @@ latest one is also copied to the run directory root):
   ``spec.band_row(pipeline, problem, result, value) -> dict`` at the last estimate. Rows go to
   ``sigma_p_band/band.csv`` (plus ``spec.band_reference_rows()``, e.g. BLP) and ``band.json``; each point is
   checkpointed (stages ``band.<value>.step1|step2|row``), so a killed run resumes at the point it was in.
+- ``margin_band`` (a calibrated markup level, round-3 analysis 5.3): for each m* in ``spec.margin_band_values``
+  the problem ``spec.build_problem(..., margin=m*)`` (all nonlinear parameters free), step 1 with W1 from
+  ``start_point`` (shared by every point), step 2 with W2 = S^{-1} at the step-1 point when step 1 converged
+  and showed no blocking degeneracy, a report per stage (``reports/margin_band.<m*>.step1|step2``), then
+  ``spec.margin_band_row(pipeline, problem, result, m*)``. ``J`` is n g'W g over the non-calibration rows at
+  the last estimate (Hansen's J at step 2). Rows go to ``margin_band/band.csv`` (plus
+  ``spec.band_reference_rows()``); each point is checkpointed (``mband.<m*>.step1|step2|row``) and the points
+  run one after another, each on all threads.
+
+Every W the estimation stages minimise (W1, W2, band W) passes through ``spec.binding_weighting(problem, W)``
+when the spec has it, e.g. to make a calibration row bind.
 
 ``--stage all`` runs extensive, step1, step2, post and stability in order; a refused stage is reported and the
 chain continues with what it can do (post and stability fall back to the step-1 estimate). When extensive or
@@ -80,7 +96,7 @@ __all__ = ["Pipeline", "RunConfig", "StageRefused", "GateFailed", "STAGES", "CHA
 
 log = logging.getLogger("nfp_harness.pipeline")
 
-STAGES = ("prefit", "gate", "extensive", "step1", "step2", "post", "stability", "sigma_p_band")
+STAGES = ("prefit", "gate", "extensive", "step1", "step2", "post", "stability", "sigma_p_band", "margin_band")
 CHAIN = ("extensive", "step1", "step2", "post", "stability")
 STABILITY_SEED_OFFSET = 100_000
 STABILITY_ITERATIONS = 20
@@ -182,7 +198,9 @@ class Pipeline:
         ev = result.evaluation
         units = problem.layout.units()
         options: dict[str, Any] = {"units": units, "n": problem.n, "run_id": self.path.name, "hash": self.spec_hash,
-                                   "code_commit": code_commit(), "normalisations": list(self.spec.normalisations),
+                                   "code_commit": code_commit(),
+                                   "normalisations": list(getattr(problem, "normalisations", None)
+                                                          or self.spec.normalisations),
                                    "named_directions": self.spec.named_directions(result.theta, units),
                                    "files": {"history": "history.csv", "checkpoint": "checkpoint.npz",
                                              "log": "log.txt"}}
@@ -232,6 +250,78 @@ class Pipeline:
                     problem.model.load_state_dict(ps["model"])
                 except (ValueError, KeyError) as exc:
                     log.info("warm start from %s not used: %s", stage, exc)
+
+    def _binding(self, problem: Any, W: np.ndarray) -> np.ndarray:
+        """``spec.binding_weighting(problem, W)`` when the spec has it, else W."""
+        hook = getattr(self.spec, "binding_weighting", None)
+        return np.asarray(W, dtype=float) if hook is None else np.asarray(hook(problem, W), dtype=float)
+
+    def _gate_minimum(self, tag: str, names: Sequence[str]) -> np.ndarray:
+        """theta at the gate minimum (module docstring, ``step1``), stored once as stage ``<tag>.gate_minimum`` so a
+        resumed run starts where it started even if the gate files change."""
+        key = f"{tag}.gate_minimum"
+        if self.rd.stage_done(key):
+            return np.asarray(self.rd.load_stage(key)["theta"], dtype=float)
+        import csv
+
+        src = getattr(self.spec, "start_gate", None)
+        path = pathlib.Path(src) if src else (
+            run_dir_path(self.cfg.base, self.spec, self.cfg.gate_nu, self.cfg.seed) / "gate")
+        if path.is_dir():
+            files = sorted(path.glob("profile_*/profile.csv")) or sorted(path.glob("profile.csv"))
+            if len(files) != 1:
+                raise StageRefused(f"{tag}: expected one gate profile.csv under {path}, found {len(files)}")
+            path = files[0]
+        if not path.exists():
+            raise StageRefused(f"{tag}: no gate profile at {path}; run the gate or pass the spec's start gate")
+        with open(path, newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        col = str(getattr(self.spec, "start_column", "q_fixed"))
+        sl = dict(getattr(self.spec, "start_slice", None) or {})
+
+        def ok(r: dict[str, str]) -> bool:
+            try:
+                return (r.get("status") == "ok" and np.isfinite(float(r[col]))
+                        and all(abs(float(r[k]) - float(v)) < 1e-12 for k, v in sl.items()))
+            except (KeyError, ValueError):
+                return False
+
+        good = [r for r in rows if ok(r)]
+        if not good:
+            raise StageRefused(f"{tag}: no evaluated point with a finite {col} on {sl} in {path}")
+        best = min(good, key=lambda r: float(r[col]))
+        missing = [n for n in names if f"theta:{n}" not in best]
+        if missing:
+            raise StageRefused(f"{tag}: the gate profile {path} has no columns for {missing}")
+        theta = np.array([float(best[f"theta:{n}"]) for n in names])
+        log.info("%s: start at the gate minimum of %s (%s %s, %s = %s)", tag, path, sl, {a: best.get(a) for a in
+                 ("lambda", "sigma_p")}, col, best[col])
+        self.rd.save_stage(key, {"theta": theta, "source": str(path), "row": json.dumps(best)})
+        return theta
+
+    def start_point(self, problem: Any, tag: str) -> np.ndarray:
+        """The gate minimum with ``spec.start_concentrate`` re-solved alone (stage ``<tag>.start``) on
+        ``spec.start_concentrate_weighting(problem, W1)``, at most ``spec.gate_concentrate_iterations`` steps."""
+        theta_g = self._gate_minimum(tag, problem.layout.names)
+        conc = tuple(getattr(self.spec, "start_concentrate", None) or ())
+        if not conc:
+            return theta_g
+        layout = problem.layout
+        unknown = [c for c in conc if c not in layout.names]
+        if unknown:
+            raise ValueError(f"start_concentrate names unknown parameters {unknown}")
+        hook = getattr(self.spec, "start_concentrate_weighting", None)
+        W = self._saved_weight(f"{tag}.start_W", lambda: (problem.initial_weighting(theta_g) if hook is None
+                                                          else hook(problem, problem.initial_weighting(theta_g))))
+        problem.layout = layout.replace({n: {"free": n in conc} for n in layout.names})
+        try:
+            res = minimize(problem, Fixed(W), self._options(
+                stage=f"{tag}.start", theta0=theta_g, noise_probe=None,
+                max_iterations=int(getattr(self.spec, "gate_concentrate_iterations", 20))), checkpoint=self.rd)
+        finally:
+            problem.layout = layout
+        log.info("%s: start concentrated in %s: %s, q %.6g", tag, conc, res.convergence.value, res.q)
+        return np.asarray(res.theta, dtype=float)
 
     # ---------------------------------------------------------------- stages
 
@@ -357,12 +447,15 @@ class Pipeline:
         return None if v is None else int(v)
 
     def _w1(self, problem: Any, theta: np.ndarray) -> np.ndarray:
-        return self._saved_weight("W1", lambda: problem.initial_weighting(theta))
+        return self._saved_weight("W1", lambda: self._binding(problem, problem.initial_weighting(theta)))
 
     def extensive(self) -> np.ndarray:
         """Theta at the end of the extensive-margin stage: ``spec.extensive_free`` alone from the prefit
         point with W1 on all moments (SPEC 3.5a). The prefit theta when the spec has no such stage."""
         free_names = tuple(getattr(self.spec, "extensive_free", None) or ())
+        if getattr(self.spec, "start_from_gate", False):
+            log.info("extensive: skipped, step1 starts from the gate minimum (spec.start_from_gate)")
+            return None  # type: ignore[return-value]
         if not free_names:
             return self.prefit()
         if self.rd.stage_done("extensive"):
@@ -389,11 +482,17 @@ class Pipeline:
 
     def step1(self) -> OptimizeResult:
         self._check_gate()
-        theta_w = self.prefit()
-        theta0 = self.extensive()
         problem = self.problem("all")
-        if not self.rd.stage_done("step1"):
-            self._warm(problem, "extensive" if self.rd.stage_done("extensive") else "prefit")
+        if getattr(self.spec, "start_from_gate", False):
+            # a finished step1 is read back by minimize; W1 is stored, so theta_w only matters the first time
+            theta0 = (np.asarray(self._stage_state("step1")["theta"], dtype=float) if self.rd.stage_done("step1")
+                      else self.start_point(problem, "step1"))
+            theta_w = theta0
+        else:
+            theta_w = self.prefit()
+            theta0 = self.extensive()
+            if not self.rd.stage_done("step1"):
+                self._warm(problem, "extensive" if self.rd.stage_done("extensive") else "prefit")
         W1 = self._w1(problem, theta_w)
         res = minimize(problem, Fixed(W1), self._options(stage="step1", theta0=theta0, max_iterations=self._limit()),
                        checkpoint=self.rd)
@@ -427,8 +526,8 @@ class Pipeline:
         ev1 = r1.evaluation
 
         def make_w2() -> np.ndarray:
-            return _block_diagonal_like(weight_from_covariance(problem.covariance(ev1)), ev1.blocks,
-                                        getattr(problem, "coupled_blocks", ()))
+            return self._binding(problem, _block_diagonal_like(weight_from_covariance(problem.covariance(ev1)),
+                                                               ev1.blocks, getattr(problem, "coupled_blocks", ())))
 
         W2 = self._saved_weight("W2", make_w2)
         res = minimize(problem, Fixed(W2), self._options(stage="step2", theta0=r1.theta, max_iterations=self._limit()),
@@ -508,7 +607,7 @@ class Pipeline:
                 theta0[k] = v
                 if not self.rd.stage_done(f"{tag}.step1"):
                     self._warm(problem, "prefit")
-                W1 = self._saved_weight(f"{tag}.W1", lambda: problem.initial_weighting(theta0))
+                W1 = self._saved_weight(f"{tag}.W1", lambda: self._binding(problem, problem.initial_weighting(theta0)))
                 r1 = minimize(problem, Fixed(W1), self._options(stage=f"{tag}.step1", theta0=theta0,
                                                                   max_iterations=self._limit()), checkpoint=self.rd)
                 res, stage = r1, "step1"
@@ -516,8 +615,9 @@ class Pipeline:
                     ev1 = r1.evaluation
 
                     def make_w2(problem: Any = problem, ev1: Any = ev1) -> np.ndarray:
-                        return _block_diagonal_like(weight_from_covariance(problem.covariance(ev1)), ev1.blocks,
-                                                    getattr(problem, "coupled_blocks", ()))
+                        return self._binding(problem, _block_diagonal_like(
+                            weight_from_covariance(problem.covariance(ev1)), ev1.blocks,
+                            getattr(problem, "coupled_blocks", ())))
 
                     W2 = self._saved_weight(f"{tag}.W2", make_w2)
                     res = minimize(problem, Fixed(W2), self._options(stage=f"{tag}.step2", theta0=r1.theta,
@@ -537,6 +637,82 @@ class Pipeline:
             problem.layout = layout
         self._write_band(out, rows, par)
         return rows
+
+    def margin_band(self) -> list[dict[str, Any]]:
+        """The margin band stage (module docstring). Returns the rows of margin_band/band.csv."""
+        spec = self.spec
+        values = [float(v) for v in getattr(spec, "margin_band_values")]
+        out = self.path / "margin_band"
+        out.mkdir(exist_ok=True)
+        rows: list[dict[str, Any]] = []
+        theta_s: np.ndarray | None = None
+        for v in values:
+            tag = f"mband.{v:g}"
+            if self.rd.stage_done(f"{tag}.row"):
+                rows.append(dict(json.loads(str(self.rd.load_stage(f"{tag}.row")["row"]))))
+                continue
+            if theta_s is None:
+                theta_s = self.start_point(self.problem("all"), "margin_band")
+            log.info("margin_band: m* = %g", v)
+            problem = spec.build_problem(self.cfg.nu, self.cfg.seed, self.cfg.threads, "all", margin=v)
+            try:
+                if not self.rd.stage_done(f"{tag}.step1"):
+                    self._warm(problem, "margin_band.start")
+                ts = theta_s
+                W1 = self._saved_weight(f"{tag}.W1", lambda: self._binding(problem, problem.initial_weighting(ts)))
+                r1 = minimize(problem, Fixed(W1), self._options(stage=f"{tag}.step1", theta0=theta_s,
+                                                                  max_iterations=self._limit()), checkpoint=self.rd)
+                rep1 = self._band_report(problem, r1, f"margin_band.{v:g}.step1")
+                res, stage = r1, "step1"
+                detected = [d["name"] for d in rep1.get("degeneracies", []) if d.get("detected")]
+                ok2, why = TwoStep(W1).gate(detected)
+                step2_note = "" if (r1.convergence.converged and ok2) else (
+                    f"step 2 not started: step 1 ended {r1.convergence.value}" if not r1.convergence.converged
+                    else why)
+                if not step2_note and r1.evaluation is not None:
+                    ev1 = r1.evaluation
+
+                    def make_w2(problem: Any = problem, ev1: Any = ev1) -> np.ndarray:
+                        return self._binding(problem, _block_diagonal_like(
+                            weight_from_covariance(problem.covariance(ev1)), ev1.blocks,
+                            getattr(problem, "coupled_blocks", ())))
+
+                    W2 = self._saved_weight(f"{tag}.W2", make_w2)
+                    res = minimize(problem, Fixed(W2), self._options(stage=f"{tag}.step2", theta0=r1.theta,
+                                                                       max_iterations=self._limit()),
+                                   checkpoint=self.rd)
+                    self._band_report(problem, res, f"margin_band.{v:g}.step2")
+                    stage = "step2"
+                row: dict[str, Any] = {"label": "", "margin_target": v, "estimate_stage": stage,
+                                       "step1_convergence": r1.convergence.value,
+                                       "convergence": res.convergence.value, "q": float(res.q),
+                                       "step2_note": step2_note}
+                ev = res.evaluation
+                if ev is not None and ev.ok:
+                    calib = np.zeros(ev.g.size, dtype=bool)
+                    for m in getattr(problem, "calibration", ()):
+                        calib[ev.blocks[m.name]] = True
+                    g, W = ev.g[~calib], np.asarray(res.W)[np.ix_(~calib, ~calib)]
+                    row["J"] = float(problem.n * g @ W @ g)
+                    row["J_weighting"] = "S^-1 (Hansen J)" if stage == "step2" else "W1 (not a J statistic)"
+                    row.update(spec.margin_band_row(self, problem, res, v))
+                else:
+                    row["note"] = "no successful evaluation at the estimate"
+                rows.append(row)
+                self.rd.save_stage(f"{tag}.row", {"row": json.dumps(to_jsonable(row), allow_nan=False)})
+                self._write_band(out, rows, "margin_target")
+            finally:
+                problem.model.close()
+        self._write_band(out, rows, "margin_target")
+        return rows
+
+    def _band_report(self, problem: Any, result: OptimizeResult, stage: str) -> dict[str, Any]:
+        """The diagnostics report of one band stage, written once (``report.<stage>``) and read back after."""
+        if self.rd.stage_done(f"report.{stage}"):
+            return json.loads((self.path / "reports" / stage / "report.json").read_text())
+        rep = self.report(problem, result, stage)
+        self.rd.save_stage(f"report.{stage}", {"done": True})
+        return rep
 
     def _write_band(self, out: pathlib.Path, rows: list[dict[str, Any]], par: str) -> None:
         import csv

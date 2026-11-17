@@ -14,7 +14,7 @@ from typing import Any, Sequence
 
 from ..types import ConvergenceClass, DiagnosticBlock, EvalStatus, HistoryRecord, OptimizeResult
 
-__all__ = ["classify", "convergence_block", "converged_test", "thresholds"]
+__all__ = ["classify", "convergence_block", "converged_test", "noise_stop", "thresholds"]
 
 _LIMITS = {
     "iterations": ConvergenceClass.ITERATION_LIMIT,
@@ -59,17 +59,39 @@ def _flat(history: Sequence[HistoryRecord], q: float, options: Any) -> bool:
     return (qs[-window - 1] - qs[-1]) < _opt(options, "flat_tol", 1e-3) * (1.0 + max(q, 0.0))
 
 
+def noise_stop(history: Sequence[HistoryRecord], q: float, noise_floor: float | None, options: Any) -> bool:
+    """noise_stop(history, q, noise_floor, options) -> True iff the CONVERGED_NOISE rule holds.
+
+    The last ``noise_rejections`` (3) records of ``history`` are all rejected trials that evaluated (status OK,
+    finite q), each tried with a trust radius below ``noise_Delta`` (1e-4 natural units), and each changed q by
+    less than ``noise_floor`` against the accepted ``q``: ``|q_trial - q| < noise_floor``. The floor is the
+    largest block change of q measured at the stage start over probes of +-``noise_probe`` units per free
+    parameter (``optimizer``), so a step this small cannot be told from the objective's own jumps (the supply
+    block's frontier jumps, LEARNINGS 25). False without a positive finite floor.
+    """
+    if noise_floor is None or not (math.isfinite(noise_floor) and noise_floor > 0):
+        return False
+    m = int(_opt(options, "noise_rejections", 3))
+    D = float(_opt(options, "noise_Delta", 1e-4))
+    if m <= 0 or len(history) < m:
+        return False
+    tail = list(history)[-m:]
+    return all((not r.accepted) and r.status is EvalStatus.OK and math.isfinite(r.q) and math.isfinite(r.Delta)
+               and r.Delta < D and abs(r.q - q) < noise_floor for r in tail)
+
+
 def classify(history: Sequence[HistoryRecord], projected_gradient: float, gn_decrease: float, q: float,
              options: Any, at_cap: bool = False, limit: str | None = None,
-             Delta: float | None = None) -> ConvergenceClass | None:
-    """classify(history, projected_gradient, gn_decrease, q, options, at_cap=False, limit=None, Delta=None)
-    -> class, or None when no stopping rule fires and the optimizer should continue.
+             Delta: float | None = None, noise_floor: float | None = None) -> ConvergenceClass | None:
+    """classify(history, projected_gradient, gn_decrease, q, options, at_cap=False, limit=None, Delta=None,
+    noise_floor=None) -> class, or None when no stopping rule fires and the optimizer should continue.
 
     Rules, in this order (DESIGN 4.6):
 
     - ``limit == "inversion_failed"``: INVERSION_FAILED (start point or accepted point cannot be evaluated).
     - CONVERGED: status OK and ``max|pg| <= pg_tol (1 + q)^{1/2}`` and ``dq_gn <= gn_tol (1 + q)``;
       CONVERGED_AT_CAP: as CONVERGED with a cap parameter at its cap (``at_cap``).
+    - CONVERGED_NOISE: ``noise_stop`` with the stage's measured ``noise_floor`` (round-3 analysis 4 (ii)).
     - STALLED: ``Delta < Delta_min`` or ``max_rejections`` consecutive rejections at the end of ``history``.
     - FLAT_PROGRESS: the last ``flat_window`` accepted steps lowered q by less than ``flat_tol (1 + q)``.
     - ITERATION_LIMIT / TIME_LIMIT: ``limit == "iterations"`` / ``"time"``.
@@ -84,6 +106,8 @@ def classify(history: Sequence[HistoryRecord], projected_gradient: float, gn_dec
     status = accepted[-1].status if accepted else EvalStatus.OK
     if converged_test(projected_gradient, gn_decrease, q, options, status):
         return ConvergenceClass.CONVERGED_AT_CAP if at_cap else ConvergenceClass.CONVERGED
+    if noise_stop(history, q, noise_floor, options):
+        return ConvergenceClass.CONVERGED_NOISE
     if Delta is not None and Delta < _opt(options, "Delta_min", 1e-8):
         return ConvergenceClass.STALLED
     if _trailing_rejections(history) >= int(_opt(options, "max_rejections", 10)):
@@ -103,7 +127,7 @@ def convergence_block(result: OptimizeResult) -> DiagnosticBlock:
     decrease {dq:.2e} (tolerance {tolq:.2e}); {n_acc} accepted steps, {n_eval} evaluations, {hours:.1f} h."
 
     ``result.pg_tol`` and ``result.gn_tol`` hold the threshold values at the final q. Status is "ok" for
-    CONVERGED and CONVERGED_AT_CAP, "fail" otherwise. ``result.message`` (bound and cap notes, stop
+    CONVERGED, CONVERGED_AT_CAP and CONVERGED_NOISE, "fail" otherwise. ``result.message`` (bound and cap notes, stop
     reason) is added as a second line.
     """
     cls = result.convergence
@@ -126,6 +150,7 @@ def convergence_block(result: OptimizeResult) -> DiagnosticBlock:
             "evaluations": int(result.evaluations),
             "wall_seconds": float(result.wall_seconds),
             "kink_limited_steps": int(result.kink_limited_steps),
+            "noise_floor": float(result.noise_floor),
             "Delta": float(result.Delta),
             "q_mass": float(result.q_mass),
             "stage": result.stage,

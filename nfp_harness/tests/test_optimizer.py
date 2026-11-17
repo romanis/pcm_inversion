@@ -6,8 +6,9 @@ Every problem here is a pure-numpy toy that implements ``types.Problem``; nothin
 
 from __future__ import annotations
 
+import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 import numpy as np
@@ -437,3 +438,74 @@ def test_cue_run_converges_to_stationary_point() -> None:
     V, dV = p.cue_terms(ev)
     grad = cue_gradient(ev, p.covariance(ev), V, dV, p.n)
     assert np.max(np.abs(grad)) <= res.pg_tol
+
+
+# ------------------------------------------------------------------------------------------------
+# round 3: noise floor (CONVERGED_NOISE) and Levenberg-Marquardt damping
+# ------------------------------------------------------------------------------------------------
+
+
+def noisy(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """g = x - 1 + 0.003 sin(1e7 x): a smooth residual plus a wiggle far finer than any trust-region step, which
+    the analytic G (= 1) does not see. Like the supply block's frontier jumps, it puts a floor under q that no
+    step can resolve."""
+    x = float(theta[0])
+    return np.array([x - 1.0 + 0.003 * np.sin(1e7 * x)]), np.array([[1.0]])
+
+
+def test_noise_floor_stops_as_converged_noise() -> None:
+    opts = OptimizerOptions(pg_tol=1e-12, gn_tol=1e-16, max_rejections=40, flat_window=200)
+    res = minimize(ToyProblem(noisy, [spec("x", 0.0)]), np.eye(1),
+                   replace(opts, noise_probe=1e-5, noise_Delta=1e-4, noise_rejections=3))
+    assert res.convergence is ConvergenceClass.CONVERGED_NOISE and res.convergence.converged
+    assert 1e-4 < res.noise_floor < 0.1   # probes at x = 0 move q by about 2 |g| 0.003 sin(100)
+    tail = res.history[-3:]
+    assert all(not r.accepted and r.Delta < 1e-4 and abs(r.q - res.q) < res.noise_floor for r in tail)
+    assert abs(res.theta[0] - 1.0) < 0.01 and "noise floor" in res.message
+    # without the probes the same run can only stall
+    res0 = minimize(ToyProblem(noisy, [spec("x", 0.0)]), np.eye(1), opts)
+    assert res0.convergence is ConvergenceClass.STALLED and math.isnan(res0.noise_floor)
+
+
+def test_noise_stop_needs_small_radius_and_small_change() -> None:
+    from nfp_harness.diagnostics.convergence import noise_stop
+
+    def rej(q: float, Delta: float) -> HistoryRecord:
+        return HistoryRecord(iteration=0, accepted=False, q=q, q_fixed=q, q_cue=float("nan"), sd_xi=float("nan"),
+                             rho=-1.0, Delta=Delta, tau_cap=1.0, status=EvalStatus.OK, seconds=0.0,
+                             theta=np.zeros(1))
+
+    opts = OptimizerOptions(noise_probe=1e-5)
+    small = [rej(1.001, 5e-5)] * 3
+    assert noise_stop(small, 1.0, 0.01, opts)
+    assert not noise_stop(small[:2], 1.0, 0.01, opts)                       # only two rejections
+    assert not noise_stop([rej(1.001, 5e-4)] * 3, 1.0, 0.01, opts)          # radius not small
+    assert not noise_stop([rej(1.1, 5e-5)] * 3, 1.0, 0.01, opts)            # change above the floor
+    assert not noise_stop(small, 1.0, float("nan"), opts)                   # no floor measured
+
+
+def test_lm_damping_grows_on_negative_rho_and_resets_on_acceptance(monkeypatch: pytest.MonkeyPatch) -> None:
+    import nfp_harness.optimizer as opt
+
+    seen: list[float] = []
+    real = opt._box_lsq
+
+    def spy(A: np.ndarray, r: np.ndarray, dk: np.ndarray, mu: float, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+        if np.all(np.isfinite(lo)) and np.max(np.abs(lo)) < 1e6:   # trust-region steps (the stopping test is unboxed)
+            seen.append(mu)
+        return real(A, r, dk, mu, lo, hi)
+
+    monkeypatch.setattr(opt, "_box_lsq", spy)
+    # g = x^3 - 8 from x = 0.1: the Gauss-Newton step overshoots far past 2 and q rises (rho < 0)
+    p = ToyProblem(lambda t: (np.array([t[0] ** 3 - 8.0]), np.array([[3.0 * t[0] ** 2]])), [spec("x", 0.1)])
+    res = minimize(p, np.eye(1), OptimizerOptions(Delta_0=5.0, Delta_max=5.0, lm_damping=True, lm_start=1e-3))
+    assert res.convergence is ConvergenceClass.CONVERGED
+    rhos = [r.rho for r in res.history[1:]]
+    acc = [r.accepted for r in res.history[1:]]
+    assert seen[0] == 0.0
+    for i in range(len(rhos) - 1):    # the damping of trial i + 1 follows trial i's outcome
+        if acc[i]:
+            assert seen[i + 1] == 0.0
+        elif rhos[i] < 0:
+            assert seen[i + 1] == (1e-3 if seen[i] == 0.0 else pytest.approx(10.0 * seen[i]))
+    assert any(r < 0 for r in rhos) and any(m > 0 for m in seen)

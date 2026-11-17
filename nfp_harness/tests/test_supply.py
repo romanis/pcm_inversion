@@ -132,3 +132,63 @@ def test_mc_floor_clips_instead_of_failing() -> None:
     mc, nash = sm._market_costs(0, s, p, np.arange(3), ds_dp)
     assert mc[0] == 0.5 and bool(nash["clipped"][0]) and not nash["clipped"][1:].any()
     assert np.all(mc > 0)
+
+
+def test_margin_row_value_jacobian_and_weights(priced: dict[str, Any]) -> None:
+    """MarginMoment: the trimmed mean of (p - mc)/p from the supply block's markups, its theta derivative
+    against re-inverted central differences, the declared W1 entry and the binding entry."""
+    from nfp_harness.moments import MarginMoment
+
+    n = priced["data"]["products"]["prices"].size
+    firms = np.arange(n) // 2
+    priced["data"]["products"]["firm_ids"] = firms
+    layout = synthetic_layout(THETA_TRUE)
+    model = PCMModel(PCMSpec(CHARS, tol=1e-12), priced["data"], layout, priced["nu"], priced["seed"], total_threads=8)
+    Zs, w = _supply_inputs(priced)
+    sup = SupplyMoments(Zs, w, firms, w_names=("c0", "c1", "c2"))
+    mm = MarginMoment(sup, 0.2, sd=0.01, binding_weight=1e4)
+    prob = NFPGMMProblem(model, [IVMoments(priced["Z"]), sup, mm], LinearIV(priced["X1"], priced["Z"]), layout)
+    try:
+        ev = prob.evaluate(THETA_TRUE)
+        assert ev.ok, (ev.status, ev.aux.get("note"))
+        mc = np.exp(ev.aux["log_mc"])
+        p = np.empty(n)
+        for t, m in enumerate(model.markets):
+            p[np.asarray(m.rows)] = np.asarray(model.kernel_market(t).p)
+        margin = np.sort(1.0 - mc / p)
+        want = float(np.mean(margin[int(np.floor(0.25 * n)):int(np.ceil(0.75 * n))]))
+        row = prob.blocks["margin"]
+        assert ev.g[row][0] == pytest.approx(want - 0.2, abs=1e-14)
+        assert ev.aux["margin"]["margin_trimmed_mean"] == pytest.approx(want, abs=1e-14)
+        prob.commit(THETA_TRUE)
+        fd, _ = central_fd(prob, THETA_TRUE, ev.aux["delta"])
+        errs = [_rel(ev.G[row, k], fd[row, k]) for k in range(THETA_TRUE.size)]
+        print("margin row:", [f"{e:.1e}" for e in errs])
+        assert max(errs) < 1e-4, errs
+        W1 = prob.initial_weighting(THETA_TRUE)
+        assert W1[row, row][0, 0] == pytest.approx(1.0 / (n * 1e-4))
+        assert mm.binding_block() == pytest.approx(1e4 / (n * 1e-4))
+        assert prob.identification["k_micro"] == 1
+    finally:
+        model.close()
+
+
+def test_supply_unit_step_rule(priced: dict[str, Any]) -> None:
+    """fd_scale='unit': h = fd_step x natural unit, no shrink; the frontier-change count is reported."""
+    n = priced["data"]["products"]["prices"].size
+    firms = np.arange(n) // 2
+    priced["data"]["products"]["firm_ids"] = firms
+    layout = synthetic_layout(THETA_TRUE)
+    model = PCMModel(PCMSpec(CHARS, tol=1e-12), priced["data"], layout, priced["nu"], priced["seed"], total_threads=8)
+    Zs, w = _supply_inputs(priced)
+    with pytest.raises(ValueError, match="natural units"):
+        SupplyMoments(Zs, w, firms, fd_scale="unit").bind(model, THETA_TRUE.size)
+    sup = SupplyMoments(Zs, w, firms, fd_step=1e-3, fd_scale="unit")
+    prob = NFPGMMProblem(model, [IVMoments(priced["Z"]), sup], LinearIV(priced["X1"], priced["Z"]), layout)
+    try:
+        assert np.array_equal(sup.units, layout.units())
+        ev = prob.evaluate(THETA_TRUE)
+        assert ev.ok and np.all(np.isfinite(ev.G))
+        assert ev.aux["supply"]["fd_step_shrinks"] == 0 and ev.aux["supply"]["fd_kink_columns"] >= 0
+    finally:
+        model.close()
