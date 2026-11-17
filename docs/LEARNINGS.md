@@ -593,3 +593,59 @@ own elasticities too (-14 at lambda = 2, sigma_p = 2) but raises q_fixed.
 petrin_pcm_e1559c0b2b) is also monotone decreasing: at lambda = 1, q_fixed 753, 639, 515, 381, 337,
 322. So the preference for large sigma_p is not only the scale of xi: R^2 of xi on Z also falls as
 sigma_p rises.
+
+## 21. Economist review round 2: in the exact PCM, own elasticity is about -35 to -45 / sigma_p on this product set, and sigma_p needs the supply side (2026-11-17)
+
+Second review by the economist agent (claude-fable-5.1), with its own evaluations at 1,024 draws and
+a per-draw frontier decomposition of 1984.
+
+**Why each objective prefers larger sigma_p.** Fixed W tracks sd(xi)^2 (entry 1). The Sargan form is
+scale-free but falls through shape: larger sigma_p flattens delta in price, which is the direction
+in which rival-characteristic instruments have leverage, so R^2 of xi on Z falls from 0.27 to 0.09.
+The CUE aggregate block moves 191 to 186 across sigma_p 0.5 to 2.5, which is noise against 22
+overidentifying restrictions. The demand data carry no usable information on sigma_p: the income
+purchase rates pin phi_mid and phi_high, E[fs | body] pins pi_b, and nothing pins within-group
+dispersion of alpha. Petrin's BLP has no unobserved alpha dispersion (alpha = pi_g / income, pooled
+log-alpha sd 0.50) and gets its smoothing from the logit error.
+
+**The own-elasticity law.** For a draw with product j on its frontier, j is bought on an alpha
+window of mass m_ij; a price rise shifts both window edges by dp / (hull price gap), so own
+elasticity = -(p_j / hull gap) x (edge densities) / (sigma_p x E[m_ij | on frontier]). Hull gaps are
+already about $2,300 because each draw's frontier is sparse. The binding term is the window mass,
+0.05 to 0.11: a product is on the frontier of 9 to 20 times as many consumers as buy it. The
+inversion fixes the z-windows from the shares, so elasticity scales as 1 / sigma_p. Measured
+elasticity x sigma_p is 31 to 54 at every point evaluated. Ten times larger horizontal spreads
+($2,000 per sd) move it only from 43 to 35; sigma_const of 8 instead of 3 changes nothing. An own
+elasticity of -8 would need sigma_p near 4.4. The ratio of own to market elasticity is about 35 to
+45 in the exact PCM on these 160 to 210 cars (median p / price gap 174), against 1 to 1.5 in BLP.
+No choice of horizontal spreads delivers BLP-like own elasticities.
+
+**Correction to entry 19.** Its natural-unit starts were $150 to $1,000 per sd, not the intended
+$2,000. The reference direction is now defined per sd of each characteristic. This does not change
+the conclusion above.
+
+**Substitution diagnostics.** The family-hauler factor works: minivan diversion to wagons, SUVs and
+vans is 0.18 to 0.31 of total. "Diversion leaving body, median" was zero because the median product
+is a car; the right statistic is car-to-hauler diversion relative to the hauler inside share.
+Outside diversion near zero is structural in the PCM: only a consumer's cheapest frontier product
+borders the outside good.
+
+**What pins sigma_p: the supply side.** Rival characteristics move prices only through markups. If
+markups were 3% (own elasticity -48), prices would equal costs and the rival sums would have no
+first-stage power. Check (a): regressing log price on Petrin's cost basis, the 22 demand instruments
+add F = 14.5 (R^2 0.835 to 0.851) and the 16 supply instruments F = 15.3, so markups are identified
+from prices. Petrin estimated with the supply side; the PCM runs so far dropped it, which is why
+sigma_p floats. Main path: add log mc = w gamma + omega with Nash markups from the PCM's ds/dp,
+w = Petrin's cost basis, Z_s = [w, supply_instruments]. Expected sigma_p 2 to 3, own elasticity -10
+to -15, margins 7 to 10%, reported as the exact PCM's numbers beside BLP's -4.5 and 24%.
+
+**Fallback.** If the supply profile is still monotone or flat, treat sigma_p as set-identified:
+estimate the rest at sigma_p in {1, 1.5, 2, 2.5, 3}, report elasticities, margins and the minivan
+counterfactual as a band, headline sigma_p = 2.0 labelled a calibration. BLP-based calibrations of
+sigma_p are rejected: Petrin's income-implied dispersion (0.50) gives elasticities near -90, and
+matching BLP's market semi-elasticity gives sigma_p near 0.3.
+
+**Plausibility targets reset for the exact PCM.** Median own elasticity (-15, -5), margins (0.07,
+0.25), inside-share elasticity (-1.5, -0.4), minivan diversion to haulers at least 0.15 of inside.
+
+Full analysis kept locally at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v2.keep.md.
