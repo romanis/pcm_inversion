@@ -675,3 +675,25 @@ band because phi_high moves from -0.36 to -2.30 along the profile.
 for clipped products, and the clipped share reported. A clipped product's log-cost residual (log 0.5
 against about 2.5) is the supply block's penalty on the large-sigma_p region. A headline estimate
 with more than 1% of products clipped is flagged.
+
+## 23. With the supply side and a cost floor, the joint objective has an interior minimum in sigma_p (2026-11-17)
+
+Gate at 4,096 draws per market, all three blocks (aggregate, micro, supply), phi re-solved at each
+point, all 21 points inverted, no core.
+
+| lambda | argmin sigma_p of q_fixed | q_fixed at min | own elasticity at min | margin at min | minivan diversion to haulers |
+|---|---|---|---|---|---|
+| 0.5 | 2.5 | 212.7 | -10.4 | 0.18 | 0.22 |
+| 1 | 2.0 | 348.2 | -12.3 | 0.16 | 0.29 |
+| 2 | 2.0 | 1,057.8 | -10.0 | 0.18 | 0.34 |
+
+The two sides bound sigma_p from opposite directions. The aggregate block falls in sigma_p (the
+entry 1 and 21 mechanisms) and the supply block rises steeply past sigma_p of about 2 (lambda = 1:
+8.7 at 1.5, 49.6 at 3, 140.3 at 4), because large markups push costs to the floor. The supply block
+alone is flat on the left (9.4 at 0.5, 8.7 at 1.5), so it fails its own both-ends rule; the total
+passes. Elasticity x sigma_p is 17 to 38, consistent with entry 21's law. Smaller horizontal spreads
+(lambda = 0.5) fit better at this point, so the estimator should be free to move lambda. No product
+was clipped at the minima (share_mc_nonpositive 0 at every point).
+
+The main estimation (extensive, step 1, step 2, post, stability) was launched at 16,384 draws per
+market from the prefit point.
