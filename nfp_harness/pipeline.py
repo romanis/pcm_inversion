@@ -23,9 +23,16 @@ latest one is also copied to the run directory root):
   summary goes to ``post/summary.json``.
 - ``stability``: at most 20 optimizer iterations from the estimate with ``2 nu`` draws per agent and new
   seeds, then the report with the integration block (DESIGN 5.7) and ``spec.headlines`` compared.
+- ``sigma_p_band`` (set identification of one parameter, the fallback when the gate fails): for each value in
+  ``spec.band_values`` of ``spec.band_parameter``, that parameter fixed, fixed-W step 1 (W1) and step 2 (W2 =
+  S^{-1} at the step-1 point, only if step 1 converged) on ``spec.band_moments`` from the prefit point, then
+  ``spec.band_row(pipeline, problem, result, value) -> dict`` at the last estimate. Rows go to
+  ``sigma_p_band/band.csv`` (plus ``spec.band_reference_rows()``, e.g. BLP) and ``band.json``; each point is
+  checkpointed (stages ``band.<value>.step1|step2|row``), so a killed run resumes at the point it was in.
 
 ``--stage all`` runs extensive, step1, step2, post and stability in order; a refused stage is reported and the
-chain continues with what it can do (post and stability fall back to the step-1 estimate). Resume by
+chain continues with what it can do (post and stability fall back to the step-1 estimate). When extensive or
+step1 is refused because the gate failed and the spec names a ``fallback_stage``, that stage runs instead. Resume by
 rerunning the identical command: finished stages are skipped, the stage in progress resumes from its
 last accepted step (``optimizer.minimize``), a profile from its last finished point. A second process
 on the same run directory is refused while the first is alive.
@@ -69,11 +76,11 @@ from .profile import ray_profile
 from .types import OptimizeResult
 from .weighting import Fixed, TwoStep, weight_from_covariance
 
-__all__ = ["Pipeline", "RunConfig", "StageRefused", "STAGES", "CHAIN", "main", "run_dir_path", "run_key_options"]
+__all__ = ["Pipeline", "RunConfig", "StageRefused", "GateFailed", "STAGES", "CHAIN", "main", "run_dir_path", "run_key_options"]
 
 log = logging.getLogger("nfp_harness.pipeline")
 
-STAGES = ("prefit", "gate", "extensive", "step1", "step2", "post", "stability")
+STAGES = ("prefit", "gate", "extensive", "step1", "step2", "post", "stability", "sigma_p_band")
 CHAIN = ("extensive", "step1", "step2", "post", "stability")
 STABILITY_SEED_OFFSET = 100_000
 STABILITY_ITERATIONS = 20
@@ -81,6 +88,10 @@ STABILITY_ITERATIONS = 20
 
 class StageRefused(RuntimeError):
     """A stage's precondition does not hold; the message says which and what to do."""
+
+
+class GateFailed(StageRefused):
+    """step1 (or extensive) is refused because the required gate verdict failed."""
 
 
 @dataclass(frozen=True)
@@ -331,7 +342,7 @@ class Pipeline:
                                f"rerun it with the current spec.")
         tags = (required,) if isinstance(required, str) else tuple(required)
         if not any(v["verdict"].get(t) for t in tags):
-            raise StageRefused(f"the {' and '.join(tags)} gate failed ({gate_dir.parent / 'report.txt'}); the long "
+            raise GateFailed(f"the {' and '.join(tags)} gate failed ({gate_dir.parent / 'report.txt'}); the long "
                                f"estimation does not start (DESIGN 6.4)." + (
                                    f" Fallback: run --stage {self.spec.fallback_stage}."
                                    if getattr(self.spec, "fallback_stage", None) else ""))
@@ -470,6 +481,81 @@ class Pipeline:
         self.rd.save_stage("stability.report", {"estimate_stage": stage, "nu_doubled": nu2})
         return rep
 
+    def sigma_p_band(self) -> list[dict[str, Any]]:
+        """The band stage (module docstring). Returns the rows of band.csv."""
+        spec = self.spec
+        par = str(getattr(spec, "band_parameter", "sigma_p"))
+        values = [float(v) for v in getattr(spec, "band_values")]
+        moments = str(getattr(spec, "band_moments", "all"))
+        out = self.path / "sigma_p_band"
+        out.mkdir(exist_ok=True)
+        theta_w = self.prefit()
+        problem = self.problem(moments)
+        layout = problem.layout
+        if par not in layout.names:
+            raise ValueError(f"band parameter {par!r} is not a parameter: {layout.names}")
+        k = layout.names.index(par)
+        rows: list[dict[str, Any]] = []
+        try:
+            for v in values:
+                tag = f"band.{v:g}"
+                if self.rd.stage_done(f"{tag}.row"):
+                    rows.append(dict(json.loads(str(self.rd.load_stage(f"{tag}.row")["row"]))))
+                    continue
+                log.info("sigma_p_band: %s = %g", par, v)
+                problem.layout = layout.replace({par: {"free": False, "start": v}})
+                theta0 = np.array(theta_w, dtype=float)
+                theta0[k] = v
+                if not self.rd.stage_done(f"{tag}.step1"):
+                    self._warm(problem, "prefit")
+                W1 = self._saved_weight(f"{tag}.W1", lambda: problem.initial_weighting(theta0))
+                r1 = minimize(problem, Fixed(W1), self._options(stage=f"{tag}.step1", theta0=theta0,
+                                                                  max_iterations=self._limit()), checkpoint=self.rd)
+                res, stage = r1, "step1"
+                if r1.convergence.converged and r1.evaluation is not None:
+                    ev1 = r1.evaluation
+
+                    def make_w2(problem: Any = problem, ev1: Any = ev1) -> np.ndarray:
+                        return _block_diagonal_like(weight_from_covariance(problem.covariance(ev1)), ev1.blocks,
+                                                    getattr(problem, "coupled_blocks", ()))
+
+                    W2 = self._saved_weight(f"{tag}.W2", make_w2)
+                    res = minimize(problem, Fixed(W2), self._options(stage=f"{tag}.step2", theta0=r1.theta,
+                                                                       max_iterations=self._limit()), checkpoint=self.rd)
+                    stage = "step2"
+                row: dict[str, Any] = {"label": "", par: v, "estimate_stage": stage,
+                                       "step1_convergence": r1.convergence.value, "convergence": res.convergence.value,
+                                       "q": float(res.q)}
+                if res.evaluation is not None and res.evaluation.ok:
+                    row.update(spec.band_row(self, problem, res, v))
+                else:
+                    row["note"] = "no successful evaluation at the estimate"
+                rows.append(row)
+                self.rd.save_stage(f"{tag}.row", {"row": json.dumps(to_jsonable(row), allow_nan=False)})
+                self._write_band(out, rows, par)
+        finally:
+            problem.layout = layout
+        self._write_band(out, rows, par)
+        return rows
+
+    def _write_band(self, out: pathlib.Path, rows: list[dict[str, Any]], par: str) -> None:
+        import csv
+        import io
+
+        ref = getattr(self.spec, "band_reference_rows", None)
+        all_rows = list(rows) + (list(ref()) if callable(ref) else [])
+        cols: list[str] = []
+        for r in all_rows:
+            cols += [c for c in r if c not in cols]
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=cols, lineterminator="\n")
+        w.writeheader()
+        for r in all_rows:
+            w.writerow({c: r.get(c, "") for c in cols})
+        atomic_write(out / "band.csv", buf.getvalue().encode())
+        atomic_write(out / "band.json", json.dumps(to_jsonable({"parameter": par, "rows": all_rows}), indent=1,
+                                                   allow_nan=False).encode())
+
     def run(self, stage: str) -> int:
         """Run one stage, or the chain for ``all``. Returns the process exit status."""
         stages = CHAIN if stage == "all" else (stage,)
@@ -483,6 +569,12 @@ class Pipeline:
             except StageRefused as exc:
                 log.warning("stage %s refused: %s", s, exc)
                 status = 3
+                fallback = getattr(self.spec, "fallback_stage", None)
+                if stage == "all" and s in ("extensive", "step1") and fallback and isinstance(exc, GateFailed):
+                    log.info("stage %s: the gate failed; running the fallback stage %s", s, fallback)
+                    runtime.heartbeat(self.path, 0, stage=fallback)
+                    getattr(self, fallback)()
+                    log.info("stage %s: done", fallback)
                 if s in ("extensive", "step1") or stage != "all":
                     break
         return status

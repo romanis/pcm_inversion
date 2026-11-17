@@ -91,6 +91,12 @@ GATE_LAMBDAS = (0.5, 1.0, 2.0)
 GATE_SIGMA_P = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
 GATE_SLICE = {"lambda": 1.0}
 HAULERS = ("mi", "sw", "su", "pv")
+BAND_SIGMA_P = (1.0, 1.5, 2.0, 2.5, 3.0)   # fallback: sigma_p set-identified (round-2 analysis, change 8)
+BAND_HEADLINE = 2.0
+BAND_COLUMNS = ("own_elasticity_median", "own_elasticity_times_sigma_p", "share_own_elasticity_below_-20",
+                "margin_median", "inside_share_semi_elasticity", "minivan_cs_gain_1984_fixed_prices_musd",
+                "minivan_cs_gain_1984_musd", "nash_status_1984", "minivan_diversion_haulers_share_of_inside",
+                "car_to_hauler_diversion_over_hauler_inside_share", "nonzero_cross_median")
 PI_STARTS = {"mi": 0.75, "sw": 0.28, "su": 0.20, "pv": 0.41}   # pyblp BLP-micro pi / 0.65 (SPEC 3.2)
 FAM_CAP = 25.0       # $1000: 2 (1 - Phi(66.1 / 25)) = 0.8% of consumers value fam beyond the price range
 BODY_SIGMA_CAP = 25.0
@@ -326,7 +332,14 @@ class PetrinSpec:
                 "draws": "Sobol normals, seed + market position, crossed with agents", "max_step": self.use_max_step,
                 "optimizer": self.optimizer_options,
                 "prefit": {"free": self.prefit_free, "max_iterations": self.prefit_max_iterations},
-                "extensive_free": self.extensive_free, "gate_concentrate_iterations": self.gate_concentrate_iterations}
+                "extensive_free": self.extensive_free, "gate_concentrate_iterations": self.gate_concentrate_iterations,
+                "sig_ref": {k: float(v).hex() for k, v in self.sig_ref.items()},
+                "gate": {"lambdas": list(self.gate_lambdas), "sigma_p": list(self.gate_sigma_p), "slice": GATE_SLICE,
+                         "required": list(self.gate_required), "rules": "q_fixed NotMonotoneDecreasing, "
+                         "q_fixed:supply RisesAtBothEnds, rise 3.84"},
+                "band": {"parameter": self.band_parameter, "values": list(self.band_values),
+                         "moments": self.band_moments, "headline": BAND_HEADLINE},
+                "plausible": self.plausible}
 
     def concentrate_weighting(self, problem: NFPGMMProblem, W: np.ndarray) -> np.ndarray:
         """W for the prefit and the gate's concentrated (phi_mid, phi_high): the two income purchase-rate
@@ -417,6 +430,54 @@ class PetrinSpec:
         return [(self.gate_name, "all", kw)]
 
     gate_required = ("q_fixed", "supply")   # any of them; both failed means the sigma_p_band fallback
+    fallback_stage = "sigma_p_band"
+    band_parameter = "sigma_p"
+    band_values = BAND_SIGMA_P
+    band_moments = "demand"
+
+    def band_row(self, pipe: Any, problem: Any, result: Any, value: float) -> dict[str, Any]:
+        """One row of band.csv at the band estimate with sigma_p fixed at ``value``: elasticities, margins, the
+        market semi-elasticity (inside-share elasticity to a uniform 1% price rise, mean over markets), the 1984
+        minivan gain at fixed and Nash prices, diversion to haulers, q by block and the estimate."""
+        model, theta = problem.model, np.asarray(result.theta, dtype=float)
+        ev = result.evaluation
+        delta = np.asarray(ev.aux["delta"])
+        post = pp.postestimation(model, theta, delta, firm_ids=self.firm_column, groups=self.groups,
+                                 group_other=self.group_other)
+        summ = comparison.summarise(post["products"], post["group_matrix"], post["group_names"])
+        own = np.asarray(post["products"]["own_elasticity"], dtype=float)
+        row: dict[str, Any] = {
+            "label": f"headline (calibration, sigma_p = {BAND_HEADLINE:g})" if value == BAND_HEADLINE else "",
+            "own_elasticity_median": summ["own_elasticity_median"],
+            "own_elasticity_times_sigma_p": -summ["own_elasticity_median"] * value,
+            "share_own_elasticity_below_-20": float(np.mean(own[np.isfinite(own)] < -20.0)),
+            "margin_median": summ["margin_median"],
+            "inside_share_semi_elasticity": float(np.mean([m["inside_share_elasticity"] for m in post["markets"]])),
+            "nonzero_cross_median": summ["nonzero_cross_median"],
+        }
+        row.update({k: v for k, v in self.diversion_stats(summ["group_diversion"]).items()
+                    if k in BAND_COLUMNS})
+        cf, _ = self.counterfactual(model, theta, delta, resolve_prices=True)
+        row.update({k: cf.get(k) for k in ("minivan_cs_gain_1984_fixed_prices_musd", "minivan_cs_gain_1984_musd",
+                                           "nash_status_1984")})
+        row.update({f"q:{b}": float(v) for b, v in (ev.aux.get("q_blocks") or {}).items()})
+        row.update({f"theta:{n}": float(x) for n, x in zip(problem.layout.names, theta)})
+        return row
+
+    def band_reference_rows(self) -> list[dict[str, Any]]:
+        """BLP rows for band.csv from petrin_replication/results/blp_*_summary.json (columns they carry)."""
+        rows = []
+        for label, fname in BLP_SUMMARIES.items():
+            f = HERE / "results" / fname
+            if not f.exists():
+                continue
+            d = json.loads(f.read_text())
+            if d.get("group_diversion"):
+                d.update(self.diversion_stats(d["group_diversion"]))
+            rows.append({"label": label, **{k: d.get(k, "") for k in BAND_COLUMNS
+                                            if k not in ("own_elasticity_times_sigma_p", "share_own_elasticity_below_-20",
+                                                         "inside_share_semi_elasticity")}})
+        return rows
 
     def gate_economics(self, problem: Any, ev: Any) -> dict[str, float]:
         """Per profile point: the aggregate-only CUE objective, elasticities and the law monitor
