@@ -509,3 +509,91 @@ def test_lm_damping_grows_on_negative_rho_and_resets_on_acceptance(monkeypatch: 
         elif rhos[i] < 0:
             assert seen[i + 1] == (1e-3 if seen[i] == 0.0 else pytest.approx(10.0 * seen[i]))
     assert any(r < 0 for r in rhos) and any(m > 0 for m in seen)
+
+
+# ------------------------------------------------------------------------------------------------
+# round 4 (SPEC_ANALYSIS v4 change 9): More scaling, Cauchy stop, sub-noise rejections, terminal probe
+# ------------------------------------------------------------------------------------------------
+
+
+def test_more_scaling_shapes_the_box() -> None:
+    """A stiff and a flat linear residual: with More scaling the first step moves the flat coordinate past the
+    unscaled radius and the stiff one by less; both runs converge to the same point."""
+    def fn(t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return np.array([100.0 * (t[0] - 1.0), 0.1 * (t[1] - 30.0)]), np.diag([100.0, 0.1])
+
+    specs = [spec("x", 0.0), spec("y", 0.0)]
+    base = OptimizerOptions(Delta_0=0.3, Delta_max=5.0)
+    r0 = minimize(ToyProblem(fn, specs), np.eye(2), base)
+    r1 = minimize(ToyProblem(fn, specs), np.eye(2), replace(base, more_scaling=True))
+    for r in (r0, r1):
+        assert r.convergence is ConvergenceClass.CONVERGED
+        np.testing.assert_allclose(r.theta, [1.0, 30.0], atol=1e-6)
+    step0, step1 = r0.history[1].theta, r1.history[1].theta
+    assert abs(step0[0]) <= 0.3 + 1e-12 and abs(step0[1]) <= 0.3 + 1e-12
+    w = np.array([100.0, 0.1]) / math.sqrt(100.0 * 0.1)          # dk / geomean(dk)
+    assert abs(step1[0]) <= 0.3 / w[0] + 1e-9 and abs(step1[1]) > 0.3
+
+
+def test_cauchy_prediction_matches_line_search() -> None:
+    from nfp_harness.optimizer import _cauchy_pred, _Model
+
+    rng = np.random.default_rng(0)
+    A, r = rng.normal(size=(6, 3)), rng.normal(size=6)
+    m = _Model(q=float(r @ r), r=r, A=A, grad=np.zeros(3), pg=np.zeros(3), W=np.eye(6))
+    w = np.array([1.0, 2.0, 0.5])
+    lo, hi = -0.2 / w, 0.2 / w
+    p = -(A.T @ r) / w ** 2
+    t_box = float(np.min(np.where(p > 0, hi / p, lo / p)))
+    ts = np.linspace(0.0, t_box, 200001)
+    best = max(float(r @ r - np.sum((r + A @ (t * p)) ** 2)) for t in ts)
+    assert _cauchy_pred(m, 1.0, w, lo, hi) == pytest.approx(best, rel=1e-9)
+    # a coordinate at its bound whose descent points out of the box does not move
+    k = int(np.argmax(np.abs(p)))
+    lo0, hi0 = lo.copy(), hi.copy()
+    if p[k] < 0:
+        lo0[k] = 0.0
+    else:
+        hi0[k] = 0.0
+    assert _cauchy_pred(m, 1.0, w, lo0, hi0) < _cauchy_pred(m, 1.0, w, lo, hi)
+    # on the Rosenbrock toy the Cauchy stopping test still reaches CONVERGED
+    res = minimize(rosenbrock_problem(), EYE2, OptimizerOptions(cauchy_stop=True))
+    assert res.convergence is ConvergenceClass.CONVERGED and "Cauchy" in res.message
+
+
+def test_sub_noise_rejection_keeps_radius_and_probe_converges() -> None:
+    """The noisy toy under noise_converge: the stage ends CONVERGED_NOISE through the terminal probe, before the
+    round-3 radius collapse, and the radius at the stop is the radius of the last trial."""
+    opts = OptimizerOptions(pg_tol=1e-12, gn_tol=1e-16, max_rejections=40, flat_window=200, noise_probe=1e-5,
+                            noise_converge=True)
+
+    def faint(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:   # the noisy toy with a 100 times smaller wiggle
+        x = float(theta[0])
+        return np.array([x - 1.0 + 3e-5 * np.sin(1e7 * x)]), np.array([[1.0]])
+
+    res = minimize(ToyProblem(faint, [spec("x", 0.0)]), np.eye(1), opts)
+    assert res.convergence is ConvergenceClass.CONVERGED_NOISE
+    # the stop is where the model's predicted decrease (x - 1)^2 falls below 10 x the floor
+    assert "terminal probe" in res.message
+    assert (res.theta[0] - 1.0) ** 2 < 10 * res.noise_floor
+    rejected = [r for r in res.history if not r.accepted]
+    assert all(r.Delta >= 1e-4 for r in rejected)          # never reached the round-3 radius
+    if rejected and abs(rejected[-1].q - res.q) < res.noise_floor:
+        assert res.Delta == rejected[-1].Delta             # a sub-noise rejection does not shrink the radius
+
+
+def test_terminal_probe_restarts_from_a_better_point() -> None:
+    """G misses the y direction (its column is zero), so the Gauss-Newton model cannot move y; the probe along y
+    finds q lower by far more than the floor, the stage restarts there and ends at y = -0.1."""
+    def fn(t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        x, y = float(t[0]), float(t[1])
+        g = np.array([x - 1.0 + 0.003 * np.sin(1e7 * x), 10.0 * (y + 0.1)])
+        return g, np.array([[1.0, 0.0], [0.0, 0.0]])
+
+    opts = OptimizerOptions(pg_tol=1e-12, gn_tol=1e-16, max_rejections=40, flat_window=200, noise_probe=1e-5,
+                            noise_converge=True, probe_steps=(0.01, 0.03, 0.1))
+    res = minimize(ToyProblem(fn, [spec("x", 0.0), spec("y", 0.0)]), np.eye(2), opts)
+    assert res.convergence is ConvergenceClass.CONVERGED_NOISE
+    assert res.theta[1] == pytest.approx(-0.1, abs=1e-12)
+    assert "restarts from a probe" in res.message
+    assert any(math.isnan(r.rho) and r.accepted for r in res.history[1:])   # the restart record

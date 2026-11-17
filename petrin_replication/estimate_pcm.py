@@ -410,8 +410,12 @@ class PetrinSpec:
     # within reach of the warm start and the theta path.
     # Round 3 (analysis 4 (ii)-(iii)): the noise floor from +-1e-5-unit probes at every stage start and the
     # CONVERGED_NOISE stop on it, and Levenberg-Marquardt damping on rejections with rho < 0.
+    # Round 4 (SPEC_ANALYSIS v4 section 4, change 9): More scaling of the trust region, the Cauchy decrease in the
+    # stopping test, no radius shrink on sub-noise rejections, CONVERGED_NOISE when the predicted decrease at the
+    # current radius is below 10 x the floor, after a terminal probe at +-0.01, 0.03, 0.1 units.
     optimizer_options = {"Delta_0": 0.1, "Delta_max": 0.5, "noise_probe": 1e-5, "noise_Delta": 1e-4,
-                         "noise_rejections": 3, "lm_damping": True}
+                         "noise_rejections": 3, "lm_damping": True, "more_scaling": True, "cauchy_stop": True,
+                         "noise_converge": True}
 
     def pcm_spec(self) -> PCMSpec:
         # At a trial phi step from the pre-fit's second point, markets 1990-1993 failed the warm stage (2,500
@@ -442,7 +446,11 @@ class PetrinSpec:
                           "concentrate": list(self.start_concentrate),
                           "weighting": f"first {BODY_MICRO_ROWS} micro rows x 1e4, calibration rows 0"},
                 "convergence": "CONVERGED_NOISE: 3 rejections with Delta < 1e-4 units and |q_trial - q| below the "
-                               "max block change over +-1e-5-unit probes at the stage start; counts as converged",
+                               "max block change over +-1e-5-unit probes at the stage start, or a terminal probe "
+                               "(+-0.01, 0.03, 0.1 units along Gauss-Newton and each coordinate) finding no decrease "
+                               "above 10 x the floor once the predicted decrease at the current radius is below 10 x "
+                               "the floor or a rejection changed q by less than the floor; More-scaled trust region, "
+                               "Cauchy decrease in the stopping test; counts as converged",
                 "phi_by_income_moments": "income rows x 1e4 in prefit and gate concentration",
                 "mc_floor": MC_FLOOR,
                 "layout": [dataclasses.asdict(s) for s in self.layout().specs],

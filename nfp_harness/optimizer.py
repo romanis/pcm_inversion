@@ -66,6 +66,24 @@ class OptimizerOptions:
     step's damping ``lm`` by ``lm_factor`` (starting at ``lm_start``, at most ``lm_max``); an accepted step
     resets it to 0. The step solves ``min ||r + A d||^2 + (mu + lm) ||diag(d_k) d||^2`` in the box; the
     stopping test keeps the undamped Gauss-Newton decrease.
+
+    Round 4 (SPEC_ANALYSIS v4 section 4, change 9), each off by default:
+
+    - ``more_scaling``: the trust region is the box ``|w_k d_k| <= Delta`` with More's scaling
+      ``w_k = dk_k / geomean(dk)``, dk_k = sqrt(diag(G'WG))_k in natural units (the running maximum the
+      ridge already uses), clipped to [1 / ``more_scale_clip``, ``more_scale_clip``]: stiff directions get
+      short steps, flat ones long steps. Delta keeps its meaning on the geometric-mean direction, and the radius
+      updates use ``max_k |w_k d_k|``.
+    - ``cauchy_stop``: the stopping test's decrease is the Cauchy decrease (the model's best decrease along
+      the scaled steepest-descent direction inside the current box) instead of dq_gn, the decrease of the full
+      unconstrained Gauss-Newton step, which on a ridge is not a convergence statistic.
+    - ``noise_converge`` (needs the noise floor of ``noise_probe``): a rejected trial whose q differs from the
+      accepted q by less than the floor carries no information, so the radius is not shrunk; such a rejection,
+      or a trust-region step whose predicted decrease is below ``noise_pred_factor`` (10) x the floor, sends
+      the stage to the terminal probe: q at +-``probe_steps`` (0.01, 0.03, 0.1) natural units along the
+      Gauss-Newton direction (scaled to unit max-norm) and along each free coordinate, without Jacobians. If no
+      probe lowers q by more than ``probe_gain_factor`` (10) x the floor the stage ends CONVERGED_NOISE; else it
+      continues from the best probe (at most ``max_probe_restarts`` times, then the next probe ends it).
     """
 
     Delta_0: float = 0.3  # initial box radius, natural units
@@ -95,6 +113,14 @@ class OptimizerOptions:
     lm_start: float = 1e-3
     lm_factor: float = 10.0
     lm_max: float = 1e8
+    more_scaling: bool = False
+    more_scale_clip: float = 100.0
+    cauchy_stop: bool = False
+    noise_converge: bool = False
+    noise_pred_factor: float = 10.0
+    probe_steps: tuple[float, ...] = (0.01, 0.03, 0.1)
+    probe_gain_factor: float = 10.0
+    max_probe_restarts: int = 5
 
 
 # ------------------------------------------------------------------------------------------------
@@ -337,6 +363,34 @@ def _gn_pred(model: _Model, d: np.ndarray, n: float) -> float:
     return float(n * (model.r @ model.r - np.sum((model.r + model.A @ d) ** 2)))
 
 
+def _more_weights(dk: np.ndarray, clip: float) -> np.ndarray:
+    """More's trust-region scaling w_k = dk_k / geomean(dk), clipped to [1 / clip, clip]."""
+    if not dk.size:
+        return dk
+    pos = dk[dk > 0]
+    ref = float(np.exp(np.mean(np.log(pos)))) if pos.size else 1.0
+    return np.clip(dk / ref, 1.0 / clip, clip)
+
+
+def _cauchy_pred(model: _Model, n: float, w: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> float:
+    """The model decrease at the Cauchy point: the minimum of n ||r + t A p||^2 over t in [0, t_box] along the
+    scaled steepest-descent direction p = -grad / w^2, with components that would leave [lo, hi] at the current
+    point (a bound with zero room) set to zero; t_box keeps t p inside [lo, hi]."""
+    g = model.A.T @ model.r
+    p = -g / (w * w)
+    p[(p < 0) & (lo >= 0)] = 0.0
+    p[(p > 0) & (hi <= 0)] = 0.0
+    Ap = model.A @ p
+    den = float(Ap @ Ap)
+    if not np.any(p) or den <= 0:
+        return 0.0
+    t = -float(model.r @ Ap) / den
+    with np.errstate(divide="ignore", invalid="ignore"):
+        room = np.where(p > 0, hi / p, np.where(p < 0, lo / p, np.inf))
+    t = max(0.0, min(t, float(np.min(room))))
+    return max(0.0, _gn_pred(model, t * p, n))
+
+
 # ------------------------------------------------------------------------------------------------
 # one stage
 # ------------------------------------------------------------------------------------------------
@@ -428,6 +482,45 @@ def _probe_noise(problem: Any, obj: _Objective, theta: np.ndarray, ev: Evaluatio
     return floor, nev
 
 
+def _terminal_probe(problem: Any, obj: _Objective, theta: np.ndarray, q: float, d_gn: np.ndarray,
+                    arr: dict[str, np.ndarray], steps: tuple[float, ...], heartbeat: Any = None, path: Any = None,
+                    stage: str = "", it: int = 0) -> tuple[np.ndarray, float, int, str]:
+    """(best theta, its q, evaluations, summary) over q at theta +- s along the Gauss-Newton direction d_gn
+    (free coordinates, natural units, scaled to unit max-norm) and along each free coordinate, for s in
+    ``steps`` natural units, clipped to the bounds; no Jacobians, the model restored after every probe."""
+    f, units = arr["free"], arr["units"]
+    dirs: list[tuple[str, np.ndarray]] = []
+    if d_gn.size and np.max(np.abs(d_gn)) > 0:
+        dirs.append(("gauss-newton", d_gn / np.max(np.abs(d_gn))))
+    idx = np.nonzero(f)[0]
+    for j, k in enumerate(idx):
+        e = np.zeros(idx.size)
+        e[j] = 1.0
+        dirs.append((str(arr["names"][k]), e))
+    best_theta, best_q, nev, best_what = np.array(theta), q, 0, ""
+    for what, v in dirs:
+        for st in steps:
+            for sgn in (1.0, -1.0):
+                th = np.array(theta, dtype=float)
+                th[f] = np.clip(theta[f] + sgn * st * v * units[f], arr["lower"][f], arr["upper"][f])
+                if np.array_equal(th, theta):
+                    continue
+                e = problem.evaluate(th, False)
+                nev += 1
+                _call_hook(problem, "restore", theta)
+                if heartbeat is not None:
+                    heartbeat(path, it, stage=stage)
+                if not e.ok or not np.all(np.isfinite(e.g)):
+                    continue
+                qp = obj.q(e)
+                if qp < best_q:
+                    best_theta, best_q, best_what = th, qp, f"{what} {sgn * st:+g}"
+    summary = (f"terminal probe: {nev} evaluations at +-{', '.join(f'{x:g}' for x in steps)} units along the "
+               f"Gauss-Newton direction and {idx.size} coordinates; best q {best_q:.10g} "
+               f"({'at ' + best_what if best_what else 'the current point'}), change {best_q - q:+.3e}")
+    return best_theta, best_q, nev, summary
+
+
 def _bound_note(theta: np.ndarray, arr: dict[str, np.ndarray], pg_raw: np.ndarray) -> tuple[bool, str]:
     units, f = arr["units"], arr["free"]
     at_lo = f & (theta <= arr["lower"] + _BOUND_TOL * units)
@@ -445,7 +538,7 @@ def _state(stage: str, mode: str, it: int, acc: int, nev: int, elapsed: float, t
            q_mass: float, dk: np.ndarray | None, kink: int, W: np.ndarray | None, W1: np.ndarray | None,
            history: list[HistoryRecord], problem: Any, q: float, done: bool = False,
            result: dict[str, Any] | None = None, lm: float = 0.0,
-           noise_floor: float = float("nan")) -> dict[str, Any]:
+           noise_floor: float = float("nan"), probe_restarts: int = 0) -> dict[str, Any]:
     from .checkpoint import history_to_state
 
     ps = _call_hook(problem, "state_dict")
@@ -455,7 +548,7 @@ def _state(stage: str, mode: str, it: int, acc: int, nev: int, elapsed: float, t
         "dk": None if dk is None else np.array(dk), "kink_limited_steps": kink, "q": q,
         "W": None if W is None else np.array(W), "W1": None if W1 is None else np.array(W1),
         "history": history_to_state(history), "problem_state": ps, "done": done, "result": result,
-        "lm": float(lm), "noise_floor": float(noise_floor),
+        "lm": float(lm), "noise_floor": float(noise_floor), "probe_restarts": int(probe_restarts),
     }
 
 
@@ -498,6 +591,7 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         kink = int(resume["kink_limited_steps"])
         lm = float(resume.get("lm", 0.0))
         noise_floor = float(resume.get("noise_floor", float("nan")))
+        probe_restarts = int(resume.get("probe_restarts", 0))
         history = history_from_state(resume["history"])
         if resume.get("problem_state") is not None:
             _call_hook(problem, "load_state_dict", resume["problem_state"])
@@ -505,7 +599,7 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         log.info("stage %s: resumed at iteration %d, accepted step %d", stage, it, acc)
     else:
         theta = np.clip(np.array(theta0, dtype=float), lower, upper)
-        it = acc = nev = kink = 0
+        it = acc = nev = kink = probe_restarts = 0
         lm, noise_floor = 0.0, float("nan")
         prior = 0.0
         Delta, q_mass, dk = options.Delta_0, options.q_mass_0, None
@@ -551,6 +645,12 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
                                history, problem, q, lm=lm, noise_floor=noise_floor))
 
     model: _Model | None = None
+    probe_due = False      # a sub-noise rejection: the next step goes to the terminal probe
+    probe_notes: list[str] = []
+
+    def noise_mode() -> bool:
+        return bool(options.noise_converge) and math.isfinite(noise_floor) and noise_floor > 0
+
     while True:
         if model is None:
             model = obj.model(ev, theta)
@@ -565,13 +665,18 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         u_lo = (lower[f] - theta[f]) / units[f]
         u_hi = (upper[f] - theta[f]) / units[f]
         n = _n_of(problem, ev)
+        w = _more_weights(dk, options.more_scale_clip) if options.more_scaling else np.ones(int(f.sum()))
+        rad = Delta / w   # per-coordinate trust radius in natural units
 
         # stopping test at the accepted point
         pg = float(np.max(np.abs(model.pg))) if model.pg.size else 0.0
         if f.any():
             d_gn = _box_lsq(model.A, model.r, dk, mu, u_lo, u_hi)
             dq_gn = max(0.0, _gn_pred(model, d_gn, n))
+            if options.cauchy_stop:   # the decrease the model offers at the current radius
+                dq_gn = _cauchy_pred(model, n, w, np.maximum(-rad, u_lo), np.minimum(rad, u_hi))
         else:
+            d_gn = np.zeros(0)
             dq_gn = 0.0
         at_cap, _ = _bound_note(theta, arr, model.grad)
         limit = None
@@ -589,7 +694,49 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
                            noise_floor=noise_floor, lm=lm)
 
         # trust-region step in natural units
-        d = _box_lsq(model.A, model.r, dk, mu + lm, np.maximum(-Delta, u_lo), np.minimum(Delta, u_hi))
+        d = _box_lsq(model.A, model.r, dk, mu + lm, np.maximum(-rad, u_lo), np.minimum(rad, u_hi))
+
+        # round 4: the terminal probe when the model has nothing left to offer above the noise floor
+        if noise_mode() and (probe_due or _gn_pred(model, d, n) < options.noise_pred_factor * noise_floor):
+            why = ("a rejection changed q by less than the noise floor" if probe_due else
+                   f"the predicted decrease at radius {Delta:.2e} is below {options.noise_pred_factor:g} x the "
+                   f"noise floor")
+            probe_due = False
+            pt, pq, n_probe, summary = _terminal_probe(problem, obj, theta, q, d_gn, arr, tuple(options.probe_steps),
+                                                       heartbeat, None if checkpoint is None else checkpoint.path,
+                                                       stage, it)
+            nev += n_probe
+            log.info("stage %s it %d: %s; %s", stage, it, why, summary)
+            probe_notes.append(f"{why}; {summary}")
+            gain = q - pq
+            restart = gain > options.probe_gain_factor * noise_floor and probe_restarts < options.max_probe_restarts
+            ev_p = problem.evaluate(pt, True) if restart else None
+            if ev_p is not None:
+                nev += 1
+                it += 1
+            if ev_p is None or not ev_p.ok or ev_p.G is None:
+                if ev_p is not None:
+                    _call_hook(problem, "restore", theta)
+                return _finish(problem, ConvergenceClass.CONVERGED_NOISE, theta, ev, q, model, history, acc, nev,
+                               elapsed(), Delta, q_mass, kink, stage, mode, W, " ".join(probe_notes), options,
+                               checkpoint, arr, it, dk, W1, pg=pg, dq_gn=dq_gn, noise_floor=noise_floor, lm=lm,
+                               probe_restarts=probe_restarts)
+            # a probe found more than the floor: continue from it
+            _call_hook(problem, "commit", pt)
+            probe_restarts += 1
+            theta, ev, q = pt, ev_p, obj.q(ev_p)
+            acc += 1
+            rec = _record(stage, it, True, q, ev, obj, float("nan"), Delta, 1.0, EvalStatus.OK, 0.0, theta)
+            history.append(rec)
+            if checkpoint is not None:
+                checkpoint.append_history(rec)
+                checkpoint.save(_state(stage, mode, it, acc, nev, elapsed(), theta, Delta, q_mass, dk, kink, W, W1,
+                                       history, problem, q, lm=lm, noise_floor=noise_floor,
+                                       probe_restarts=probe_restarts))
+            log.info("stage %s it %d: restart %d from the best probe, q %.10g (gain %.3e)", stage, it,
+                     probe_restarts, q, gain)
+            model = None
+            continue
         tau_cap, pred_mass = 1.0, float("nan")
         dtheta = np.zeros_like(theta)
         dtheta[f] = d * units[f]
@@ -598,7 +745,7 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
             tau_cap, pred_mass = _limit_from(lim, q_mass)
             if tau_cap < 1.0:
                 d = tau_cap * d
-        dinf = float(np.max(np.abs(d))) if d.size else 0.0
+        dinf = float(np.max(np.abs(w * d))) if d.size else 0.0   # scaled step length (w = 1 without scaling)
         if dinf == 0.0:
             log.info("stage %s: zero step at iteration %d (Delta %.3e); stalled", stage, it, Delta)
             Delta = 0.0
@@ -640,7 +787,10 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
                 lm = 0.0
             elif rho < 0:
                 lm = options.lm_start if lm <= 0 else min(lm * options.lm_factor, options.lm_max)
-        if rho < 0.25:
+        sub_noise = (noise_mode() and not accept and abs(q_trial - q) < noise_floor)
+        if sub_noise:
+            probe_due = True   # no information in this rejection: keep the radius, probe next
+        elif rho < 0.25:
             Delta = 0.25 * dinf
         elif rho > 0.75 and dinf >= 0.9 * Delta:
             Delta = min(2.0 * Delta, options.Delta_max)
@@ -662,7 +812,8 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
             model = None
             if checkpoint is not None:
                 checkpoint.save(_state(stage, mode, it, acc, nev, elapsed(), theta, Delta, q_mass, dk, kink, W, W1,
-                                       history, problem, q, lm=lm, noise_floor=noise_floor))
+                                       history, problem, q, lm=lm, noise_floor=noise_floor,
+                                       probe_restarts=probe_restarts))
         else:
             _call_hook(problem, "restore", theta)
         log.info("stage %s it %d: %s q %.10g rho %.3f Delta %.3e tau_cap %.3g lm %.1e", stage, it,
@@ -674,17 +825,22 @@ def _finish(problem: Any, cls: ConvergenceClass, theta: np.ndarray, ev: Evaluati
             q_mass: float, kink: int, stage: str, mode: str, W: np.ndarray | None, msg: str,
             options: OptimizerOptions, checkpoint: Any, arr: dict[str, np.ndarray], it: int, dk: np.ndarray | None,
             W1: np.ndarray | None, pg: float = float("nan"), dq_gn: float = float("nan"),
-            noise_floor: float = float("nan"), lm: float = 0.0) -> OptimizeResult:
+            noise_floor: float = float("nan"), lm: float = 0.0, probe_restarts: int = 0) -> OptimizeResult:
     pg_thr, gn_thr = thresholds(q, options)
     notes = [msg] if msg else []
     if model is not None:
         _, bound_msg = _bound_note(theta, arr, model.grad)
         if bound_msg:
             notes.append(bound_msg)
-    if cls is ConvergenceClass.CONVERGED_NOISE:
+    if cls is ConvergenceClass.CONVERGED_NOISE and msg:
+        notes.append(f"Stopped on the noise floor {noise_floor:.3e} after the terminal probe found no decrease above "
+                     f"{options.probe_gain_factor:g} x the floor ({probe_restarts} restarts from a probe).")
+    elif cls is ConvergenceClass.CONVERGED_NOISE:
         notes.append(f"Stopped on the noise floor: the last {options.noise_rejections} rejections, tried with a trust "
                      f"radius below {options.noise_Delta:g} natural units, changed q by less than the floor "
                      f"{noise_floor:.3e} measured at the stage start.")
+    if options.cauchy_stop:
+        notes.append("The predicted decrease in the stopping test is the Cauchy decrease at the current radius.")
     if cls is ConvergenceClass.STALLED:
         notes.append(f"Stopped: trust radius {Delta:.2e} or {options.max_rejections} consecutive rejections.")
     elif cls is ConvergenceClass.FLAT_PROGRESS:
@@ -701,7 +857,8 @@ def _finish(problem: Any, cls: ConvergenceClass, theta: np.ndarray, ev: Evaluati
         summary = {"convergence": cls.value, "q": q, "projected_gradient": pg, "pg_tol": pg_thr, "gn_decrease": dq_gn,
                    "gn_tol": gn_thr, "wall_seconds": wall, "message": res.message, "noise_floor": noise_floor}
         state = _state(stage, mode, it, acc, nev, wall, theta, Delta, q_mass, dk, kink, res.W, W1, history,
-                       problem, q, done=True, result=summary, lm=lm, noise_floor=noise_floor)
+                       problem, q, done=True, result=summary, lm=lm, noise_floor=noise_floor,
+                       probe_restarts=probe_restarts)
         checkpoint.save_stage(stage, state)
         checkpoint.save(state)
     return res
