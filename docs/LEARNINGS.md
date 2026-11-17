@@ -566,3 +566,30 @@ demand-only BLP fit with the PCM's moments gives own elasticity -1.97, margin 0.
 of $1,046M at fixed prices, so demand-only BLP is itself fragile on these moments.
 
 Full analysis kept locally (untracked) at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v1.md.
+
+## 20. With phi matched to the income purchase rates, the aggregate objective still prefers ever larger sigma_p, and elasticities stay implausible (2026-11-17)
+
+**Run.** Spec of entry 19 at 4,096 draws per market, concentrated sigma_p ray profile: lambda in
+{0.5, 1, 2} times the reference spreads, sigma_p in {0.5, ..., 2.5}, (phi_mid, phi_high) re-solved
+at every point with the income rows up-weighted so both purchase rates are matched. All 18 points
+inverted (entry 18's failures are gone).
+
+**Result.** q_fixed falls monotonically in sigma_p in every slice. At lambda = 1: q_fixed 1,607,
+645, 360, 221, 192, 183 for sigma_p 0.5 to 2.5. Its aggregate block falls 1,498 to 76 while sd(xi)
+falls 1.53 to 0.59, so it tracks sd(xi)^2 (the entry 1 mechanism). The non-income micro block barely
+moves (109 to 107 at lambda = 1; at lambda = 0.5 it bottoms at sigma_p = 1.5 and rises 171 to 179).
+The scale-free CUE aggregate block is almost flat in sigma_p (191 to 186). So the aggregate moments
+carry almost no information on sigma_p beyond the size of xi, and the micro moments that exist do not
+pin it.
+
+**Economics along the profile.** Median own elasticity -88 at sigma_p = 0.5 and -12 at 2.5
+(lambda = 1); nonzero cross-elasticities per product 14 to 8; diversion leaving the body type
+essentially zero (0.004 to 0); inside-share semi-elasticity to a 1% price rise -2.0 to -0.4. Larger
+sigma_p buys lower own elasticities only by spreading alpha so widely that substitution becomes
+vertical within body types and nothing crosses them. Larger lambda (more horizontal spread) lowers
+own elasticities too (-14 at lambda = 2, sigma_p = 2) but raises q_fixed.
+
+**Sargan form.** The same profile with the aggregate block in Sargan form (entry 19 fallback, run
+petrin_pcm_e1559c0b2b) is also monotone decreasing: at lambda = 1, q_fixed 753, 639, 515, 381, 337,
+322. So the preference for large sigma_p is not only the scale of xi: R^2 of xi on Z also falls as
+sigma_p rises.
