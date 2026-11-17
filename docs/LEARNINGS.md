@@ -649,3 +649,29 @@ matching BLP's market semi-elasticity gives sigma_p near 0.3.
 0.25), inside-share elasticity (-1.5, -0.4), minivan diversion to haulers at least 0.15 of inside.
 
 Full analysis kept locally at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v2.keep.md.
+
+## 22. Supply block: Nash markups above price at large sigma_p; FOC costs clipped at a floor (2026-11-17)
+
+**Finding (supply check, nu = 4, lambda = 1, phi concentrated on demand moments).** The supply
+block could not be evaluated with a hard mc > 0 guard for sigma_p >= 1. Products with |own
+elasticity| < 1 get a Nash markup larger than their price: 1 product at sigma_p = 1 (1989, firm 19,
+$4.8k, own elasticity -0.68), 2 at sigma_p = 2, 94 at 3 and 336 at 4, mostly cars.
+
+| sigma_p | q demand (agg + micro) | supply q, mc <= 0 dropped | mc <= 0 | median own elasticity | elasticity x sigma_p | median margin | market semi-elasticity |
+|---|---|---|---|---|---|---|---|
+| 0.5 | 1,901 | 9.4 | 0 | -51.1 | 25.5 | 0.035 | -1.25 |
+| 1 | 548 | 8.7 | 1 | -27.9 | 27.9 | 0.064 | -0.80 |
+| 2 | 337 | 11.2 | 2 | -12.3 | 24.7 | 0.158 | -0.42 |
+| 3 | 326 | 26.4 | 94 | -7.3 | 21.8 | 0.273 | -0.27 |
+| 4 | 335 | 40.5 | 336 | -4.8 | 19.2 | 0.405 | -0.20 |
+
+With per-sd spreads (entry 21) and phi re-solved on demand moments, the demand objective has an
+interior minimum near sigma_p = 3. The supply diagnostic is lowest near sigma_p = 1 and rises
+steeply from 3, as markups grow and many products lose a positive cost. Minivan diversion to
+haulers is 0.25 to 0.30 of inside diversion. Elasticity x sigma_p is 19 to 28 here, below entry 21's
+band because phi_high moves from -0.36 to -2.30 along the profile.
+
+**Treatment.** FOC costs are clipped at mc = $500, as pyblp's costs_bounds does, with zero derivative
+for clipped products, and the clipped share reported. A clipped product's log-cost residual (log 0.5
+against about 2.5) is the supply block's penalty on the large-sigma_p region. A headline estimate
+with more than 1% of products clipped is flagged.
