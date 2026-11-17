@@ -4,6 +4,11 @@ project (PCM_inversion)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
+# Release keeps the -O3 code and adds full debug info, so a crash in a long run leaves a core dump
+# with symbols, source lines and stacks (gdb unwinds -O3 frames from the DWARF call-frame info).
+# -g does not change the generated code. Frame pointers are not added: they cost 3.4% on the share
+# kernel (pcm_events perf test, 16 threads: 0.0474 s -> 0.0490 s).
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -g" CACHE STRING "" FORCE)
 # set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR})

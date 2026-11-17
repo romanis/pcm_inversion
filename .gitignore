@@ -22,3 +22,5 @@ nevo_replication/*
 # Estimation harness: compiled module and pytest cache
 nfp_harness/_native/*.so
 .pytest_cache
+core
+core.*

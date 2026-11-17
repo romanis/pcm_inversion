@@ -43,6 +43,8 @@ find_package(OpenMP)
 # create python library if pybind11 is found
 if(pybind11_FOUND)
 
+    # pybind11 strips Release modules after linking; keep the symbols for core-dump debugging.
+    set(CMAKE_STRIP "")
     pybind11_add_module(python_market_share "${ROOT}/market_share/pcm_market_share.cpp" "${ROOT}/python_bindings/market_share_python.cpp")
     target_include_directories(python_market_share PUBLIC ${Python_INCLUDE_DIRS})
     target_include_directories(python_market_share PUBLIC ${Boost_INCLUDE_DIR} )

@@ -461,7 +461,8 @@ def main(spec: Any, argv: Sequence[str] | None = None, default_nu: int = 16,
         return 5
     if args.detach:
         child_argv = [sys.argv[0]] + [a for a in argv if a not in ("--detach", "--new-run")]
-        runtime.detach(pipe.path / "log.txt", argv=child_argv)
+        (pipe.path / "cores").mkdir(parents=True, exist_ok=True)
+        runtime.detach(pipe.path / "log.txt", argv=child_argv, cwd=pipe.path / "cores")
     logger = runtime.setup_logging(pipe.path / "log.txt")
     if os.environ.get(runtime.DETACHED_ENV) != "1" and not any(
             isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in logger.handlers):
@@ -469,6 +470,9 @@ def main(spec: Any, argv: Sequence[str] | None = None, default_nu: int = 16,
         h.setFormatter(logging.Formatter("%(asctime)s %(name)s: %(message)s", "%H:%M:%S"))
         logger.addHandler(h)
     runtime.check_environment()
+    crash = runtime.enable_crash_dumps(pipe.path)
+    log.info("crash dumps: core limit %s, core file %s, Python stacks in %s", crash["core_limit"],
+             crash["expected_core"], crash["faulthandler"])
     log.info("command: %s", " ".join([sys.executable, sys.argv[0], *argv]))
     try:
         return pipe.run(args.stage)
