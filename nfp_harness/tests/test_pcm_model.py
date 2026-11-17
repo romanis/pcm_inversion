@@ -64,20 +64,22 @@ def _instruments(products: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarra
 
 
 def make_synthetic(n_markets: int, J0: int, A: int, nu_per_agent: int, seed: int = 7,
-                   theta: np.ndarray = THETA_TRUE, min_share: float = 1e-4) -> dict[str, Any]:
+                   theta: np.ndarray = THETA_TRUE, min_share: float = 1e-4, price_shift: float = 0.0,
+                   delta_shift: float = 0.0) -> dict[str, Any]:
     """Products and agents frames (dicts of arrays) whose shares the model generated at theta.
 
     Products sit at random angles on the unit circle in (x1, x2), so with taste spreads on both
     columns most of them are some consumer's favourite. Each market starts with J0 candidates;
     products whose share falls below ``min_share`` (never on a frontier, or almost) are dropped and
-    xi re-orthogonalised to the new Z until every share is above it.
+    xi re-orthogonalised to the new Z until every share is above it. ``price_shift`` adds a constant to
+    every price and ``delta_shift`` to every delta (the supply tests use them to get positive Nash costs).
     """
     rng = np.random.default_rng(seed)
     n = n_markets * J0
     mk = np.repeat(np.arange(1, n_markets + 1), J0)[rng.permutation(n)]  # rows unsorted: the adapter sorts
     a = rng.uniform(0.0, 2.0 * np.pi, n)
     x1, x2 = np.cos(a), np.sin(a)
-    p = break_price_ties(2.0 + rng.uniform(0.0, 4.0, n) + (1.0 + x1), mk, 0.01)
+    p = break_price_ties(2.0 + price_shift + rng.uniform(0.0, 4.0, n) + (1.0 + x1), mk, 0.01)
     e = rng.normal(0.0, 0.3, n)
     am = np.repeat(np.arange(1, n_markets + 1), A)
     inc = rng.normal(0.0, 0.5, am.size)
@@ -89,7 +91,7 @@ def make_synthetic(n_markets: int, J0: int, A: int, nu_per_agent: int, seed: int
                     "top": (x1[keep] > 0).astype(float), "shares": np.full(keep.size, 0.01)}
         X1, Z = _instruments(products)
         xi = e[keep] - Z @ np.linalg.lstsq(Z, e[keep], rcond=None)[0]
-        delta = X1 @ BETA_TRUE + xi
+        delta = X1 @ BETA_TRUE + delta_shift + xi
         data = {"products": products, "agents": agents}
         model = PCMModel(PCMSpec(CHARS), data, synthetic_layout(), nu_per_agent, seed, total_threads=4)
         th, ph, sp = model.kernel_params(theta)

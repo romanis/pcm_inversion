@@ -21,7 +21,7 @@ Kernel output contract for micro parts (what an ``InnerModel`` puts in ``InnerSo
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -37,7 +37,7 @@ from .types import (
 from .weighting import cluster_sums, clustered_covariance
 
 __all__ = ["Moment", "IVMoments", "SarganIVMoments", "MicroDataset", "MicroPart", "RatioMicroMoment", "MICRO_OUTPUTS",
-           "product_part"]
+           "product_part", "SupplyMoments", "SupplyDomainError"]
 
 #: A micro part, a pair (agent weight h, product weight v with outside value v0); see ``types.MicroPartRequest``.
 MicroPart = MicroPartRequest
@@ -365,3 +365,272 @@ class RatioMicroMoment:
         grad = self.ratio_gradient(v)
         V = grad @ self.part_covariance(sol) @ grad.T
         return 0.5 * (V + V.T)
+
+
+class SupplyDomainError(ValueError):
+    """The supply block cannot be evaluated at this point: an ownership-weighted ds/dp is singular, or some
+    marginal cost is not positive, so log mc does not exist. ``NFPGMMProblem.evaluate`` turns it into status
+    NUMERICAL with this message as the note. ``info`` carries the diagnostics computed before the failure."""
+
+    def __init__(self, message: str, info: dict | None = None) -> None:
+        super().__init__(message)
+        self.info = dict(info or {})
+
+
+class SupplyMoments:
+    """Log-cost supply moments under multi-product Bertrand-Nash pricing (Petrin 2002; pyblp ``costs_type="log"``).
+
+    Per market, markups come from the model's own price Jacobian: ``markup = -(Omega * (ds/dp)')^{-1} s`` with
+    Omega the ownership matrix of ``firm_ids`` and s the data shares (``pcm_post.nash_markups``); ``mc = p -
+    markup``. Then ``log mc = w gamma + omega`` with ``w`` the (n, K_s) cost basis, and the moments are
+    ``g_s = Z_s' omega / n``. The cost coefficients gamma are concentrated out by GMM with the supply block of W
+    (``set_weighting``; the default ``(Z_s'Z_s/n)^{-1}`` makes it 2SLS), so ``omega = M_s log mc``. When W
+    couples the aggregate and supply rows, ``NFPGMMProblem`` concentrates (beta, gamma) jointly instead and
+    uses ``log_costs`` directly.
+
+    The evaluation fails (``SupplyDomainError``, status NUMERICAL) when a market's ownership-weighted ds/dp has
+    reciprocal condition number below ``rcond_min`` or any mc <= 0.
+
+    Jacobian. ``y = log mc`` depends on theta through ds/dp at (theta, delta(theta)). Its total derivative is
+    taken by central differences at fixed inversions: market t is evaluated at ``(theta + h e_k, delta_t + h
+    D_t[:, k])`` and ``(theta - h e_k, delta_t - h D_t[:, k])`` with ``pcm_kernel.evaluate_market`` (no
+    re-inversion; the shares there differ from the data by O(h^2)). ds/dp jumps where a draw's frontier
+    changes, so h starts at ``fd_step * max(1, |theta_k|)`` and is divided by 10, at most ``fd_shrink``
+    times, until the frontier signatures at both ends equal the base point's; a column still crossing a
+    frontier change is counted in ``info["fd_kink_columns"]``. ``MomentBlock.d_theta`` holds this total
+    derivative and ``d_delta`` is None: the block never needs D from the framework.
+
+    ``bind(model, P)`` attaches the PCM model (``kernel_market``, ``kernel_params``, ``markets``,
+    ``products``, ``total_threads``); ``NFPGMMProblem`` does it. The block requests ``ds_dp`` from every
+    solve. Not for CUE.
+    """
+
+    name: str
+    is_aggregate = False
+    is_micro = False
+    is_supply = True
+
+    def __init__(self, Z: np.ndarray, w: np.ndarray, firm_ids: np.ndarray, clustering_ids: np.ndarray | None = None,
+                 name: str = "supply", w_names: Sequence[str] | None = None, rcond_min: float = 1e-12,
+                 fd_step: float = 1e-6, fd_shrink: int = 2) -> None:
+        """SupplyMoments(Z, w, firm_ids, clustering_ids=None, name="supply", w_names=None, rcond_min=1e-12,
+        fd_step=1e-6, fd_shrink=2). Z = [w, excluded supply instruments] (n, k_s), w the cost basis (n, K_s)."""
+        from .linear import IdentificationError, matrix_rank
+
+        self.Z = np.asarray(Z, dtype=float)
+        self.w = np.asarray(w, dtype=float)
+        if self.Z.ndim != 2 or self.w.ndim != 2 or self.Z.shape[0] != self.w.shape[0]:
+            raise ValueError(f"Z {self.Z.shape} and w {self.w.shape} must be 2-d with the same number of rows")
+        if not (np.all(np.isfinite(self.Z)) and np.all(np.isfinite(self.w))):
+            raise ValueError("supply instruments and cost basis must be finite")
+        self.n, self.k = self.Z.shape
+        self.K = self.w.shape[1]
+        self.names = tuple(w_names) if w_names is not None else tuple(f"gamma{k}" for k in range(self.K))
+        if len(self.names) != self.K:
+            raise ValueError(f"{len(self.names)} names for {self.K} cost coefficients")
+        if matrix_rank(self.Z) < self.k:
+            raise IdentificationError(f"supply instruments have rank {matrix_rank(self.Z)} < {self.k} columns")
+        if matrix_rank(self.Z.T @ self.w) < self.K:
+            raise IdentificationError("rank(Z_s' w) < K_s: the supply moments do not identify gamma; Z_s must "
+                                      "contain the cost basis")
+        self.firm_ids = np.asarray(firm_ids).ravel()
+        if self.firm_ids.size != self.n:
+            raise ValueError(f"{self.firm_ids.size} firm ids for {self.n} products")
+        self.clustering_ids = None if clustering_ids is None else np.asarray(clustering_ids).ravel()
+        if self.clustering_ids is not None and self.clustering_ids.size != self.n:
+            raise ValueError(f"{self.clustering_ids.size} clustering ids for {self.n} products")
+        self.name = name
+        self.rcond_min = float(rcond_min)
+        self.fd_step = float(fd_step)
+        self.fd_shrink = int(fd_shrink)
+        self.ZtW = self.Z.T @ self.w / self.n  # (k, K) = -d g_s / d gamma
+        self.model: object | None = None
+        self.P: int | None = None
+        self.s_data: np.ndarray | None = None
+        self._cache: tuple[InnerSolution, bool, np.ndarray, np.ndarray | None, dict] | None = None
+        self.set_weighting(np.linalg.inv(self.Z.T @ self.Z / self.n))
+
+    # ------------------------------------------------------------------ setup
+
+    def bind(self, model: object, P: int) -> None:
+        """Attach the inner model (a ``PCMModel``) and the number of nonlinear parameters."""
+        self.model = model
+        self.P = int(P)
+        if int(getattr(model, "n_products")) != self.n:
+            raise ValueError(f"supply block has {self.n} rows, model has {getattr(model, 'n_products')} products")
+        spec = getattr(model, "spec")
+        self.s_data = np.asarray(getattr(model, "products")[spec.share_column], dtype=float).ravel()
+
+    def set_weighting(self, W_ss: np.ndarray) -> None:
+        """Supply block of W: gamma = (C'W_ss C)^{-1} C'W_ss Z_s' y / n with C = Z_s'w/n."""
+        W_ss = np.asarray(W_ss, dtype=float)
+        if W_ss.shape != (self.k, self.k):
+            raise ValueError(f"W_ss has shape {W_ss.shape}, expected {(self.k, self.k)}")
+        self.W_ss = 0.5 * (W_ss + W_ss.T)
+        B = self.ZtW.T @ self.W_ss
+        self._Pg = np.linalg.solve(B @ self.ZtW, B @ self.Z.T / self.n)  # (K, n): gamma = Pg y
+
+    def requests(self) -> KernelRequests:
+        """requests() -> KernelRequests(price_derivatives=True): markups need ds/dp."""
+        return KernelRequests(price_derivatives=True)
+
+    def covariance_requests(self) -> KernelRequests:
+        return self.requests()
+
+    # ------------------------------------------------------------------ log marginal costs
+
+    def _market_costs(self, t: int, s: np.ndarray, p: np.ndarray, firms: np.ndarray, ds_dp: np.ndarray
+                      ) -> tuple[np.ndarray, dict]:
+        from .models.pcm_post import nash_markups
+
+        nash = nash_markups(s, ds_dp, firms, self.rcond_min)
+        mc = p - nash["markup"]
+        return mc, nash
+
+    def log_costs(self, sol: InnerSolution, need_jacobian: bool) -> tuple[np.ndarray, np.ndarray | None, dict]:
+        """log_costs(sol, need_jacobian) -> (y (n,) = log mc, dy (n, P) total derivative or None, info).
+
+        Raises ``SupplyDomainError`` at a singular ownership Jacobian or mc <= 0. ``info``: per-market rcond
+        minimum ``nash_rcond_min``, ``margin_median``, ``share_mc_nonpositive``, ``markup``/``mc`` (n,) and the
+        FD bookkeeping. Cached for the last solution.
+        """
+        if self.model is None or self.P is None or self.s_data is None:
+            raise RuntimeError(f"{self.name}: bind(model, P) was not called")
+        c = self._cache
+        if c is not None and c[0] is sol and (c[1] or not need_jacobian):
+            return c[2], c[3], c[4]
+        model: Any = self.model
+        ds_list = sol.outputs.get("ds_dp")
+        if not isinstance(ds_list, list) or len(ds_list) != len(model.markets):
+            raise KeyError(f"{self.name}: the solution carries no per-market ds_dp (request price_derivatives)")
+        markup = np.full(self.n, np.nan)
+        mc_all = np.full(self.n, np.nan)
+        rconds = []
+        singular = []
+        for t, m in enumerate(model.markets):
+            rows = np.asarray(m.rows)
+            p = np.asarray(model.kernel_market(t).p, dtype=float)
+            mc, nash = self._market_costs(t, self.s_data[rows], p, self.firm_ids[rows], np.asarray(ds_list[t]))
+            rconds.append(float(nash["rcond"]))
+            if nash["status"] != "ok":
+                singular.append(f"{m.market_id} (rcond {nash['rcond']:.2e})")
+            markup[rows] = nash["markup"]
+            mc_all[rows] = mc
+        bad = ~(mc_all > 0)
+        p_all = np.empty(self.n)
+        for t, m in enumerate(model.markets):
+            p_all[np.asarray(m.rows)] = np.asarray(model.kernel_market(t).p, dtype=float)
+        info: dict = {"nash_rcond_min": float(min(rconds)) if rconds else float("nan"),
+                      "share_mc_nonpositive": float(np.mean(bad)), "markup": markup, "mc": mc_all,
+                      "margin_median": float(np.nanmedian(markup / p_all)) if np.isfinite(markup).any() else float("nan")}
+        if singular:
+            raise SupplyDomainError(f"{self.name}: ownership-weighted ds/dp below rcond {self.rcond_min:.0e} in "
+                                    f"markets {', '.join(singular)}; no Nash markups", info)
+        if bad.any():
+            ids = sorted({str(model.markets[t].market_id) for t, m in enumerate(model.markets)
+                          if bad[np.asarray(m.rows)].any()})
+            raise SupplyDomainError(f"{self.name}: {int(bad.sum())} of {self.n} products have mc <= 0 (share "
+                                    f"{info['share_mc_nonpositive']:.4f}, markets {', '.join(ids)}); log mc does "
+                                    f"not exist", info)
+        y = np.log(mc_all)
+        dy = self._jacobian(sol, info) if need_jacobian else None
+        self._cache = (sol, need_jacobian, y, dy, info)
+        return y, dy, info
+
+    def _jacobian(self, sol: InnerSolution, info: dict) -> np.ndarray:
+        """(n, P) total derivative of log mc, central differences at fixed inversions (class docstring)."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from ._native import pcm_kernel
+        from .models.pcm import allocate_threads
+
+        model: Any = self.model
+        assert self.P is not None and self.s_data is not None
+        if sol.D is None:
+            raise ValueError(f"{self.name}: the supply Jacobian needs D (solve with need_jacobian=True)")
+        theta = np.asarray(sol.outputs["theta"], dtype=float)
+        delta = np.asarray(sol.delta, dtype=float)
+        T = len(model.markets)
+        wts = np.array([float(np.size(m.rows)) ** 2 * np.size(model.kernel_market(t).weights)
+                        for t, m in enumerate(model.markets)])
+        thr = allocate_threads(wts, int(getattr(model, "total_threads", 1)))
+
+        def one(t: int) -> tuple[np.ndarray, int, int]:
+            m = model.markets[t]
+            rows = np.asarray(m.rows)
+            km = model.kernel_market(t)
+            p = np.asarray(km.p, dtype=float)
+            s, firms = self.s_data[rows], self.firm_ids[rows]
+            d0 = delta[rows]
+            D_t = np.asarray(sol.D[t], dtype=float)
+            nt = int(thr[t])
+            sig0 = np.asarray(pcm_kernel.frontier_signature(d0, km, *model.kernel_params(theta), nt))
+            out = np.zeros((rows.size, self.P))
+            kinks = shrinks = 0
+            for k in range(self.P):
+                h = self.fd_step * max(1.0, abs(float(theta[k])))
+                for attempt in range(self.fd_shrink + 1):
+                    ys, same = [], True
+                    for sgn in (1.0, -1.0):
+                        th = theta.copy()
+                        th[k] += sgn * h
+                        dl = d0 + sgn * h * D_t[:, k]
+                        kp = model.kernel_params(th)
+                        r = pcm_kernel.evaluate_market(dl, km, *kp, derivatives=False, price_derivatives=True,
+                                                       n_threads=nt)
+                        mc, _ = self._market_costs(t, s, p, firms, np.asarray(r["ds_dp"]))
+                        with np.errstate(invalid="ignore", divide="ignore"):
+                            ys.append(np.log(mc))
+                        if attempt < self.fd_shrink:
+                            same &= bool(np.array_equal(np.asarray(pcm_kernel.frontier_signature(dl, km, *kp, nt)),
+                                                        sig0))
+                    if same or attempt == self.fd_shrink:
+                        if not same:
+                            kinks += 1
+                        break
+                    h /= 10.0
+                    shrinks += 1
+                out[:, k] = (ys[0] - ys[1]) / (2.0 * h)
+            return out, kinks, shrinks
+
+        dy = np.zeros((self.n, self.P))
+        with ThreadPoolExecutor(max_workers=max(1, T), thread_name_prefix="supply-fd") as pool:
+            res = list(pool.map(one, range(T)))
+        kinks = shrinks = 0
+        for t, (out, k_, s_) in enumerate(res):
+            dy[np.asarray(model.markets[t].rows)] = out
+            kinks += k_
+            shrinks += s_
+        info["fd_kink_columns"] = kinks
+        info["fd_step_shrinks"] = shrinks
+        if not np.all(np.isfinite(dy)):
+            raise SupplyDomainError(f"{self.name}: the finite-difference Jacobian of log mc is not finite (mc <= 0 "
+                                    f"or a singular ownership Jacobian within the step)", info)
+        return dy
+
+    # ------------------------------------------------------------------ Moment protocol
+
+    def concentrate(self, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(gamma, omega) from y = log mc with the supply block of W."""
+        gamma = self._Pg @ y
+        return gamma, y - self.w @ gamma
+
+    def evaluate(self, sol: InnerSolution, linear: LinearFit, need_jacobian: bool) -> MomentBlock:
+        """evaluate(sol, linear, need_jacobian) -> MomentBlock(value = Z_s' omega / n, d_theta = total
+        derivative, d_delta = None)."""
+        y, dy, _ = self.log_costs(sol, need_jacobian)
+        _, omega = self.concentrate(y)
+        d_theta = None
+        if need_jacobian:
+            assert dy is not None
+            d_theta = self.Z.T @ (dy - self.w @ (self._Pg @ dy)) / self.n
+        return MomentBlock(name=self.name, value=self.Z.T @ omega / self.n, d_delta=None, d_theta=d_theta, data=None)
+
+    def covariance_from(self, omega: np.ndarray) -> np.ndarray:
+        """Clustered S_supply = (1/n) sum_c (sum_{j in c} z_j omega_j)(...)'."""
+        return clustered_covariance(self.Z, omega, self.clustering_ids)
+
+    def covariance_block(self, sol: InnerSolution, linear: LinearFit) -> np.ndarray:
+        """covariance_block(sol, linear) -> clustered S_supply at the omega of ``sol`` (2SLS-type gamma)."""
+        y, _, _ = self.log_costs(sol, False)
+        return self.covariance_from(self.concentrate(y)[1])

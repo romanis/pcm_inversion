@@ -34,7 +34,7 @@ Spec interface (duck-typed): ``name``; ``hash_payload() -> dict`` (what changes 
 ``normalisations``; the economics and diagnostics fields read by ``diagnostics.run_diagnostics`` and
 ``economics_block`` (``firm_column``, ``groups``, ``group_other``, ``price_range``, ``plausible``,
 ``binary_columns``, ``X1``, ``Z``, ``linear_names``); ``build_problem(nu, seed, threads, moments,
-layout_changes=None) -> NFPGMMProblem`` with ``moments`` in {"all", "prefit", "aggregate"};
+layout_changes=None) -> NFPGMMProblem`` with ``moments`` in {"all", "demand", "prefit", "aggregate"};
 ``prefit_free``, ``prefit_max_iterations``; ``gate_profiles() -> [(name, moments, kwargs)]`` with
 ``ray_profile`` keyword arguments (direction, lambdas, grid, origin, economics) plus ``layout_changes``
 and ``rules`` ({tag: {"rule": callable(ProfileResult) -> (passed, message), "columns": [...]}});
@@ -113,11 +113,17 @@ def run_dir_path(base: pathlib.Path, spec: Any, nu: int, seed: int) -> pathlib.P
     return base / f"{spec.name}_{hash_options(run_key_options(nu, seed, spec_run_key(spec)))[:10]}"
 
 
-def _block_diagonal_like(W: np.ndarray, blocks: dict[str, slice]) -> np.ndarray:
-    """W with every entry outside the moment blocks' diagonal blocks set to zero (S is block diagonal)."""
+def _block_diagonal_like(W: np.ndarray, blocks: dict[str, slice],
+                          coupled: Sequence[Sequence[str]] = ()) -> np.ndarray:
+    """W with every entry outside the moment blocks' diagonal blocks set to zero (S is block diagonal), except
+    between blocks named together in ``coupled`` (the aggregate and supply blocks, whose S has cross terms)."""
     out = np.zeros_like(W)
-    for s in blocks.values():
-        out[s, s] = W[s, s]
+    groups = [list(g) for g in coupled]
+    grouped = {b for g in groups for b in g}
+    groups += [[b] for b in blocks if b not in grouped]
+    for g in groups:
+        idx = np.concatenate([np.arange(blocks[b].start, blocks[b].stop) for b in g if b in blocks])
+        out[np.ix_(idx, idx)] = W[np.ix_(idx, idx)]
     return 0.5 * (out + out.T)
 
 
@@ -173,6 +179,8 @@ class Pipeline:
             try:
                 G_full, names = problem.full_jacobian(ev)
                 options.update(G_full=G_full, linear_names=names[:G_full.shape[1] - problem.P])
+                if ev.aux.get("linear_coefficients") is not None:   # beta and the supply side's gamma
+                    options["beta"] = np.asarray(ev.aux["linear_coefficients"], dtype=float)
             except (ValueError, AttributeError):
                 pass
             try:
@@ -405,7 +413,8 @@ class Pipeline:
         ev1 = r1.evaluation
 
         def make_w2() -> np.ndarray:
-            return _block_diagonal_like(weight_from_covariance(problem.covariance(ev1)), ev1.blocks)
+            return _block_diagonal_like(weight_from_covariance(problem.covariance(ev1)), ev1.blocks,
+                                        getattr(problem, "coupled_blocks", ()))
 
         W2 = self._saved_weight("W2", make_w2)
         res = minimize(problem, Fixed(W2), self._options(stage="step2", theta0=r1.theta, max_iterations=self._limit()),

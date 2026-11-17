@@ -54,7 +54,8 @@ from nfp_harness.data import break_price_ties  # noqa: E402
 from nfp_harness.linear import LinearIV  # noqa: E402
 from nfp_harness.models import pcm_post as pp  # noqa: E402
 from nfp_harness.models.pcm import PCMModel, PCMSpec  # noqa: E402
-from nfp_harness.moments import IVMoments, SarganIVMoments, MicroDataset, MicroPart, RatioMicroMoment  # noqa: E402
+from nfp_harness.moments import (IVMoments, SarganIVMoments, MicroDataset, MicroPart, RatioMicroMoment,  # noqa: E402
+                                 SupplyMoments)
 from nfp_harness.params import ParameterLayout, ParameterSpec  # noqa: E402
 from nfp_harness.problem import NFPGMMProblem  # noqa: E402
 from nfp_harness.profile import NotMonotoneDecreasing  # noqa: E402
@@ -67,6 +68,12 @@ BODY = ("mi", "sw", "su", "pv")
 TASTE = ("const", "hpwt", "space", "air", "mpd", "fwd", "fam")   # columns with a taste spread
 KERNEL_CHARS = TASTE + BODY   # columns of x in the kernel: the body dummies carry pi_b (and body sigmas)
 YEAR = 1984
+# Petrin's log-cost basis (estimate_blp.py, pyblp X3 "1 + log(hpwt) + log(wt) + log(mpg) + air + fwd + trend * (jp
+# + eu) + log(q)", all exogenous) and supply instruments Z_s = [w, supply_instruments0..15] (pyblp's ZS)
+COST_BASIS = ("1", "log(hpwt)", "log(wt)", "log(mpg)", "air", "fwd", "trend", "jp", "eu", "jp*trend", "eu*trend",
+              "log(q)")
+N_SUPPLY_INSTRUMENTS = 16
+NASH_RCOND_MIN = 1e-12
 SIG_REF = {"sigma_const": 2.0, "sigma_hpwt": 2.0, "sigma_space": 2.0, "sigma_air": 1.0, "sigma_mpd": 1.0,
            "sigma_fwd": 2.0, "sigma_fam": 2.0}
 SIGMA_STARTS = {"const": 3.0, "hpwt": 2.0, "space": 1.0, "air": 0.5, "mpd": 1.0, "fwd": 1.0, "fam": 2.0}
@@ -84,10 +91,14 @@ BLP_SUMMARIES = {"BLP micro": "blp_micro_summary.json", "BLP no micro": "blp_nom
 def merge_twins(products: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     """Rows equal on TWIN_KEYS (same market, firm, price and characteristics) are one product to every
     consumer in the PCM: keep the first row with the summed shares (and quantities). Returns (products,
-    number of rows merged away)."""
+    number of rows merged away). The cost basis stays consistent: the twins share wt, mpg, jp, eu and trend
+    (checked), and q is summed with the shares, so log(q) is the merged product's quantity."""
     g = products.groupby(list(TWIN_KEYS), sort=False)
     first = (g.cumcount() == 0).to_numpy()
     out = products.copy()
+    for c in ("wt", "mpg", "jp", "eu", "trend"):
+        if int(g[c].nunique().max()) > 1:
+            raise ValueError(f"merged twins differ in the cost characteristic {c}")
     for c in ("shares", "q"):
         out[c] = g[c].transform("sum")
     return out[first].reset_index(drop=True), int((~first).sum())
@@ -106,6 +117,8 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, float, int]:
     for b in reversed(BODY):
         body[products[b].to_numpy() == 1] = b
     products["body"] = body.astype(str)
+    if not (products[["hpwt", "wt", "mpg", "q"]].to_numpy() > 0).all():
+        raise ValueError("the log-cost basis needs positive hpwt, wt, mpg and q")
     agents["logfs_fv"] = np.log(agents.fs) * agents.fv
     # Price scale c_i = alpha_i / a_i: log c_i = phi_mid mid_i + phi_high high_i, so c_i takes three values
     # and is bounded by construction (LEARNINGS 18, 19). The income_winsor robustness run adds
@@ -136,6 +149,9 @@ class PetrinSpec:
         p = self.products
         self.X1 = np.column_stack([np.ones(len(p))] + [p[c].to_numpy(float) for c in X1_COLS[1:]])
         self.Z = np.column_stack([self.X1] + [p[f"demand_instruments{k}"].to_numpy(float) for k in range(22)])
+        self.cost_basis = cost_basis(p)
+        self.Z_supply = np.column_stack([self.cost_basis] + [p[f"supply_instruments{k}"].to_numpy(float)
+                                                             for k in range(N_SUPPLY_INSTRUMENTS)])
         self.linear_names = list(X1_COLS)
         self.clusters = p.clustering_ids.to_numpy()
         self.values = dict(pd.read_csv(pyblp.data.PETRIN_VALUES_LOCATION).iloc[:, :2].to_numpy())
@@ -268,6 +284,11 @@ class PetrinSpec:
                 "kernel_chars": KERNEL_CHARS, "x1": X1_COLS,
                 "merge": {"rule": "same TWIN_KEYS: keep first row, sum shares and q", "keys": TWIN_KEYS},
                 "instruments": "petrin", "z": "X1 + demand_instruments0..21",
+                "supply": {"cost_basis": COST_BASIS, "z_s": f"cost basis + supply_instruments0..{N_SUPPLY_INSTRUMENTS - 1}",
+                           "markups": "Nash, ownership firm_ids, model ds/dp, data shares",
+                           "mc_guard": f"NUMERICAL if rcond < {NASH_RCOND_MIN:g} or any mc <= 0",
+                           "gamma": "concentrated, IV with the supply block of W", "jacobian": "central FD at fixed "
+                           "inversions, kink-free steps (SupplyMoments)", "moments": "all = aggregate + micro + supply"},
                 "phi_by_income_moments": "income rows x 1e4 in prefit and gate concentration",
                 "layout": [dataclasses.asdict(s) for s in self.layout().specs],
                 "micro": {"values": self.values, "observations": 29125, "covariance": MICRO_COVARIANCE_SOURCE},
@@ -300,9 +321,19 @@ class PetrinSpec:
                          total_threads=threads)
         iv = SarganIVMoments if "sargan" in self.robustness else IVMoments   # LEARNINGS 19 fallback
         ms: list[Any] = [iv(self.Z, self.clusters)]
-        if moments in ("all", "prefit"):
-            ms.append(self.micro_moment("all" if moments == "all" else "income"))
+        if moments in ("all", "demand", "prefit"):
+            ms.append(self.micro_moment("income" if moments == "prefit" else "all"))
+        if moments in ("all", "supply"):
+            ms.append(self.supply_moment())
         return NFPGMMProblem(model, ms, LinearIV(self.X1, self.Z, names=X1_COLS), layout, max_step=self.use_max_step)
+
+    def supply_moment(self) -> SupplyMoments:
+        """Petrin's log-cost supply block: Nash markups from the PCM's own ds/dp with the ownership of firm_ids,
+        log mc = w gamma + omega, Z_s = [w, supply_instruments0..15], clustered like the demand moments (round-2
+        analysis, change 2)."""
+        return SupplyMoments(self.Z_supply, self.cost_basis, self.products[self.firm_column].to_numpy(),
+                             self.clusters, name="supply", w_names=[f"gamma[{c}]" for c in COST_BASIS],
+                             rcond_min=NASH_RCOND_MIN)
 
     def named_directions(self, theta: np.ndarray, units: np.ndarray) -> dict[str, np.ndarray]:
         """Known flat directions in natural units at theta (DESIGN 5.2): the utility-scale direction
@@ -366,8 +397,9 @@ class PetrinSpec:
         for n in ("phi_mid", "phi_high"):
             out[n] = float(np.asarray(ev.theta)[names.index(n)])
         pred = ev.aux.get("micro_predicted", {}).get("micro")
-        if pred is not None:
-            for lab, v in zip(problem.moments[1].labels, pred):
+        micro = next((m for m in problem.moments if m.name == "micro"), None)
+        if pred is not None and micro is not None:
+            for lab, v in zip(micro.labels, pred):
                 if "1{j>0}" in lab:
                     out[lab.replace(" ", "")] = float(v)
         return out
@@ -482,6 +514,17 @@ class PetrinSpec:
         cf, _ = self.counterfactual(model, theta, delta, resolve_prices=False)
         return {"own_elasticity_median": float(np.nanmedian(post["products"]["own_elasticity"])),
                 "minivan_cs_gain_1984_fixed_prices_musd": cf["minivan_cs_gain_1984_fixed_prices_musd"]}
+
+
+def cost_basis(products: pd.DataFrame) -> np.ndarray:
+    """(n, 12) Petrin's log-cost basis in COST_BASIS order."""
+    p = products
+    tr = p.trend.to_numpy(float)
+    cols = {"1": np.ones(len(p)), "log(hpwt)": np.log(p.hpwt.to_numpy(float)), "log(wt)": np.log(p.wt.to_numpy(float)),
+            "log(mpg)": np.log(p.mpg.to_numpy(float)), "air": p.air.to_numpy(float), "fwd": p.fwd.to_numpy(float),
+            "trend": tr, "jp": p.jp.to_numpy(float), "eu": p.eu.to_numpy(float), "jp*trend": p.jp.to_numpy(float) * tr,
+            "eu*trend": p.eu.to_numpy(float) * tr, "log(q)": np.log(p.q.to_numpy(float))}
+    return np.column_stack([cols[c] for c in COST_BASIS])
 
 
 def minivan_diversion(group_diversion: dict[str, dict[str, float]]) -> dict[str, float]:

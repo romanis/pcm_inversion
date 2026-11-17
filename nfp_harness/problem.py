@@ -9,11 +9,17 @@ import numpy as np
 import scipy.linalg
 
 from .linear import IdentificationError, LinearIV, matrix_rank
-from .moments import MICRO_OUTPUTS
+from .moments import MICRO_OUTPUTS, IVMoments, SarganIVMoments, SupplyDomainError
 from .params import ParameterLayout
 from .types import EvalStatus, Evaluation, InnerModel, InnerSolution, KernelRequests, LinearFit, Moment, StepLimit
+from .weighting import cluster_sums
 
 __all__ = ["NFPGMMProblem", "IdentificationError"]
+
+
+def _supply_summary(info: dict[str, Any]) -> dict[str, Any]:
+    """The scalar diagnostics of a supply evaluation (``SupplyMoments.log_costs`` info) for ``aux``."""
+    return {k: v for k, v in info.items() if np.isscalar(v)}
 
 
 class NFPGMMProblem:
@@ -30,6 +36,17 @@ class NFPGMMProblem:
     ``Evaluation.aux`` holds ``delta``, ``xi``, ``beta``, ``beta_names``, ``D`` (n, P), ``sd_xi``,
     ``q`` and ``q_blocks`` (with the current W), ``micro_predicted`` / ``micro_data`` per micro block,
     ``per_market``, and the raw ``solution`` (InnerSolution) and ``linear_fit`` (LinearFit).
+
+    Supply moments (at most one block with ``is_supply``, e.g. ``moments.SupplyMoments``) add the cost
+    coefficients gamma as concentrated linear parameters. With W block diagonal, beta is concentrated with
+    the aggregate block (``linear``) and gamma with the supply block. When W couples the aggregate and supply
+    rows (step 2 with the cross terms of S), (beta, gamma) are concentrated jointly:
+    ``b = (X'W_R X)^{-1} X'W_R m`` over the aggregate and supply rows R, with ``m = [Z'delta/n; Z_s' log mc/n]``
+    and ``X = blockdiag(Z'X1/n, Z_s'w/n)``, so ``g_R = m - X b`` and ``G_R = dm - X (X'W_R X)^{-1} X'W_R dm``
+    (exact for any such W; it needs plain ``IVMoments``). Then ``aux`` also holds ``gamma``, ``omega``,
+    ``linear_coefficients`` = [beta, gamma], ``linear_names_all`` and ``supply`` (markup diagnostics). A
+    supply block that cannot be evaluated (singular ownership Jacobian, mc <= 0) gives status NUMERICAL with
+    the reason in ``aux["note"]``.
 
     ``max_step`` exists on the instance only when the model has ``max_step`` (and ``max_step=True``), so
     the optimizer's ``hasattr`` check sees the model's capability.
@@ -78,6 +95,18 @@ class NFPGMMProblem:
             raise ValueError(f"exactly one aggregate (IV) moment block is required, got {len(self.aggregate)}")
         self.agg = self.aggregate[0]
         self.agg_rows = self.blocks[self.agg.name]
+        supply = [m for m in self.moments if getattr(m, "is_supply", False)]
+        if len(supply) > 1:
+            raise ValueError(f"at most one supply moment block, got {len(supply)}")
+        self.supply: Any = supply[0] if supply else None
+        self.supply_rows: slice | None = self.blocks[self.supply.name] if self.supply is not None else None
+        self.coupled_blocks: tuple[tuple[str, ...], ...] = (
+            ((self.agg.name, self.supply.name),) if self.supply is not None else ())
+        self._joint: dict[str, Any] | None = None
+        if self.supply is not None:
+            self.supply.bind(model, self.P)
+            if self.supply.n != self.n:
+                raise ValueError(f"supply block has {self.supply.n} rows, model has {self.n} products")
         if isinstance(linear, LinearIV):
             Z = getattr(self.agg, "Z")
             if Z.shape != linear.Z.shape or not np.array_equal(Z, linear.Z):
@@ -101,6 +130,8 @@ class NFPGMMProblem:
         if W is None:
             W = np.eye(self.k)
             W[self.agg_rows, self.agg_rows] = getattr(linear, "W_aa", np.eye(self.agg_rows.stop - self.agg_rows.start))
+            if self.supply is not None:
+                W[self.supply_rows, self.supply_rows] = self.supply.W_ss
             self.set_weighting(W)
             self.W_provenance = "default: aggregate block of the linear fit, identity on micro rows"
         else:
@@ -122,13 +153,18 @@ class NFPGMMProblem:
         """
         Z = getattr(self.agg, "Z")
         rank_z = matrix_rank(Z)
-        k_micro = sum(int(getattr(m, "k")) for m in self.moments if m is not self.agg)
+        k_micro = sum(int(getattr(m, "k")) for m in self.moments if m is not self.agg and m is not self.supply)
         p_free = self.layout.n_free()
         k_linear = int(getattr(self.linear, "n_linear", 0))
-        effective = rank_z + k_micro
+        k_supply = 0
+        if self.supply is not None:
+            k_supply = matrix_rank(self.supply.Z)
+            k_linear += int(self.supply.K)
+        effective = rank_z + k_micro + k_supply
         unknowns = p_free + k_linear
         info = {
             "k": self.k, "k_aggregate": int(Z.shape[1]), "rank_aggregate": rank_z, "k_micro": k_micro,
+            "rank_supply": k_supply,
             "effective_moments": effective, "p_free": p_free, "k_linear": k_linear, "unknowns": unknowns,
             "overidentifying": effective - unknowns,
             "rank_ZX1": getattr(self.linear, "rank_ZX1", None),
@@ -137,8 +173,9 @@ class NFPGMMProblem:
             info["note"] = f"aggregate instruments have rank {rank_z} < {Z.shape[1]} columns"
         if effective < unknowns:
             raise IdentificationError(
-                f"moment conditions cannot identify the unknowns: rank(Z) {rank_z} + {k_micro} micro moments = "
-                f"{effective} < {p_free} free nonlinear + {k_linear} linear parameters = {unknowns}. "
+                f"moment conditions cannot identify the unknowns: rank(Z) {rank_z} + {k_micro} micro moments"
+                + (f" + rank(Z_s) {k_supply}" if self.supply is not None else "")
+                + f" = {effective} < {p_free} free nonlinear + {k_linear} linear parameters = {unknowns}. "
                 f"Use Z = [X1, excluded instruments] (LEARNINGS 16), add moments, or fix parameters.")
         return info
 
@@ -173,7 +210,6 @@ class NFPGMMProblem:
             return self._failed(theta, sol.status, t0, aux)
 
         delta = np.asarray(sol.delta, dtype=float)
-        fit = self.linear.fit(delta)
         D_full: np.ndarray | None = None
         if need_jacobian:
             if sol.D is None:
@@ -181,6 +217,25 @@ class NFPGMMProblem:
             D_full = np.zeros((self.n, self.P))
             for mkt, D_t in zip(self.model.markets, sol.D):
                 D_full[mkt.rows] = D_t
+
+        sup = self.supply
+        y_s = dy_s = None
+        if sup is not None:
+            try:
+                y_s, dy_s, s_info = sup.log_costs(sol, need_jacobian)
+            except SupplyDomainError as exc:
+                aux["note"] = str(exc)
+                aux["supply"] = _supply_summary(exc.info)
+                return self._failed(theta, EvalStatus.NUMERICAL, t0, aux)
+            aux["supply"] = _supply_summary(s_info)
+
+        joint = None
+        if self._joint is not None:
+            assert y_s is not None
+            joint = self._joint_fit(delta, D_full, y_s, dy_s)
+            fit = joint["fit"]
+        else:
+            fit = self.linear.fit(delta)
 
         g = np.empty(self.k)
         G = np.zeros((self.k, self.P)) if need_jacobian else None
@@ -190,6 +245,12 @@ class NFPGMMProblem:
             with np.errstate(divide="raise", invalid="raise", over="raise", under="ignore"):
                 for m in self.moments:
                     rows = self.blocks[m.name]
+                    if joint is not None and (m is self.agg or m is sup):
+                        sel = joint["rows_of"][m.name]
+                        g[rows] = joint["g"][sel]
+                        if G is not None:
+                            G[rows] = joint["G"][sel]
+                        continue
                     blk = m.evaluate(sol, fit, need_jacobian)
                     g[rows] = blk.value
                     if blk.data is not None:
@@ -201,6 +262,12 @@ class NFPGMMProblem:
                         if blk.d_delta is not None:
                             assert D_full is not None
                             G[rows] += blk.d_delta @ D_full
+                if sup is not None:
+                    assert y_s is not None
+                    gamma, omega = (joint["gamma"], joint["omega"]) if joint is not None else sup.concentrate(y_s)
+                    aux.update(gamma=gamma, omega=omega, log_mc=y_s,
+                               linear_coefficients=np.r_[fit.beta, gamma],
+                               linear_names_all=tuple(fit.names) + tuple(sup.names))
         except (FloatingPointError, ZeroDivisionError) as exc:
             aux["note"] = f"floating point error in moments: {exc}"
             return self._failed(theta, EvalStatus.NUMERICAL, t0, aux)
@@ -213,6 +280,27 @@ class NFPGMMProblem:
         aux["q_blocks"] = {name: float(self.n * g[s] @ self.W[s, s] @ g[s]) for name, s in self.blocks.items()}
         return Evaluation(theta=theta, g=g, G=G, status=EvalStatus.OK, blocks=dict(self.blocks), aux=aux,
                           seconds=time.perf_counter() - t0)
+
+    def _joint_fit(self, delta: np.ndarray, D_full: np.ndarray | None, y: np.ndarray, dy: np.ndarray | None
+                   ) -> dict[str, Any]:
+        """Joint concentration of (beta, gamma) when W couples the aggregate and supply rows (class docstring)."""
+        j = self._joint
+        assert j is not None and self.supply is not None
+        sup, n = self.supply, self.n
+        Z = getattr(self.agg, "Z")
+        K = int(self.linear.K)
+        m = np.r_[Z.T @ delta / n, sup.Z.T @ y / n]
+        b = j["Pj"] @ m
+        beta, gamma = b[:K], b[K:]
+        g = m - j["X"] @ b
+        G = None
+        if D_full is not None:
+            assert dy is not None
+            dm = np.vstack([Z.T @ D_full / n, sup.Z.T @ dy / n])
+            G = dm - j["X"] @ (j["Pj"] @ dm)
+        xi = delta - self.linear.X1 @ beta
+        fit = LinearFit(names=tuple(self.linear.names), beta=beta, xi=xi, M=None)
+        return {"fit": fit, "gamma": gamma, "omega": y - sup.w @ gamma, "g": g, "G": G, "rows_of": j["rows_of"]}
 
     # ------------------------------------------------------------------ covariance and weighting
 
@@ -242,10 +330,36 @@ class NFPGMMProblem:
         for m in self.moments:
             if getattr(m, "is_micro", False):
                 parts.append(self.n * m.covariance_block(sol_cov, fit))
+            elif m is self.supply:
+                parts.append(m.covariance_from(ev.aux["omega"]))
             else:
                 parts.append(m.covariance_block(ev.aux["solution"], fit))
         S = scipy.linalg.block_diag(*parts)
+        if self.supply is not None:
+            cross = self.supply_cross_covariance(fit.xi, ev.aux["omega"])
+            S[self.agg_rows, self.supply_rows] = cross
+            S[self.supply_rows, self.agg_rows] = cross.T
         return 0.5 * (S + S.T)
+
+    def supply_cross_covariance(self, xi: np.ndarray, omega: np.ndarray) -> np.ndarray:
+        """Clustered ``(1/n) sum_c (sum_{j in c} z_j xi_j)(sum_{j in c} z_sj omega_j)'`` (k_a, k_s).
+
+        Both blocks must use the same clusters (else the cross term is not defined and this raises). With
+        Sargan aggregate moments the aggregate side is divided by ``sqrt(xi'xi/n)`` as its moments are.
+        """
+        sup = self.supply
+        assert sup is not None
+        ids_a, ids_s = getattr(self.agg, "clustering_ids", None), sup.clustering_ids
+        if (ids_a is None) != (ids_s is None) or (ids_a is not None and not np.array_equal(ids_a, ids_s)):
+            raise ValueError("aggregate and supply moments use different clusters; their cross covariance is "
+                             "not defined")
+        Z = getattr(self.agg, "Z")
+        Va = cluster_sums(Z * xi[:, None], ids_a)
+        Vs = cluster_sums(sup.Z * omega[:, None], ids_s)
+        cross = Va.T @ Vs / self.n
+        if isinstance(self.agg, SarganIVMoments):
+            cross = cross / float(np.sqrt(xi @ xi / self.n))
+        return cross
 
     def micro_covariance(self, ev: Evaluation) -> np.ndarray | None:
         """V_micro stacked over micro moment objects (block diagonal), or None without micro moments."""
@@ -255,12 +369,16 @@ class NFPGMMProblem:
         return scipy.linalg.block_diag(*[m.covariance_block(sol_cov, ev.aux["linear_fit"]) for m in self.micro])
 
     def initial_weighting(self, theta0: np.ndarray) -> np.ndarray:
-        """pyblp's W1 = blockdiag((Z'Z/n)^{-1}, (n V_micro(theta_0))^{-1}) in this problem's block order."""
+        """pyblp's W1 = blockdiag((Z'Z/n)^{-1}, (Z_s'Z_s/n)^{-1}, (n V_micro(theta_0))^{-1}) in this problem's
+        block order (the supply block only with supply moments)."""
         from .weighting import weight_from_covariance
 
         Z = getattr(self.agg, "Z")
         W = np.zeros((self.k, self.k))
         W[self.agg_rows, self.agg_rows] = weight_from_covariance(Z.T @ Z / self.n)
+        if self.supply is not None:
+            Zs = self.supply.Z
+            W[self.supply_rows, self.supply_rows] = weight_from_covariance(Zs.T @ Zs / self.n)
         if self.micro:
             ev = self.evaluate(theta0, need_jacobian=False)
             if not ev.ok:
@@ -274,8 +392,10 @@ class NFPGMMProblem:
     def set_weighting(self, W: np.ndarray) -> None:
         """set_weighting(W): store W and re-concentrate the linear parameters with its aggregate block.
 
-        Refuses a W that couples aggregate and other rows: concentrating beta with the aggregate block
-        alone is exact only for block-diagonal W (DESIGN 2.4). Evaluations made before the call are stale.
+        Refuses a W that couples aggregate (or supply) rows with micro rows: concentrating the linear
+        parameters on those rows alone is exact only then (DESIGN 2.4). A W that couples the aggregate and
+        supply rows switches to the joint concentration of (beta, gamma) (class docstring). Evaluations made
+        before the call are stale.
         """
         W = np.asarray(W, dtype=float)
         if W.shape != (self.k, self.k):
@@ -284,25 +404,58 @@ class NFPGMMProblem:
         if np.max(np.abs(W - W.T)) > 1e-10 * scale:
             raise ValueError("W must be symmetric")
         a = self.agg_rows
-        other = np.ones(self.k, dtype=bool)
-        other[a] = False
-        if other.any() and np.max(np.abs(W[a][:, other])) > 1e-12 * scale:
-            raise ValueError("W couples aggregate and micro rows; concentrated beta needs block-diagonal W")
+        lin = np.zeros(self.k, dtype=bool)
+        lin[a] = True
+        if self.supply_rows is not None:
+            lin[self.supply_rows] = True
+        if (~lin).any() and np.max(np.abs(W[lin][:, ~lin])) > 1e-12 * scale:
+            raise ValueError("W couples aggregate (or supply) and micro rows; concentrated linear parameters need "
+                             "block-diagonal W between them")
         self.W = 0.5 * (W + W.T)
         self.linear.set_weighting(self.W[a, a])
+        self._joint = None
+        if self.supply is not None:
+            s = self.supply_rows
+            assert s is not None
+            self.supply.set_weighting(self.W[s, s])
+            if np.max(np.abs(self.W[a, s])) > 1e-12 * scale:
+                self._joint = self._joint_projection()
         self.W_provenance = "set_weighting"
+
+    def _joint_projection(self) -> dict[str, Any]:
+        """``X``, ``Pj = (X'W_R X)^{-1} X'W_R`` and the row map of the joint (beta, gamma) concentration."""
+        if type(self.agg) is not IVMoments or not isinstance(self.linear, LinearIV):
+            raise ValueError("a W coupling aggregate and supply rows needs plain IVMoments and LinearIV")
+        sup = self.supply
+        a, s = self.agg_rows, self.supply_rows
+        assert sup is not None and s is not None
+        idx = np.r_[np.arange(a.start, a.stop), np.arange(s.start, s.stop)]
+        ka, K = a.stop - a.start, int(self.linear.K)
+        X = np.zeros((idx.size, K + sup.K))
+        X[:ka, :K] = self.linear.ZtX1 / self.n
+        X[ka:, K:] = sup.ZtW
+        W_R = self.W[np.ix_(idx, idx)]
+        B = X.T @ W_R
+        Pj = np.linalg.solve(B @ X, B)
+        return {"X": X, "Pj": Pj, "rows_of": {self.agg.name: slice(0, ka), sup.name: slice(ka, idx.size)}}
 
     def full_jacobian(self, ev: Evaluation) -> tuple[np.ndarray, list[str]]:
         """Jacobian over (beta, theta) for inference (DESIGN 2.4): aggregate rows ``[-Z'X1/n, Z'D/n]``,
-        micro rows ``[0, G_micro]``. Returns (k, K + P) and the column names."""
+        micro rows ``[0, G_micro]``; with supply moments the cost coefficients follow beta and the supply rows
+        are ``[0, -Z_s'w/n, G_supply]``. Returns (k, K [+ K_s] + P) and the column names."""
         if ev.G is None:
             raise ValueError("full_jacobian needs an evaluation with G")
         K = int(getattr(self.linear, "K", 0))
-        J = np.zeros((self.k, K + self.P))
-        J[:, K:] = ev.G
+        Ks = int(self.supply.K) if self.supply is not None else 0
+        J = np.zeros((self.k, K + Ks + self.P))
+        J[:, K + Ks:] = ev.G
         if K:
             J[self.agg_rows, :K] = self.linear.full_jacobian_linear_block()
-        return J, list(getattr(self.linear, "names", ())) + list(self.layout.names)
+        names = list(getattr(self.linear, "names", ()))
+        if self.supply is not None:
+            J[self.supply_rows, K:K + Ks] = -self.supply.ZtW
+            names += list(self.supply.names)
+        return J, names + list(self.layout.names)
 
     # ------------------------------------------------------------------ CUE
 
@@ -313,6 +466,8 @@ class NFPGMMProblem:
         current weighting; micro columns are zero (the micro block of S is held fixed, see
         ``cue_fixed_covariance``). ``g_aggregate = V.sum(0)[aggregate] / n``.
         """
+        if self.supply is not None:
+            raise NotImplementedError("CUE with supply moments is not implemented")
         if not ev.ok or ev.G is None or ev.aux.get("D") is None:
             raise ValueError("cue_terms needs an OK evaluation with a Jacobian")
         fit: LinearFit = ev.aux["linear_fit"]
