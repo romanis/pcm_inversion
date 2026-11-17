@@ -166,6 +166,8 @@ class NFPGMMProblem:
 
         sol = self.model.solve(theta, self.requests, need_jacobian)
         aux: dict[str, Any] = {"per_market": sol.per_market, "solution": sol}
+        if "realised_mass" in sol.outputs:  # frontier guard of DESIGN 4.4, read by the optimizer
+            aux["realised_mass"] = sol.outputs["realised_mass"]
         if sol.status is not EvalStatus.OK:
             return self._failed(theta, sol.status, t0, aux)
 
