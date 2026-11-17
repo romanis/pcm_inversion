@@ -106,6 +106,10 @@ class PCMSpec:
     mass of every trial point against the accepted point for the guard of DESIGN 4.4.
     ``max_step_tau`` is the ``tau_max`` of the events kernel: it is 2 so that a direction with no
     vanishing product before tau = 2 leaves the optimizer's ``0.5 tau_vanish_lb`` cap at a full step.
+    ``trial_cold_evals`` is the cold-stage budget of a market that has an accepted warm start (trial points
+    after the first evaluation); None uses ``cold_evals``. A trial point whose warm stage and theta path
+    both fail is usually one the optimizer rejects anyway, and a 40,000-evaluation cold stage there can
+    take longer than a whole accepted step.
     """
 
     characteristics: tuple[str, ...]
@@ -122,6 +126,7 @@ class PCMSpec:
     rcond_min: float = 1e-13
     track_realised_mass: bool = True
     max_step_tau: float = 2.0
+    trial_cold_evals: int | None = None
 
     @classmethod
     def coerce(cls, spec: Any) -> PCMSpec:
@@ -397,10 +402,11 @@ class PCMModel:
         acc = self._accepted[m.t]
         micro = self._micro_for(m, parts)[0] if parts else None
         s = self.spec
+        cold = s.cold_evals if acc is None or s.trial_cold_evals is None else s.trial_cold_evals
         return self._k.solve_market(
             m.s_data, m.kernel, th, ph, sp,
             None if acc is None else acc.delta, None if acc is None else acc.theta, micro,
-            tol=s.tol, warm_evals=s.warm_evals, cold_evals=s.cold_evals, path_evals=s.path_evals,
+            tol=s.tol, warm_evals=s.warm_evals, cold_evals=int(cold), path_evals=s.path_evals,
             path_seconds=s.path_seconds, n_threads=int(n_threads), derivatives=bool(need_jacobian),
             price_derivatives=bool(price_derivatives), rcond_min=s.rcond_min)
 

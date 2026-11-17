@@ -31,18 +31,19 @@ class NFPGMMProblem:
     ``q`` and ``q_blocks`` (with the current W), ``micro_predicted`` / ``micro_data`` per micro block,
     ``per_market``, and the raw ``solution`` (InnerSolution) and ``linear_fit`` (LinearFit).
 
-    ``max_step`` exists on the instance only when the model has ``max_step``, so the optimizer's
-    ``hasattr`` check sees the model's capability.
+    ``max_step`` exists on the instance only when the model has ``max_step`` (and ``max_step=True``), so
+    the optimizer's ``hasattr`` check sees the model's capability.
     """
 
     layout: ParameterLayout
 
     def __init__(self, model: InnerModel, moments: Sequence[Moment], linear: Any, layout: ParameterLayout,
-                 W: np.ndarray | None = None) -> None:
-        """NFPGMMProblem(model, moments, linear, layout, W=None).
+                 W: np.ndarray | None = None, max_step: bool = True) -> None:
+        """NFPGMMProblem(model, moments, linear, layout, W=None, max_step=True).
 
         W defaults to the aggregate block of ``linear`` (``(Z'Z/n)^{-1}`` for ``LinearIV``) and the
-        identity on micro rows; ``initial_weighting(theta0)`` gives pyblp's W1.
+        identity on micro rows; ``initial_weighting(theta0)`` gives pyblp's W1. ``max_step=False`` hides
+        the model's ``max_step`` from the optimizer, so steps are controlled by the trust region alone.
         """
         self.model = model
         self.moments = list(moments)
@@ -107,7 +108,7 @@ class NFPGMMProblem:
             self.W_provenance = "given"
 
         self.accepted_theta: np.ndarray | None = None
-        if hasattr(model, "max_step"):
+        if max_step and hasattr(model, "max_step"):
             self.max_step = self._max_step
 
     # ------------------------------------------------------------------ setup checks

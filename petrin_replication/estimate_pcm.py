@@ -1,388 +1,361 @@
-"""Petrin (2002) minivan demand estimated with the pure characteristics model (PCM).
+"""Petrin (2002) minivans, exact pure characteristics model (PCM), as a spec on nfp_harness.
 
-Same data, instruments and heterogeneity as the pyblp Petrin tutorial, with the logit error
-removed and no micro moments:
-
-    u_ijt = delta_jt + x_jt . t_i - c_i * a_i * p_jt,         u_i0t = 0
-    x_j   = [1, hpwt, space, air, mpd, fwd, mi, sw, su, pv]
-    t_i   = sigma * nu_i                  on [1, hpwt, space, air, mpd, fwd]   (Petrin's sigmas)
-          + pi * log(fs_i) * fv_i         on [mi, sw, su, pv]                   (Petrin's pis)
-    c_i   = exp(phi . [low_i, mid_i, high_i] / income_i)                        (Petrin's price x income)
+    u_ijt = delta_jt + x_jt . t_i - c_i a_i p_jt,   u_i0t = 0
+    x     = [1, hpwt, space, air, mpd, fwd, mi, sw, su, pv]
+    t_i   = sigma_k nu_ik on all 10 columns (body sigmas on mi, sw, su, pv)  +  pi_b log(fs_i) fv_i on mi, sw, su, pv
+    log c_i = phi_low low_i/income_i + phi_mid mid_i/income_i + phi_high high_i/income_i
     a_i   ~ LogNormal(0, sigma_p)
-    delta_jt = x1_jt beta + xi_jt,  x1 = [1, hpwt, space, air, mpd, fwd, mi, sw, su, pv, pgnp, trend, trend2]
+    delta_jt = X1_jt beta + xi_jt,  X1 = [1, hpwt, space, air, mpd, fwd, mi, sw, su, pv, pgnp, trend, trend2]
+    Z     = [X1, demand_instruments0..21]  (35 columns; LEARNINGS 16)
 
-PCM has no utility scale, so the median price sensitivity at c_i = 1 is normalised to one and
-delta is in $1000 (the price unit). beta is concentrated out by IV with the 22 demand instruments.
-Consumers: each of the 1000 CEX agent rows per market is crossed with PCM_NU_PER_AGENT scrambled
-Sobol normal draws over the 6 taste dimensions.
+Moments: the 35 aggregate IV moments and Petrin's 10 CEX micro moments (pyblp's Petrin data), 45 in all
+for 13 linear and 18 nonlinear parameters. Normalisations: median alpha = 1 at c_i = 1 (mu = 0,
+LEARNINGS 11); body-type taste spreads capped at the pooled price range ($66.1k); taste spreads
+non-negative; u_i0 = 0 in every year with pgnp and trends in X1. Consumers: the 1,000 CEX agents per
+market crossed with scrambled Sobol standard normal taste draws, 2^ceil(log2(1000 nu)) draws per market.
+Exact PCM shares, no smoothing (LEARNINGS 15). Stages and their files: nfp_harness.pipeline (DESIGN 6.4).
 
-Run: PYTHONPATH=nevo_replication/.vendor:build-rel2/python_bindings python petrin_replication/pcm_petrin.py
+Run (results under petrin_replication/results/harness/, untracked):
+  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage gate --nu 4 [--detach]
+  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage all --nu 16 --detach
+  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py status --nu 16
+Resume a killed run by relaunching the identical command.
 """
 from __future__ import annotations
 
-import json
 import os
 import pathlib
-import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+import sys
 
-import numpy as np
-import pandas as pd
-import pyblp
-import python_pcm_demand as pd_cpp
-from scipy.optimize import minimize
-from scipy.stats import norm, qmc
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")   # idle OpenMP teams must not spin on 192 cores
+os.environ.setdefault("OMP_DYNAMIC", "FALSE")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")    # numpy work is small; keep cores for the kernel
+os.environ.setdefault("MKL_NUM_THREADS", "8")         # anaconda's MKL (loaded via scipy/pyblp) spins a 192-thread pool otherwise
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / "nevo_replication" / ".vendor")]
 
-OUT = pathlib.Path(__file__).resolve().parent / "results"
-OUT.mkdir(exist_ok=True)
+import dataclasses  # noqa: E402
+import json  # noqa: E402
+import math  # noqa: E402
+from typing import Any  # noqa: E402
 
-X_COLS = ["const", "hpwt", "space", "air", "mpd", "fwd", "mi", "sw", "su", "pv"]
-X1_COLS = X_COLS + ["pgnp", "trend", "trend2"]
-SIGMA_ON = ["const", "hpwt", "space", "air", "mpd", "fwd"]
-PI_ON = ["mi", "sw", "su", "pv"]
-# PCM_BODY_SIGMA=1 adds a random coefficient on each body type. Petrin's BLP has none: the logit
-# error gives a minivan its own following. Without it the PCM must fit the Caravan's 0.5% share
-# by climbing the vertical ladder past a dense cluster of same-price sedans, which fails.
-BODY_SIGMA = os.environ.get("PCM_BODY_SIGMA", "0") == "1"
-if BODY_SIGMA:
-    SIGMA_ON = SIGMA_ON + PI_ON
-TASTE = [(f"sigma_{c}", X_COLS.index(c), f"nu{k}") for k, c in enumerate(SIGMA_ON)] + \
-        [(f"pi_{c}_logfs_fv", X_COLS.index(c), "logfs_fv") for c in PI_ON]
-SCALE = [("phi_low_inc", "low_inc"), ("phi_mid_inc", "mid_inc"), ("phi_high_inc", "high_inc")]
-NAMES = [t[0] for t in TASTE] + [s[0] for s in SCALE] + ["sigma_p"]
-N_TASTE, N_SCALE = len(TASTE), len(SCALE)
-N_ZD = 22
-TOL = 1e-9           # max |s_model - s_data|; shares are 1e-5 to 5e-3. Newton on 4000-consumer shares stalls near 2e-10
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import pyblp  # noqa: E402
 
+from nfp_harness import comparison, pipeline  # noqa: E402
+from nfp_harness.data import break_price_ties  # noqa: E402
+from nfp_harness.linear import LinearIV  # noqa: E402
+from nfp_harness.models import pcm_post as pp  # noqa: E402
+from nfp_harness.models.pcm import PCMModel, PCMSpec  # noqa: E402
+from nfp_harness.moments import IVMoments, MicroDataset, MicroPart, RatioMicroMoment  # noqa: E402
+from nfp_harness.params import ParameterLayout, ParameterSpec  # noqa: E402
+from nfp_harness.problem import NFPGMMProblem  # noqa: E402
+from nfp_harness.profile import NotMonotoneDecreasing  # noqa: E402
 
-def split(theta):
-    return theta[:N_TASTE], theta[N_TASTE:N_TASTE + N_SCALE], float(theta[-1])
-
-
-@dataclass
-class MarketData:
-    market_id: int
-    rows: np.ndarray
-    shares: np.ndarray
-    cpp: object
-    delta: np.ndarray = field(default=None)
-    theta_ok: np.ndarray = field(default=None)
+HERE = pathlib.Path(__file__).resolve().parent
+RESULTS = HERE / "results" / "harness"
+CHARS = ("const", "hpwt", "space", "air", "mpd", "fwd", "mi", "sw", "su", "pv")
+X1_COLS = CHARS + ("pgnp", "trend", "trend2")
+BODY = ("mi", "sw", "su", "pv")
+YEAR = 1984
+SIG_REF = {"sigma_const": 2.0, "sigma_hpwt": 2.0, "sigma_space": 2.0, "sigma_air": 1.0, "sigma_mpd": 1.0,
+           "sigma_fwd": 2.0, "sigma_mi": 2.0, "sigma_sw": 2.0, "sigma_su": 2.0, "sigma_pv": 2.0}
+SIGMA_STARTS = {"const": 3.0, "hpwt": 2.0, "space": 1.0, "air": 0.5, "mpd": 1.0, "fwd": 1.0,
+                "mi": 2.0, "sw": 2.0, "su": 2.0, "pv": 2.0}
+BLP_SUMMARIES = {"BLP micro": "blp_micro_summary.json", "BLP no micro": "blp_nomicro_summary.json",
+                 "BLP demand micro": "blp_demand_micro_summary.json"}
 
 
-def break_price_ties(p: np.ndarray, min_gap: float = 0.01) -> np.ndarray:
-    """Strictly increasing prices with a minimum gap (default $10 on prices in $1000).
-
-    Petrin's prices are list prices deflated by the CPI, so 95 pairs are exact ties and 1% of
-    neighbouring gaps are under $1. In the PCM the conditional share derivative between two
-    products is f(e)/(price gap), so a $0.001 gap makes the Jacobian singular to working
-    precision. Spreading near-ties to $10 changes nothing economically at $5,000 to $50,000.
-    Order among tied products follows their row order."""
-    p = p.copy()
-    order = np.argsort(p, kind="stable")
-    for k in range(1, len(p)):
-        i, j = order[k - 1], order[k]
-        if p[j] < p[i] + min_gap:
-            p[j] = p[i] + min_gap
-    return p
-
-
-def build_markets(products: pd.DataFrame, agents: pd.DataFrame, nu_per_agent: int, seed: int = 0) -> list[MarketData]:
-    dim = len(SIGMA_ON)
-    markets = []
-    for mkt, prod in products.groupby("market_ids", sort=True):
-        prod = prod.assign(p_sort=break_price_ties(prod.prices.to_numpy(float))).sort_values("p_sort")
-        ag = agents[agents.market_ids == mkt]
-        A = len(ag)
-        nu = norm.ppf(qmc.Sobol(dim, scramble=True, seed=seed + int(mkt)).random(A * nu_per_agent))
-        rep = np.repeat(np.arange(A), nu_per_agent)
-        w = np.repeat(ag.weights.to_numpy(float), nu_per_agent) / nu_per_agent
-        cols = {f"nu{k}": nu[:, k] for k in range(dim)}
-        cols["logfs_fv"] = (np.log(ag.fs.to_numpy(float)) * ag.fv.to_numpy(float))[rep]
-        inc = ag.income.to_numpy(float)[rep]
-        for lvl in ("low", "mid", "high"):
-            cols[f"{lvl}_inc"] = ag[lvl].to_numpy(float)[rep] / inc
-        taste_basis = np.column_stack([cols[b] for _, _, b in TASTE])
-        scale_basis = np.column_stack([cols[b] for _, b in SCALE])
-        x = np.column_stack([np.ones(len(prod))] + [prod[c].to_numpy(float) for c in X_COLS[1:]])
-        m = pd_cpp.Market(x, prod.p_sort.to_numpy(float), w, taste_basis, [c for _, c, _ in TASTE], scale_basis)
-        markets.append(MarketData(int(mkt), prod.index.to_numpy(), prod.shares.to_numpy(float), m))
-    return markets
-
-
-class PCMProblem:
-    def __init__(self, products, agents, nu_per_agent=4, workers=13, path_seconds=90.0):
-        self.products = products
-        self.path_seconds = path_seconds
-        self.markets = build_markets(products, agents, nu_per_agent)
-        self.n = len(products)
-        self.X1 = np.column_stack([np.ones(self.n)] + [products[c].to_numpy(float) for c in X1_COLS[1:]])
-        self.Z = products[[f"demand_instruments{k}" for k in range(N_ZD)]].to_numpy(float)
-        self.set_weighting(np.linalg.inv(self.Z.T @ self.Z / self.n))
-        self.cue = os.environ.get("PCM_CUE", "0") == "1"
-        self.cluster = pd.factorize(products.clustering_ids.to_numpy())[0]
-        self.n_clusters = int(self.cluster.max()) + 1
-        self.pool = ThreadPoolExecutor(workers)
-        self.evals = 0
-        self.last = None
-        # Per-market OpenMP thread budget: each Python thread gets a slice of the available CPUs.
-        # Inversion work per market scales roughly as J * I (products x consumers), so we allocate
-        # threads proportionally to empirical timing (which varies 10x across markets at same J),
-        # falling back to product count. This equalises wall-clock time across parallel market calls,
-        # cutting the bottleneck from ~430s (1 OMP thread/market at nu16) toward ~30s.
-        try:
-            import ctypes
-            self._gomp = ctypes.CDLL("libgomp.so.1")
-            omp_total = int(os.environ.get("PCM_OMP_TOTAL", str(os.cpu_count() or 13)))
-            # Allocation weight: J^2 per market (Newton work per consumer scales as J^2 for the
-            # Jacobian linear solve). This is nu-agnostic; empirical timing from one nu is a
-            # poor proxy for another because the per-market rank order changes substantially.
-            sizes = np.array([len(m.shares) ** 2 for m in self.markets], dtype=float)
-            raw = omp_total * sizes / sizes.sum()
-            # floor to int >= 1, then give leftover to the slowest market
-            alloc = np.maximum(raw.astype(int), 1)
-            alloc[np.argmax(sizes)] += omp_total - int(alloc.sum())
-            self._omp_threads = {m.market_id: int(t) for m, t in zip(self.markets, alloc)}
-            print(f"OMP thread budget (total={omp_total}): "
-                  + ", ".join(f"{mid}={t}" for mid, t in sorted(self._omp_threads.items())),
-                  flush=True)
-        except OSError:
-            self._gomp = None
-            self._omp_threads = {}
-
-    def set_weighting(self, W):
-        self.W = W
-        ZW = self.Z @ W @ self.Z.T / self.n
-        XZWZ = self.X1.T @ ZW
-        self.beta_of = np.linalg.solve(XZWZ @ self.X1, XZWZ)         # beta = beta_of @ delta
-        self.M = np.eye(self.n) - self.X1 @ self.beta_of              # xi = M delta
-
-    def _solve_market(self, m: MarketData, theta, grad):
-        th, ph, sp = split(theta)
-        t_start, stages = time.time(), []
-        # Set per-market OMP thread count so the slowest market gets proportionally more cores.
-        if self._gomp is not None and m.market_id in self._omp_threads:
-            self._gomp.omp_set_num_threads(self._omp_threads[m.market_id])
-        warm = m.delta if m.delta is not None else np.empty(0)
-        # a trial point gets a short first try; most of the run's time was going into trial
-        # points the optimizer then rejected
-        r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, warm, TOL, 2500 if m.delta is not None else 20000)
-        stages.append(f"warm {time.time() - t_start:.0f}s")
-        if not r["converged"] and m.delta is not None and time.time() - t_start < self.path_seconds:
-            t0 = time.time()
-            d, tau, step = m.delta, 0.0, 0.5
-            while tau < 1.0 and step > 1e-2 and time.time() - t_start < self.path_seconds:
-                t = min(1.0, tau + step)
-                rr = pd_cpp.invert(m.shares, m.cpp, *split(m.theta_ok + t * (theta - m.theta_ok)), d, TOL, 1500)
-                if rr["converged"]:
-                    d, tau, step = rr["delta"], t, min(0.5, 2 * step)
-                else:
-                    step /= 2
-            if tau >= 1.0:
-                r = rr
-            stages.append(f"theta path to tau={tau:.3f} {time.time() - t0:.0f}s")
-        if not r["converged"]:
-            # cold start as last resort, also at trial points: the sigma-ray profile inverted every
-            # grid point cold, while warm starts across a 35% move in all sigmas did not
-            t0 = time.time()
-            r = pd_cpp.invert(m.shares, m.cpp, th, ph, sp, np.empty(0), TOL, 40000)
-            stages.append(f"cold {time.time() - t0:.0f}s")
-        if not r["converged"]:
-            print(f"  {m.market_id}: inversion failed (resid {r['max_abs_residual']:.1e}): {', '.join(stages)}", flush=True)
-        if time.time() - t_start > 60:
-            print(f"  {m.market_id}: slow inversion {time.time() - t_start:.0f}s: {', '.join(stages)}", flush=True)
-        out = {"delta": r["delta"], "converged": r["converged"], "resid": r["max_abs_residual"]}
-        if grad:
-            d = pd_cpp.shares(r["delta"], m.cpp, th, ph, sp, True)
-            # Regularise: products with zero share have an all-zero row in d_delta, making
-            # the system singular.  Add a small diagonal floor (1/n_consumers) to those rows
-            # so the solve is defined.  The gradient contribution from a zero-share product
-            # is negligible and the floor is well below the residual tolerance.
-            dD = d["d_delta"].copy()
-            zero_rows = np.flatnonzero(np.abs(dD).sum(1) == 0)
-            if len(zero_rows):
-                n_consumers = m.cpp.shape[0]        # rows = consumers
-                floor_val = 1.0 / max(n_consumers, 1)
-                dD[zero_rows, zero_rows] = floor_val
-                print(f"  {m.market_id}: {len(zero_rows)} zero-share rows regularised (floor={floor_val:.2e})", flush=True)
-            try:
-                out["ddelta"] = -np.linalg.solve(dD, d["d_theta"])
-            except np.linalg.LinAlgError:
-                zero = np.flatnonzero(np.abs(dD).sum(1) == 0)
-                print(f"  {m.market_id}: singular ds/ddelta after regularisation at rows {zero.tolist()}", flush=True)
-                out["ddelta"] = np.full_like(d["d_theta"], np.nan)
-                out["converged"] = False
-        return out
-
-    def delta(self, theta, grad):
-        res = list(self.pool.map(lambda m: self._solve_market(m, theta, grad), self.markets))
-        delta = np.empty(self.n)
-        ddelta = np.empty((self.n, len(theta))) if grad else None
-        ok, worst = True, 0.0
-        for m, r in zip(self.markets, res):
-            delta[m.rows] = r["delta"]
-            if grad:
-                ddelta[m.rows] = r["ddelta"]
-            ok &= bool(r["converged"])
-            worst = max(worst, float(r["resid"]))
-            if r["converged"]:
-                m.delta, m.theta_ok = r["delta"], theta.copy()
-        return delta, ddelta, ok, worst
-
-    def objective(self, theta):
-        t0 = time.time()
-        self.evals += 1
-        delta, ddelta, ok, worst = self.delta(theta, grad=True)
-        xi = self.M @ delta
-        g = self.Z.T @ xi / self.n
-        G = self.Z.T @ (self.M @ ddelta) / self.n
-        if self.cue:
-            # Continuously updated GMM: q = n g' S(theta)^-1 g with S the clustered covariance of
-            # z_j xi_j at the same theta. The PCM's utility scale is free (median alpha = 1 pins it
-            # to a non-buyer), so a fixed-W objective is quadratic in a nuisance scale and is
-            # minimised by sigma_p -> inf, sigma_x -> 0. CUE is invariant to xi -> kappa xi.
-            # beta is still concentrated out with the fixed 2SLS weighting (self.M), which keeps
-            # the gradient simple; that is a valid, if not fully efficient, GMM estimator.
-            dxi = self.M @ ddelta                                    # n x P
-            V = self._cluster_sum(self.Z * xi[:, None])              # C x K
-            dV = self._cluster_sum3(self.Z, dxi)                     # C x K x P
-            S = V.T @ V / self.n
-            a = np.linalg.solve(S, g)
-            q = float(self.n * g @ a)
-            Va = V @ a                                               # C
-            dVa = np.einsum("ckp,k->cp", dV, a)                      # C x P
-            dq = 2 * self.n * (G.T @ a) - 2 * (dVa.T @ Va)
-            self.W = np.linalg.inv(S)
-        else:
-            q = float(self.n * g @ self.W @ g)
-            dq = 2 * self.n * (G.T @ self.W @ g)
-        self.last = dict(theta=theta.copy(), delta=delta, xi=xi, beta=self.beta_of @ delta, q=q, G=G, ok=ok)
-        print(f"eval {self.evals:4d}  q={q:.6e}  |grad|={np.abs(dq).max():.2e}  inversions_ok={ok} "
-              f"worst_resid={worst:.1e}  sd_xi={xi.std():.4f}  {time.time() - t0:.1f}s\n"
-              f"      theta={np.array2string(theta, precision=4, max_line_width=250)}", flush=True)
-        if not ok:
-            return 1e10, np.zeros_like(theta)
-        return q, dq
-
-    def _cluster_sum(self, a):
-        out = np.zeros((self.n_clusters, a.shape[1]))
-        np.add.at(out, self.cluster, a)
-        return out
-
-    def _cluster_sum3(self, Z, dxi):
-        out = np.zeros((self.n_clusters, Z.shape[1], dxi.shape[1]))
-        np.add.at(out, self.cluster, Z[:, :, None] * dxi[:, None, :])
-        return out
-
-    def standard_errors(self, theta, cluster):
-        self.objective(theta)
-        G, xi = self.last["G"], self.last["xi"]
-        codes = pd.factorize(cluster)[0]
-        zxi = self.Z * xi[:, None]
-        S = np.zeros((N_ZD, N_ZD))
-        for c in np.unique(codes):
-            v = zxi[codes == c].sum(0)
-            S += np.outer(v, v)
-        S /= self.n
-        bread = np.linalg.inv(G.T @ self.W @ G)
-        V = bread @ G.T @ self.W @ S @ self.W @ G @ bread / self.n
-        return np.sqrt(np.diag(V)), S
-
-
-def start_values():
-    th = np.zeros(len(NAMES))
-    st = {"sigma_const": 3.0, "sigma_hpwt": 2.0, "sigma_space": 1.0, "sigma_air": 0.5, "sigma_mpd": 1.0, "sigma_fwd": 1.0, "sigma_mi": 2.0, "sigma_sw": 2.0, "sigma_su": 2.0, "sigma_pv": 2.0,
-          "pi_mi_logfs_fv": 0.3, "pi_sw_logfs_fv": 0.3, "pi_su_logfs_fv": 0.3, "pi_pv_logfs_fv": 0.3,
-          "phi_low_inc": 0.0, "phi_mid_inc": 0.0, "phi_high_inc": 0.0, "sigma_p": 0.7}
-    for n, v in st.items():
-        if n in NAMES:                        # skip names absent in the current spec (e.g. body sigmas)
-            th[NAMES.index(n)] = v
-    if os.environ.get("PCM_START"):
-        prev = pd.read_csv(os.environ["PCM_START"], index_col=0)["estimate"]
-        for n, v in prev.items():
-            if n in NAMES:
-                th[NAMES.index(n)] = v
-    return th
-
-
-def parameter_scales():
-    """delta is in $1000; a taste spread of a few $1000 on a characteristic is the natural unit."""
-    sc = {"sigma_const": 3.0, "sigma_hpwt": 2.0, "sigma_space": 1.0, "sigma_air": 0.5, "sigma_mpd": 1.0, "sigma_fwd": 1.0, "sigma_mi": 2.0, "sigma_sw": 2.0, "sigma_su": 2.0, "sigma_pv": 2.0,
-          "pi_mi_logfs_fv": 0.3, "pi_sw_logfs_fv": 0.3, "pi_su_logfs_fv": 0.3, "pi_pv_logfs_fv": 0.3,
-          "phi_low_inc": 1.0, "phi_mid_inc": 1.0, "phi_high_inc": 1.0, "sigma_p": 0.5}
-    return np.array([sc[n] for n in NAMES])
-
-
-def main():
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame, float]:
     products = pd.read_csv(pyblp.data.PETRIN_PRODUCTS_LOCATION)
     agents = pd.read_csv(pyblp.data.PETRIN_AGENTS_LOCATION)
-    nu_per_agent = int(os.environ.get("PCM_NU_PER_AGENT", "4"))
-    tag = os.environ.get("PCM_TAG", "")
-    prob = PCMProblem(products, agents, nu_per_agent=nu_per_agent)
-    print(f"{len(prob.markets)} markets, {len(products)} products, consumers per market {1000 * nu_per_agent}", flush=True)
+    price_range = float(products.prices.max() - products.prices.min())   # pooled, before tie breaking: 66.1
+    products["prices"] = break_price_ties(products.prices.to_numpy(float), products.market_ids.to_numpy(), 0.01)
+    # body type label for diversion by group: the first of mi, sw, su, pv whose dummy is 1, else car (two
+    # products, 1988 and 1989, carry both mi and pv and count as minivans, as in estimate_blp.py)
+    body = np.full(len(products), "car", dtype=object)
+    for b in reversed(BODY):
+        body[products[b].to_numpy() == 1] = b
+    products["body"] = body.astype(str)
+    agents["logfs_fv"] = np.log(agents.fs) * agents.fv
+    for lvl in ("low", "mid", "high"):
+        agents[f"{lvl}_inc"] = agents[lvl] / agents.income
+    agents["income_group"] = np.select([agents.low == 1, agents.mid == 1, agents.high == 1], ["low", "mid", "high"], "none")
+    agents["fs_group"] = np.where(agents.fs >= 5, "5+", agents.fs.astype(int).astype(str))
+    return products, agents, price_range
 
-    scale = parameter_scales()
-    is_log = np.array([n.startswith("sigma") for n in NAMES])
 
-    def to_theta(u):
-        return np.where(is_log, scale * np.exp(np.where(is_log, u, 0.0)), scale * u)
+class PetrinSpec:
+    """The Petrin PCM spec read by nfp_harness.pipeline (interface in its module docstring)."""
 
-    def scaled(u):
-        th = to_theta(u)
-        q, dq = prob.objective(th)
-        return q, dq * np.where(is_log, th, scale)
+    name = "petrin_pcm"
+    firm_column = "firm_ids"
+    groups = "body"
+    group_other = "car"
+    binary_columns = ("air", "fwd") + BODY
+    prefit_free = ("phi_low", "phi_mid", "phi_high")
+    prefit_max_iterations = 30
+    gate_required = "micro"
 
-    th0 = start_values()
-    u0 = np.where(is_log, np.log(np.maximum(th0, 1e-12) / scale), th0 / scale)
-    # sigma_p in [0.05, 2]: a log price-sensitivity sd above 2 (95% range of 3000x) makes the
-    # inversion fail in every market; the other parameters are free
-    sp_lo, sp_hi = np.log(0.05 / scale[-1]), np.log(2.0 / scale[-1])
-    radius = float(os.environ.get("PCM_TRUST", "0.30"))
+    def __init__(self) -> None:
+        self.products, self.agents, self.price_range = load_data()
+        p = self.products
+        self.X1 = np.column_stack([np.ones(len(p))] + [p[c].to_numpy(float) for c in X1_COLS[1:]])
+        self.Z = np.column_stack([self.X1] + [p[f"demand_instruments{k}"].to_numpy(float) for k in range(22)])
+        self.linear_names = list(X1_COLS)
+        self.clusters = p.clustering_ids.to_numpy()
+        self.values = dict(pd.read_csv(pyblp.data.PETRIN_VALUES_LOCATION).iloc[:, :2].to_numpy())
+        self.normalisations = [
+            "median alpha = 1 at c_i = 1: log alpha_i = phi . scale basis + log a_i, a_i ~ LogNormal(0, sigma_p), "
+            "no constant (mu = 0; LEARNINGS 11)",
+            f"taste spreads on the body dummies mi, sw, su, pv capped at the pooled price range "
+            f"{self.price_range:.1f} ($1000), a normalisation of a direction the data leave quiet",
+            "taste spreads non-negative (draws are symmetric)",
+            "u_i0 = 0 in every year, with pgnp, trend and trend2 in X1 (harmless for the 1984 counterfactual)",
+            "PCM taste draws are scrambled Sobol standard normals crossed with pyblp's CEX agents; pyblp's nodes "
+            "are not used (owner decision 3)",
+        ]
+        r = self.price_range
+        self.plausible = {
+            "own_elasticity_median": (-12.0, -2.0), "share_own_elasticity_below_-50": (None, 0.01),
+            "nonzero_cross_median": (10.0, None), "diversion_leaving_group_median": (0.05, None),
+            "margin_median": (0.05, 0.60), "sd_xi_over_sd_delta": (None, 1.0),
+            "spread_buyer_dollars": {f"sigma_{b}": (None, r) for b in BODY},
+        }
 
-    def trust_bounds(center):
-        """Box of +-radius (in scaled units) around the last accepted point: L-BFGS-B has no
-        step limit, and its long trial steps toward small sigmas landed where the inversion
-        stalls (residual 1e-4 to 1e-3 after 20,000 evaluations) at 250-450 s each."""
-        b = [(c - radius, c + radius) for c in center]
-        k = NAMES.index("sigma_p")
-        b[k] = (max(b[k][0], sp_lo), min(b[k][1], sp_hi))
-        return b
+    # ------------------------------------------------------------------ parameters and moments
 
-    t0 = time.time()
-    best = None
-    for step in range(2):                       # two-step GMM
-        for restart in range(40):
-            x_start = u0 if best is None else best.x
-            res = minimize(scaled, x_start, jac=True, method="L-BFGS-B", bounds=trust_bounds(x_start),
-                           options={"gtol": 1e-5, "ftol": 1e-15, "maxiter": 500})
-            at_wall = np.any(np.abs(res.x - x_start) > radius - 1e-9)
-            print(f"step {step} restart {restart}: q={res.fun:.6e} at_trust_wall={at_wall} {res.message}", flush=True)
-            improved = best is None or res.fun < best.fun - 1e-6 * abs(best.fun)
-            if res.fun < (best.fun if best is not None else np.inf):
-                best = res
-            if not improved and not at_wall:
-                break
-        if step == 0 and not prob.cue:
-            _, S = prob.standard_errors(to_theta(best.x), products.clustering_ids.to_numpy())
-            prob.set_weighting(np.linalg.inv(S))
-            best.fun = prob.objective(to_theta(best.x))[0]
-        elif step == 0:
-            break                                   # CUE is one step
-    theta = to_theta(best.x)
-    print(best.message, f"{time.time() - t0:.0f}s")
-    se, _ = prob.standard_errors(theta, products.clustering_ids.to_numpy())
-    table = pd.DataFrame({"estimate": theta, "clustered_se": se}, index=NAMES)
-    print(table)
-    beta = pd.Series(prob.last["beta"], index=X1_COLS)
-    print("beta (delta on x1, $1000):\n", beta.round(4))
+    def layout(self) -> ParameterLayout:
+        r, p = self.price_range, self.products
+        specs = []
+        for k, c in enumerate(CHARS):
+            if c == "const":
+                specs.append(ParameterSpec("sigma_const", "taste", c, f"nu{k}", SIGMA_STARTS[c], 0.0, 10 * r, unit=1.0,
+                                           note="upper = 10 x price range, domain guard"))
+            elif c in BODY:
+                specs.append(ParameterSpec(f"sigma_{c}", "taste", c, f"nu{k}", SIGMA_STARTS[c], 0.0, r, cap=True,
+                                           unit=1.0, note="cap = price range, normalisation"))
+            else:
+                specs.append(ParameterSpec(f"sigma_{c}", "taste", c, f"nu{k}", SIGMA_STARTS[c], 0.0,
+                                           10 * r / float(np.std(p[c])), note="upper = 10 x price range, domain guard"))
+        specs += [ParameterSpec(f"pi_{b}", "taste", b, "logfs_fv", 0.3, -math.inf, math.inf, note="x log(fs) fv")
+                  for b in BODY]
+        specs += [ParameterSpec(f"phi_{lvl}", "scale", None, f"{lvl}_inc", 0.0, -math.inf, math.inf,
+                                note=f"log alpha on {lvl}/income") for lvl in ("low", "mid", "high")]
+        specs.append(ParameterSpec("sigma_p", "sigma_p", None, None, 1.0, 0.05, 3.0, note="sd of log alpha"))
+        return ParameterLayout(specs)
 
-    np.savez(OUT / f"pcm_estimates{tag}.npz", theta=theta, se=se, delta=prob.last["delta"], xi=prob.last["xi"], beta=beta.to_numpy())
-    table.to_csv(OUT / f"pcm_estimates{tag}.csv")
-    beta.to_csv(OUT / f"pcm_beta{tag}.csv")
-    with open(OUT / f"pcm_estimates{tag}.json", "w") as fh:
-        json.dump({"objective": float(best.fun), "message": str(best.message), "evaluations": prob.evals,
-                   "nu_per_agent": nu_per_agent, "cue": prob.cue, "body_sigma": BODY_SIGMA}, fh, indent=2)
+    def micro_moment(self, which: str) -> RatioMicroMoment:
+        """Petrin's CEX micro moments as in estimate_blp.build_micro_moments; ``which`` = "all" or "income"."""
+        nums, dens, vals, labels = [], [], [], []
+        if which == "all":
+            for demo in ("age", "fs"):
+                for b in BODY:
+                    nums.append(MicroPart(f"E[{demo}*{b}]", (demo,), (b,)))
+                    dens.append(MicroPart(f"E[{b}]", (), (b,)))
+                    vals.append(self.values[f"E[{demo} | {b}]"])
+                    labels.append(f"E[{demo}_i | {b}_j]")
+        for inc in ("mid", "high"):
+            nums.append(MicroPart(f"E[inside*{inc}]", (inc,), ()))
+            dens.append(MicroPart(f"E[{inc}]", (inc,), (), outside_value=1.0))
+            vals.append(self.values[f"E[new | {inc}]"])
+            labels.append(f"E[1{{j>0}} | {inc}_i]")
+        return RatioMicroMoment("micro", MicroDataset("CEX", 29125), nums, dens, np.array(vals), labels)
+
+    # The frontier-event step guard (DESIGN 4.2, 4.4) is off. Products with shares of 1e-5 lie on the
+    # frontiers of only one or two draws, so the first event in those draws sends their affected mass to 1
+    # and their vanishing bound to the draws' first event time. At the start point the cap was 0.003 of a
+    # phi step and 0.014 of the Gauss-Newton step at 1,024 draws, and 5e-13 at 4,096 draws, where 30
+    # accepted pre-fit steps left q at 560.673486. Steps are controlled by the trust region and the gain
+    # ratio instead; every trial point is re-inverted exactly.
+    use_max_step = False
+    # Trust radius in natural units (DESIGN 4.3 defaults 0.3 and 5). A 0.6-unit phi step at 4,096 draws sent
+    # one market's warm start into the cold fallback for over 30 minutes; smaller boxes keep trial points
+    # within reach of the warm start and the theta path.
+    optimizer_options = {"Delta_0": 0.1, "Delta_max": 0.5}
+
+    def pcm_spec(self) -> PCMSpec:
+        # At a trial phi step from the pre-fit's second point, markets 1990-1993 failed the warm stage (2,500
+        # evaluations, 60-73 s), the theta path (stopped at tau 0.25-0.5) and then a 40,000-evaluation cold
+        # stage (860-1,380 s): 26 minutes to learn that the step must be rejected. Trial points therefore get
+        # no cold stage; the first evaluation and the cold profile points keep the full budget.
+        return PCMSpec(CHARS, track_realised_mass=self.use_max_step, trial_cold_evals=0)
+
+    def hash_payload(self) -> dict[str, Any]:
+        return {"data": "pyblp 1.3.0 Petrin, prices spread to a $10 gap", "chars": CHARS, "x1": X1_COLS,
+                "z": "X1 + demand_instruments0..21", "layout": [dataclasses.asdict(s) for s in self.layout().specs],
+                "micro": {"values": self.values, "observations": 29125}, "pcm": dataclasses.asdict(self.pcm_spec()),
+                "draws": "Sobol normals, seed + market position, crossed with agents", "max_step": self.use_max_step,
+                "optimizer": self.optimizer_options}
+
+    def build_problem(self, nu: int, seed: int, threads: int | None, moments: str,
+                      layout_changes: dict[str, Any] | None = None) -> NFPGMMProblem:
+        layout = self.layout()
+        if layout_changes:
+            layout = layout.replace(layout_changes)
+        model = PCMModel(self.pcm_spec(), {"products": self.products, "agents": self.agents}, layout, nu, seed,
+                         total_threads=threads)
+        ms: list[Any] = [IVMoments(self.Z, self.clusters)]
+        if moments in ("all", "prefit"):
+            ms.append(self.micro_moment("all" if moments == "all" else "income"))
+        return NFPGMMProblem(model, ms, LinearIV(self.X1, self.Z, names=X1_COLS), layout, max_step=self.use_max_step)
+
+    def named_directions(self, theta: np.ndarray, units: np.ndarray) -> dict[str, np.ndarray]:
+        """Known flat directions in natural units at theta (DESIGN 5.2): the utility-scale direction
+        (sigma_p up, every taste spread down in proportion, LEARNINGS 1) and the body-level direction
+        (body sigmas and their family-size pis up in proportion, LEARNINGS 14)."""
+        names = self.layout().names
+        u = np.asarray(theta, dtype=float) / np.asarray(units, dtype=float)
+        scale, body = np.zeros(len(names)), np.zeros(len(names))
+        for k, n in enumerate(names):
+            if n == "sigma_p":
+                scale[k] = u[k]
+            elif n.startswith("sigma_"):
+                scale[k] = -u[k]
+            if n in {f"sigma_{b}" for b in BODY} | {f"pi_{b}" for b in BODY}:
+                body[k] = u[k]
+        return {"scale_direction": scale, "body_level_direction": body}
+
+    # ------------------------------------------------------------------ gate (DESIGN 6.4)
+
+    def gate_profiles(self) -> list[tuple[str, str, dict[str, Any]]]:
+        """One sigma ray profile with all moments evaluated (DESIGN 6.4), read twice: the micro verdict on
+        q_fixed, and the no-micro verdict on its aggregate block, which with block-diagonal W1 is the
+        aggregate-only objective with Z = [X1, Z_excl] at the same inversions (owner decision 1)."""
+        fail = ("Profile check failed: q is still monotone in sigma_p{what}. LEARNINGS 14 predicted otherwise with "
+                "micro moments; the plan needs the owner before any long estimation.")
+        econ = ["sd_xi", "median_own_elasticity", "nonzero_cross_median", "diversion_leaving_body_median",
+                "inside_share_mean"]
+        rules = {
+            "no_micro": {"rule": NotMonotoneDecreasing("sigma_p", by=("lambda",), column="q_fixed:aggregate",
+                                                       rise=3.84, fail_message=fail.format(what=" without micro moments")),
+                         "columns": ["q_fixed:aggregate", "q_cue:aggregate"] + econ},
+            "micro": {"rule": NotMonotoneDecreasing("sigma_p", by=("lambda",), column="q_fixed", rise=3.84,
+                                                    fail_message=fail.format(what=" with micro moments")),
+                      "columns": ["q_fixed", "q_cue", "q_fixed:aggregate", "q_fixed:micro"] + econ
+                      + ["E[1{j>0}|mid_i]", "E[1{j>0}|high_i]"]},
+        }
+        kw = {"direction": SIG_REF, "lambdas": [0.5, 1.0, 2.0], "grid": {"sigma_p": [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]},
+              "origin": 0.0, "layout_changes": {"sigma_p": {"upper": 3.5}}, "economics": self.gate_economics,
+              "rules": rules}
+        return [("sigma_ray", "all", kw)]
+
+    def gate_economics(self, problem: Any, ev: Any) -> dict[str, float]:
+        """Per profile point: the aggregate-only CUE objective, elasticities, diversion, inside shares."""
+        sol, fit = ev.aux["solution"], ev.aux["linear_fit"]
+        g_a = ev.g[problem.agg_rows]
+        S_a = problem.agg.covariance_block(sol, fit)
+        out = {"q_cue:aggregate": float(problem.n * g_a @ np.linalg.solve(S_a, g_a))}
+        post = pp.postestimation(problem.model, ev.theta, ev.aux["delta"], firm_ids=self.firm_column,
+                                 groups=self.groups, group_other=self.group_other)
+        pr = post["products"]
+        out.update({"median_own_elasticity": float(np.nanmedian(pr["own_elasticity"])),
+                    "nonzero_cross_median": float(np.nanmedian(pr["nonzero_cross"])),
+                    "diversion_leaving_body_median": float(np.nanmedian(pr["diversion_leaving_group"])),
+                    "inside_share_mean": float(np.mean([m["inside_share"] for m in post["markets"]]))})
+        pred = ev.aux.get("micro_predicted", {}).get("micro")
+        if pred is not None:
+            for lab, v in zip(problem.moments[1].labels, pred):
+                if "1{j>0}" in lab:
+                    out[lab.replace(" ", "")] = float(v)
+        return out
+
+    # ------------------------------------------------------------------ postestimation (DESIGN 6.5)
+
+    def _draw_labels(self, model: Any, t: int, column: str) -> np.ndarray:
+        md = model.market_draws(t)
+        return self.agents[column].to_numpy()[np.asarray(md["agent_rows"])[md["agent_of_draw"]]].astype(str)
+
+    def counterfactual(self, model: Any, theta: np.ndarray, delta: np.ndarray, resolve_prices: bool
+                       ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """1984 without minivans (Petrin's headline): CS change at fixed prices and, if asked, with prices
+        re-solved to a Nash equilibrium at the FOC costs. Gains in $M = households (thousands) x CS ($1000)."""
+        mi = self.products.mi.to_numpy() == 1
+        cf = pp.drop_products_counterfactual(model, theta, delta, YEAR, mi, firm_ids=self.firm_column,
+                                             resolve_prices=resolve_prices, tol=1e-7, max_iterations=500)
+        hh = float(self.products.households[self.products.market_ids == YEAR].iloc[0])
+        out: dict[str, Any] = {
+            "minivan_cs_gain_1984_fixed_prices_musd": hh * (cf["observed"]["cs"] - cf["fixed_prices"]["cs"]),
+            "inside_share_1984_observed": cf["observed"]["inside_share"],
+            "inside_share_1984_fixed_prices": cf["fixed_prices"]["inside_share"],
+            "cs_1984_observed_per_household": cf["observed"]["cs"],
+        }
+        per = {"observed": cf["observed"]["per_draw"], "fixed_prices": cf["fixed_prices"]["per_draw"]}
+        nash = cf["nash"]
+        if nash is not None:
+            out.update(nash_status_1984=nash["status"], nash_iterations_1984=nash["iterations"],
+                       nash_fixed_point_steps_1984=nash["fixed_point_steps"], nash_max_residual_1984=nash["step"],
+                       nash_foc_residual_1984=nash["foc_residual"])
+            if nash.get("per_draw") is not None:
+                out["minivan_cs_gain_1984_musd"] = hh * (cf["observed"]["cs"] - nash["cs"])
+                out["inside_share_1984_nash"] = nash["inside_share"]
+                per["nash"] = nash["per_draw"]
+            out["nash_note_1984"] = (
+                "Nash prices converged; the Nash gain is at an equilibrium." if nash["status"] == "converged" else
+                f"Nash re-solve ended '{nash['status']}' after {nash['iterations']} iterations (max |r| "
+                f"{nash['step']:.3g}); the 'Nash' gain is at the last iterate, not at an equilibrium. At finite draws "
+                f"an exact PCM price equilibrium need not exist (WP8).")
+        t = pp.market_position(model, YEAR)
+        w = np.asarray(model.kernel_market(t).weights)
+        tables = {}
+        for name, col in (("income", "income_group"), ("fs", "fs_group")):
+            rows = comparison.cs_gain_by_group(per, w, self._draw_labels(model, t, col), hh)
+            tables[name] = rows
+            for r in rows:
+                if "gain_nash_musd" in r:
+                    out[f"cs_gain_1984_{name}_{r['group']}_musd"] = r["gain_nash_musd"]
+                out[f"cs_gain_1984_fixed_prices_{name}_{r['group']}_musd"] = r["gain_fixed_prices_musd"]
+        return out, {"tables": tables, "raw": cf}
+
+    def post(self, pipe: Any, problem: Any, result: Any, out: pathlib.Path) -> dict[str, Any]:
+        model, theta, delta = problem.model, np.asarray(result.theta), np.asarray(result.evaluation.aux["delta"])
+        post = pp.postestimation(model, theta, delta, firm_ids=self.firm_column, groups=self.groups,
+                                 group_other=self.group_other)
+        prod = pd.DataFrame({k: v for k, v in post["products"].items()})
+        prod.insert(0, "row", np.arange(len(prod)))
+        prod.to_csv(out / "product_level.csv", index=False)
+        summary = comparison.summarise(post["products"], post["group_matrix"], post["group_names"])
+        cf, extra = self.counterfactual(model, theta, delta, resolve_prices=True)
+        summary.update(cf)
+        summary["inside_share_by_market"] = {str(m["market_id"]): m["inside_share"] for m in post["markets"]}
+        summary["nash_singular_markets"] = [str(m) for m in post["nash_singular"]]
+        sb = pp.spread_in_buyer_dollars(model, theta, delta)
+        summary["mean_alpha_buyers"] = sb["mean_alpha_buyers"]
+        summary["spread_buyer_dollars"] = sb["spreads"]
+        summary["cs_tables_1984"] = extra["tables"]
+        for name, rows in extra["tables"].items():
+            pd.DataFrame(rows).to_csv(out / f"cs_1984_by_{name}.csv", index=False)
+        blp = {}
+        for label, fname in BLP_SUMMARIES.items():
+            f = HERE / "results" / fname
+            if f.exists():
+                blp[label] = json.loads(f.read_text())
+        note = ("BLP micro and BLP no micro estimate a log-cost supply side jointly; BLP demand micro and the PCM use "
+                "demand moments only (aggregate + micro) and recover costs from the Nash FOC. "
+                f"PCM estimate: stage {result.stage}, {result.convergence.value}, {pipe.cfg.nu} draws per agent. "
+                f"PCM Nash status 1984: {summary.get('nash_status_1984')}. {summary.get('nash_note_1984', '')}")
+        rows = {k: v for k, v in comparison.scalar_items(summary).items() if k != "nash_note_1984"}
+        table = pp.compare_blp(rows, {k: comparison.scalar_items(v) for k, v in blp.items()}, note=note)
+        gd = ["", "Diversion by body type (share-weighted mean, rows: from, columns: to):"]
+        for src, dst in summary["group_diversion"].items():
+            gd.append(f"  PCM {src:>4}: " + "  ".join(f"{k} {v:.3f}" for k, v in dst.items()))
+        for label, v in blp.items():
+            for src, dst in (v.get("group_diversion") or {}).items():
+                gd.append(f"  {label} {src:>4}: " + "  ".join(f"{k} {x:.3f}" for k, x in dst.items()))
+        (out / "comparison.txt").write_text(table + "\n" + "\n".join(gd) + "\n")
+        pipeline.log.info("comparison with BLP:\n%s", table)
+        return summary
+
+    def headlines(self, problem: Any, result: Any) -> dict[str, float]:
+        """Median own-price elasticity and the fixed-price 1984 minivan CS gain, for the integration check."""
+        model, theta, delta = problem.model, np.asarray(result.theta), np.asarray(result.evaluation.aux["delta"])
+        post = pp.postestimation(model, theta, delta, firm_ids=self.firm_column, groups=self.groups,
+                                 group_other=self.group_other)
+        cf, _ = self.counterfactual(model, theta, delta, resolve_prices=False)
+        return {"own_elasticity_median": float(np.nanmedian(post["products"]["own_elasticity"])),
+                "minivan_cs_gain_1984_fixed_prices_musd": cf["minivan_cs_gain_1984_fixed_prices_musd"]}
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(pipeline.main(PetrinSpec(), default_nu=16, default_base=RESULTS))
