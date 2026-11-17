@@ -779,3 +779,25 @@ narrow spreads. With a scale-free aggregate block the objective prefers the wide
 which is the direction BLP-like substitution needs. Elasticities at the minima: -10.4, -12.3 and
 -13.6; margins 0.18, 0.16, 0.14. The supply-only both-ends rule still fails (flat left), as entry 25
 explains: supply bounds markups only from above. These are the starting points for the margin band.
+
+## 27. A binding margin row in a Gauss-Newton objective makes every direction collinear; calibrate through sigma_p instead (2026-11-17)
+
+**Run.** margin_band at nu = 16 (run petrin_pcm_8cdfbfe173), Sargan + micro + supply + one margin row
+weighted 1e4 / (n 0.01^2), from the Sargan gate minimum (lambda 1, sigma_p 2, margin 0.16).
+
+**Result.** All five points stopped within 2 to 4 minutes: m* = 0.10, 0.24, 0.30 STALLED at q of 4e5,
+2.4e5, 8.6e5 with projected gradients of 6e6 to 9e6; m* = 0.15 CONVERGED_NOISE at 4.3e4; m* = 0.20
+STALLED at q 254.7 (aggregate 173.8, micro 9.8, supply 11.8, margin 59.3), sigma_p 2.07. The report
+flagged every taste spread as collinear with sigma_p in G (correlations 0.990 to 0.999).
+
+**Mechanism.** The margin row's weight is about 1e8 / n, so G'WG is rank one along the margin
+gradient. Every nonlinear parameter moves the margin, so the Gauss-Newton model cannot separate
+them, and the trimmed-mean margin is itself a kinked function of theta (markups jump with ds/dp), so
+trial steps along the dominant direction overshoot. A penalty that binds by weight is the wrong tool
+for a nonsmooth calibration target.
+
+**Change.** Calibrate the markup level through sigma_p, the parameter that sets it (entry 21: own
+elasticity about -25 / sigma_p): the sigma_p_band stage fixes sigma_p at each of 1.5, 2.0, 2.5, 2.75,
+3.0 and estimates everything else on Sargan + micro + supply with no margin row. At the gate, the
+median margin is 0.16 at sigma_p 2, 0.21 at 2.5 and 0.27 at 3, so 2.75 is close to Petrin's BLP
+median margin of 0.24, and the band reports the margin each sigma_p implies.

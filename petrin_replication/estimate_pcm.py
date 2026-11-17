@@ -101,7 +101,7 @@ GATE_LAMBDAS = (0.5, 1.0, 2.0)
 GATE_SIGMA_P = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
 GATE_SLICE = {"lambda": 1.0}
 HAULERS = ("mi", "sw", "su", "pv")
-BAND_SIGMA_P = (1.0, 1.5, 2.0, 2.5, 3.0)   # fallback: sigma_p set-identified (round-2 analysis, change 8)
+BAND_SIGMA_P = (1.5, 2.0, 2.5, 2.75, 3.0)   # sigma_p set-identified; 2.75 gives about the BLP median margin 0.24 at the gate (LEARNINGS 27)
 BAND_HEADLINE = 2.0
 BAND_COLUMNS = ("own_elasticity_median", "own_elasticity_times_sigma_p", "share_own_elasticity_below_-20",
                 "margin_median", "inside_share_semi_elasticity", "minivan_cs_gain_1984_fixed_prices_musd",
