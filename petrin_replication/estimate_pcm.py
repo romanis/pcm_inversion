@@ -3,7 +3,7 @@
     u_ijt = delta_jt + x_jt . t_i - c_i a_i p_jt,   u_i0t = 0
     x     = [1, hpwt, space, air, mpd, fwd, mi, sw, su, pv]
     t_i   = sigma_k nu_ik on all 10 columns (body sigmas on mi, sw, su, pv)  +  pi_b log(fs_i) fv_i on mi, sw, su, pv
-    log c_i = phi_low low_i/income_i + phi_mid mid_i/income_i + phi_high high_i/income_i
+    log c_i = phi_y log(ybar/income_i) + phi_mid mid_i + phi_high high_i   (ybar = median CEX income)
     a_i   ~ LogNormal(0, sigma_p)
     delta_jt = X1_jt beta + xi_jt,  X1 = [1, hpwt, space, air, mpd, fwd, mi, sw, su, pv, pgnp, trend, trend2]
     Z     = [X1, demand_instruments0..21]  (35 columns; LEARNINGS 16)
@@ -79,8 +79,11 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, float]:
         body[products[b].to_numpy() == 1] = b
     products["body"] = body.astype(str)
     agents["logfs_fv"] = np.log(agents.fs) * agents.fv
-    for lvl in ("low", "mid", "high"):
-        agents[f"{lvl}_inc"] = agents[lvl] / agents.income
+    # Price scale c_i = alpha_i / a_i enters in logs: log c_i = phi_y log(ybar / income_i) + phi_mid mid_i
+    # + phi_high high_i. phi_y = 1 is Petrin's alpha proportional to 1/income. The range of log c_i is set by the
+    # income range, so no draw becomes price-insensitive by orders of magnitude (LEARNINGS 18: exp(phi
+    # low/income) reached c_i = 7e-12 and broke the inversion).
+    agents["log_ybar_inc"] = np.log(float(agents.income.median()) / agents.income)
     agents["income_group"] = np.select([agents.low == 1, agents.mid == 1, agents.high == 1], ["low", "mid", "high"], "none")
     agents["fs_group"] = np.where(agents.fs >= 5, "5+", agents.fs.astype(int).astype(str))
     return products, agents, price_range
@@ -94,7 +97,7 @@ class PetrinSpec:
     groups = "body"
     group_other = "car"
     binary_columns = ("air", "fwd") + BODY
-    prefit_free = ("phi_low", "phi_mid", "phi_high")
+    prefit_free = ("phi_y", "phi_mid", "phi_high")
     prefit_max_iterations = 30
     gate_required = "micro"
 
@@ -141,8 +144,10 @@ class PetrinSpec:
                                            10 * r / float(np.std(p[c])), note="upper = 10 x price range, domain guard"))
         specs += [ParameterSpec(f"pi_{b}", "taste", b, "logfs_fv", 0.3, -math.inf, math.inf, note="x log(fs) fv")
                   for b in BODY]
-        specs += [ParameterSpec(f"phi_{lvl}", "scale", None, f"{lvl}_inc", 0.0, -math.inf, math.inf,
-                                note=f"log alpha on {lvl}/income") for lvl in ("low", "mid", "high")]
+        specs.append(ParameterSpec("phi_y", "scale", None, "log_ybar_inc", 1.0, -1.0, 3.0,
+                                   note="log alpha on log(ybar/income); 1 = Petrin's alpha ~ 1/income"))
+        specs += [ParameterSpec(f"phi_{lvl}", "scale", None, lvl, 0.0, -math.inf, math.inf,
+                                note=f"log alpha shift for {lvl}-income group") for lvl in ("mid", "high")]
         specs.append(ParameterSpec("sigma_p", "sigma_p", None, None, 1.0, 0.05, 3.0, note="sd of log alpha"))
         return ParameterLayout(specs)
 
