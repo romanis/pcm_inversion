@@ -113,6 +113,10 @@ def enable_crash_dumps(run_dir: str | pathlib.Path) -> dict[str, Any]:
     trace.write(f"--- pid {os.getpid()} started {_utc_now()}\n")
     trace.flush()
     faulthandler.enable(file=trace, all_threads=True)
+    try:
+        import nfp_harness._native  # noqa: F401  load the kernel now so its exact binary is snapshotted
+    except ImportError:
+        pass
     native = run_dir / "native"
     native.mkdir(exist_ok=True)
     modules = {}
