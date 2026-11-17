@@ -412,9 +412,12 @@ class SupplyMoments:
 
     def __init__(self, Z: np.ndarray, w: np.ndarray, firm_ids: np.ndarray, clustering_ids: np.ndarray | None = None,
                  name: str = "supply", w_names: Sequence[str] | None = None, rcond_min: float = 1e-12,
-                 fd_step: float = 1e-6, fd_shrink: int = 2) -> None:
+                 fd_step: float = 1e-6, fd_shrink: int = 2, mc_floor: float | None = None) -> None:
         """SupplyMoments(Z, w, firm_ids, clustering_ids=None, name="supply", w_names=None, rcond_min=1e-12,
-        fd_step=1e-6, fd_shrink=2). Z = [w, excluded supply instruments] (n, k_s), w the cost basis (n, K_s)."""
+        fd_step=1e-6, fd_shrink=2, mc_floor=None). Z = [w, excluded supply instruments] (n, k_s), w the cost
+        basis (n, K_s). ``mc_floor`` (price units) clips FOC costs from below as pyblp's ``costs_bounds``: a
+        product whose Nash markup exceeds its price (|own elasticity| < 1) gets mc = mc_floor and zero cost
+        derivative, and the count is reported as ``share_mc_clipped``. None keeps the hard mc > 0 guard."""
         from .linear import IdentificationError, matrix_rank
 
         self.Z = np.asarray(Z, dtype=float)
@@ -443,6 +446,7 @@ class SupplyMoments:
         self.rcond_min = float(rcond_min)
         self.fd_step = float(fd_step)
         self.fd_shrink = int(fd_shrink)
+        self.mc_floor = None if mc_floor is None else float(mc_floor)
         self.ZtW = self.Z.T @ self.w / self.n  # (k, K) = -d g_s / d gamma
         self.model: object | None = None
         self.P: int | None = None
@@ -485,6 +489,9 @@ class SupplyMoments:
 
         nash = nash_markups(s, ds_dp, firms, self.rcond_min)
         mc = p - nash["markup"]
+        if self.mc_floor is not None:
+            nash["clipped"] = ~(mc > self.mc_floor)
+            mc = np.where(nash["clipped"], self.mc_floor, mc)
         return mc, nash
 
     def log_costs(self, sol: InnerSolution, need_jacobian: bool) -> tuple[np.ndarray, np.ndarray | None, dict]:
@@ -517,11 +524,18 @@ class SupplyMoments:
             markup[rows] = nash["markup"]
             mc_all[rows] = mc
         bad = ~(mc_all > 0)
+        clipped = np.zeros(self.n, dtype=bool)
+        if self.mc_floor is not None:
+            for t, m in enumerate(model.markets):
+                rows = np.asarray(m.rows)
+                p_t = np.asarray(model.kernel_market(t).p, dtype=float)
+                clipped[rows] = ~(p_t - markup[rows] > self.mc_floor)
         p_all = np.empty(self.n)
         for t, m in enumerate(model.markets):
             p_all[np.asarray(m.rows)] = np.asarray(model.kernel_market(t).p, dtype=float)
         info: dict = {"nash_rcond_min": float(min(rconds)) if rconds else float("nan"),
-                      "share_mc_nonpositive": float(np.mean(bad)), "markup": markup, "mc": mc_all,
+                      "share_mc_nonpositive": float(np.mean(bad)), "share_mc_clipped": float(np.mean(clipped)),
+                      "markup": markup, "mc": mc_all,
                       "margin_median": float(np.nanmedian(markup / p_all)) if np.isfinite(markup).any() else float("nan")}
         if singular:
             raise SupplyDomainError(f"{self.name}: ownership-weighted ds/dp below rcond {self.rcond_min:.0e} in "

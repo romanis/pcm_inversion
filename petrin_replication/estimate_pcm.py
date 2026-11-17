@@ -102,6 +102,11 @@ FAM_CAP = 25.0       # $1000: 2 (1 - Phi(66.1 / 25)) = 0.8% of consumers value f
 BODY_SIGMA_CAP = 25.0
 INCOME_CLIP = (1.0, 150.0)
 TWIN_KEYS = ("market_ids", "firm_ids", "prices", "hpwt", "space", "air", "mpd", "fwd", "mi", "sw", "su", "pv")
+# FOC costs are clipped at $500 (pyblp's costs_bounds convention): a product with |own elasticity| < 1 has a
+# Nash markup above its price. The clipped share is reported and flagged; at sigma_p <= 2 it is 1-2 products,
+# at sigma_p 3-4 it is 94-336, and the log-cost residual of a clipped product (log 0.5 against about 2.5)
+# is the supply block's penalty on that region (LEARNINGS 22).
+MC_FLOOR = 0.5
 ROBUSTNESS = ("body_sigma", "income_winsor", "sargan")
 MICRO_COVARIANCE_SOURCE = "pyblp.data.PETRIN_COVARIANCES_LOCATION, fixed"
 BLP_SUMMARIES = {"BLP micro": "blp_micro_summary.json", "BLP no micro": "blp_nomicro_summary.json",
@@ -325,6 +330,7 @@ class PetrinSpec:
                            "gamma": "concentrated, IV with the supply block of W", "jacobian": "central FD at fixed "
                            "inversions, kink-free steps (SupplyMoments)", "moments": "all = aggregate + micro + supply"},
                 "phi_by_income_moments": "income rows x 1e4 in prefit and gate concentration",
+                "mc_floor": MC_FLOOR,
                 "layout": [dataclasses.asdict(s) for s in self.layout().specs],
                 "micro": {"values": self.values, "observations": 29125, "covariance": MICRO_COVARIANCE_SOURCE},
                 "caps": {"sigma_fam": FAM_CAP, "body_sigma": BODY_SIGMA_CAP, "income_clip": INCOME_CLIP},
@@ -375,7 +381,7 @@ class PetrinSpec:
         analysis, change 2)."""
         return SupplyMoments(self.Z_supply, self.cost_basis, self.products[self.firm_column].to_numpy(),
                              self.clusters, name="supply", w_names=[f"gamma[{c}]" for c in COST_BASIS],
-                             rcond_min=NASH_RCOND_MIN)
+                             rcond_min=NASH_RCOND_MIN, mc_floor=MC_FLOOR)
 
     def named_directions(self, theta: np.ndarray, units: np.ndarray) -> dict[str, np.ndarray]:
         """Known flat directions in natural units at theta (DESIGN 5.2): the utility-scale direction

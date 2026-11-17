@@ -114,3 +114,21 @@ def test_nonpositive_marginal_cost_is_a_named_numerical_status() -> None:
         assert ev.aux["supply"]["share_mc_nonpositive"] > 0.0
     finally:
         prob.model.close()
+
+
+def test_mc_floor_clips_instead_of_failing() -> None:
+    """With mc_floor set, a markup above price gives mc = floor (reported), not SupplyDomainError."""
+    import numpy as np
+    from nfp_harness.moments import SupplyMoments
+
+    n = 6
+    rng = np.random.default_rng(0)
+    w = np.column_stack([np.ones(n), rng.normal(size=n)])
+    Z = np.column_stack([w, rng.normal(size=(n, 2))])
+    sm = SupplyMoments(Z, w, np.arange(n), mc_floor=0.5)
+    s = np.full(3, 0.1)
+    p = np.array([1.0, 2.0, 3.0])
+    ds_dp = -np.diag([0.05, 0.3, 0.3])   # product 0: markup s/|ds/dp| = 2 > price 1
+    mc, nash = sm._market_costs(0, s, p, np.arange(3), ds_dp)
+    assert mc[0] == 0.5 and bool(nash["clipped"][0]) and not nash["clipped"][1:].any()
+    assert np.all(mc > 0)
