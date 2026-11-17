@@ -120,7 +120,7 @@ GATE_SIGMA_P = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
 GATE_SLICE = {"lambda": 1.0}
 HAULERS = ("mi", "sw", "su", "pv")
 # sigma_p set-identified; under the bound the margin-0.24 point moves to about 3 to 3.5 (LEARNINGS 29)
-BAND_SIGMA_P = (2.5, 3.0, 3.5, 4.0)
+BAND_SIGMA_P = (2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
 BAND_MARGIN_TARGET = 0.24   # headline: the band point whose median margin is nearest Petrin's BLP median margin
 BAND_COLUMNS = ("own_elasticity_median", "own_elasticity_times_sigma_p", "share_own_elasticity_below_-20",
                 "margin_median", "inside_share_semi_elasticity", "minivan_cs_gain_1984_fixed_prices_musd",

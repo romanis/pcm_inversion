@@ -875,3 +875,28 @@ the trust region, no shrink on sub-noise rejections, CONVERGED_NOISE when the pr
 below 10x the noise floor, and a terminal probe.
 
 Full analysis kept locally at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v4.keep.md.
+
+## 30. Truncated alpha (alpha_lo = 0.2): the CS tail is gone, and markups fall at fixed theta (2026-11-17)
+
+Kernel with alpha_i = c_i a_i, a_i lognormal truncated below at alpha_lo / c_i (exact shares,
+derivatives and CS; derivatives match central differences to 8e-9, per-draw CS matches Simpson
+quadrature to 1e-12, alpha_lo = 0 reproduces the previous kernel).
+
+Check at the sigma_p 2.5 band point's theta, 1984 only, re-inverted with the bound:
+
+| | alpha_lo = 0 | alpha_lo = 0.2 |
+|---|---|---|
+| own elasticity, median | -8.84 | -33.9 |
+| Nash margin, median | 0.270 | 0.060 |
+| fixed-price 1984 minivan CS gain | $9,853.7M | $161.6M |
+
+The bound removes the low-alpha buyers that half of 1984 minivan sales relied on, so delta has to
+fall to refit the shares (largest change 14.3) and own elasticity rises 3.8x, more than the 1/Z factor
+alone. The gain is $960 per minivan buyer against BLP's $2.3k. Bounded Nash (Gauss-Seidel best
+responses in a +-10% box, 20 sweeps, 64,341 evaluations) did not settle: gain $196M, ranging $196M to
+$277M over the last 5 sweeps; no price hit the box edge; the largest profitable 2% deviation raised a
+firm's profit by 0.26%.
+
+These numbers are at a theta estimated without the bound; the band re-estimates everything else at
+each sigma_p. Because the margin at sigma_p 2.5 fell to 0.06, the band grid is extended to
+{2.5, 3, 3.5, 4, 4.5, 5}.
