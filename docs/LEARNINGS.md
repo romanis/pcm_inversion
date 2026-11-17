@@ -510,3 +510,59 @@ compete, through the taste draws. The $10 spread is a convenience, not a require
 linear to exponential. Check the range of every regressor that enters log alpha, and use
 log(income) rather than 1/income, so that the price-sensitivity range is bounded by the income
 range.
+
+## 19. Specification review by an independent economist agent (claude-fable-5.1), and the resulting spec (2026-11-17)
+
+An economist agent on a different model read entries 1-18, the specs and the failed gate, ran short
+data checks, and proposed the specification below. The points that change the plan:
+
+**Substitution in the exact PCM is local, and vertical within clusters of identical observables.**
+Median p / (gap to the next-priced product) is 173 in 1984. 43 of 163 products in 1984 share the
+profile (fwd only), 39 have no features, and there are 92 exact price ties, 17 of them with
+identical x. Two products with the same x are a vertical pair for every consumer, with own
+elasticity of order p / gap. Moderate elasticities need per-product quality dispersion across
+consumers of thousands of dollars, which BLP gets from the logit error (sd 1.28 utils at about 0.6
+utils per $1,000, about $2,100) and the PCM must get from the taste spreads.
+
+**The gate as run could not pass on substance.** It fixed phi at the prefit values while varying
+sigma_p, so the income purchase-rate moments drifted and q_micro rose mechanically (112 to 188 along
+lambda = 1) while q_aggregate still fell (83 to 68). Only a profile that re-solves phi at each point
+tests entry 14.
+
+**The data require price sensitivity that is flat across income groups.** Pooled CEX purchase
+rates: low about 0.102, mid 0.079, high 0.158. Petrin's BLP fits this with pi_g / median income_g of
+0.67, 0.67, 0.58, i.e. alpha flat across groups and proportional to 1/income within them. Within the
+low group 1/income spans a factor of 3,000 (1% of agents report incomes under $262), so any
+exponentiated function of income inherits that tail (entry 18).
+
+**Weak identification of the spreads.** At the last prefit, Cragg-Donald is 12.9 against a critical
+value of 49.8. BLP sum-of-characteristics instruments are built for beta, not sigma. Gandhi-Houde
+local differentiation instruments target the spreads.
+
+**Resulting spec.** Taste spreads on const, hpwt, space, air, mpd, fwd and one common "family hauler"
+factor fam = max(mi, sw, su, pv), capped at $25k so under 1% of consumers value it beyond the price
+range (the old $66.1k cap left 32% beyond it, inside the segmented corner of entry 13). Body-specific
+spreads fixed at 0 in the main run, since only second-choice data would pin them (entry 14). Petrin's
+pi_b log(fs) fv on the four body dummies. log alpha_i = phi_mid mid_i + phi_high high_i + sigma_p
+nu_ip with the low group as reference: c_i is bounded by construction. Robustness: phi_y fixed at 1
+on log(ybar / income) with income winsorised to [1, 150]. Merge the 17 same-firm identical-x exact
+twins; keep the $10 spread for the other ties. Starts mapped from pyblp's BLP-micro estimate divided
+by alpha of about 0.65 utils per $1,000: pi = (0.75, 0.28, 0.20, 0.41); all spreads about $2,000 per
+sd. Gate: concentrated sigma_p profile with (phi_mid, phi_high) re-solved at each point. Step 1
+fixed W1, step 2 with S^-1 and Petrin's micro covariances.
+
+**Fallback if the concentrated profile is still monotone in sigma_p.** Replace the aggregate block by
+its Sargan form, q_S = n xi' P_Z xi / xi' xi. It is invariant to the scale of xi, which closes the
+entry 1 route, and it divides by the global variance rather than product by product, so a single
+huge xi_j drives q_S toward n h_jj, not toward zero, which keeps the entry 13 route closed. If the
+profile is flat rather than monotone, calibrate sigma_p to BLP-micro's inside-share semi-elasticity
+and report it as a calibration.
+
+**Plausibility targets.** Median own elasticity in [-8, -3]; per-product quality dispersion across
+consumers $1,500-$6,000; minivan diversion to wagons, SUVs and vans at least 0.15 of inside
+diversion; inside-share semi-elasticity to a uniform 1% price rise in [-2, -0.5]; median Nash margin
+0.15-0.40; each micro moment within 2 Petrin sds. Note from the agent's read of the BLP outputs: the
+demand-only BLP fit with the PCM's moments gives own elasticity -1.97, margin 0.57 and a 1984 gain
+of $1,046M at fixed prices, so demand-only BLP is itself fragile on these moments.
+
+Full analysis kept locally (untracked) at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v1.md.
