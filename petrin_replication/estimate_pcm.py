@@ -817,7 +817,8 @@ class PetrinSpec:
                     f"FOC costs, ended '{nash['status']}' after {nash['sweeps']} sweeps; {nash['box_binding']['count']} "
                     f"prices at a box end; largest profitable unilateral deviation of +-{100 * NASH_DEVIATION:g}% "
                     f"raises a firm's profit by {100 * dev['max_gain']:.3g}%"
-                    + (f"; CS gain over the cycle {out['minivan_cs_gain_1984_bounded_nash_range_musd'][0]:,.0f} to "
+                    + (f"; CS gain over {'the cycle' if nash['status'] == 'cycle' else 'the last 5 sweeps'} "
+                       f"{out['minivan_cs_gain_1984_bounded_nash_range_musd'][0]:,.0f} to "
                        f"{out['minivan_cs_gain_1984_bounded_nash_range_musd'][1]:,.0f} $M"
                        if "cs_range" in nash else "") + ". It is an approximation, not an equilibrium (LEARNINGS 29).")
             else:
