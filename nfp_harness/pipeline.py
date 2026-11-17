@@ -33,7 +33,10 @@ latest one is also copied to the run directory root):
   S^{-1} at the step-1 point, only if step 1 converged) on ``spec.band_moments`` from the prefit point, then
   ``spec.band_row(pipeline, problem, result, value) -> dict`` at the last estimate. Rows go to
   ``sigma_p_band/band.csv`` (plus ``spec.band_reference_rows()``, e.g. BLP) and ``band.json``; each point is
-  checkpointed (stages ``band.<value>.step1|step2|row``), so a killed run resumes at the point it was in.
+  checkpointed (stages ``band.<value>.step1|step2|row``), so a killed run resumes at the point it was in. When
+  every point is in, ``spec.band_finish(pipeline, problem, rows) -> rows`` (optional) labels the headline and
+  may add columns (it can rebuild a point's estimate with ``pipeline.band_result``); its rows are checkpointed
+  as stage ``band.finish``.
 - ``margin_band`` (a calibrated markup level, round-3 analysis 5.3): for each m* in ``spec.margin_band_values``
   the problem ``spec.build_problem(..., margin=m*)`` (all nonlinear parameters free), step 1 with W1 from
   ``start_point`` (shared by every point), step 2 with W2 = S^{-1} at the step-1 point when step 1 converged
@@ -633,10 +636,32 @@ class Pipeline:
                 rows.append(row)
                 self.rd.save_stage(f"{tag}.row", {"row": json.dumps(to_jsonable(row), allow_nan=False)})
                 self._write_band(out, rows, par)
+            finish = getattr(spec, "band_finish", None)
+            if callable(finish) and len(rows) == len(values):
+                if self.rd.stage_done("band.finish"):
+                    rows = [dict(r) for r in json.loads(str(self.rd.load_stage("band.finish")["rows"]))]
+                else:
+                    problem.layout = layout
+                    rows = list(finish(self, problem, rows))
+                    self.rd.save_stage("band.finish", {"rows": json.dumps(to_jsonable(rows), allow_nan=False)})
         finally:
             problem.layout = layout
         self._write_band(out, rows, par)
         return rows
+
+    def band_result(self, problem: Any, value: float) -> tuple[OptimizeResult, str]:
+        """(result, stage) of the finished band point at ``value`` of ``spec.band_parameter``: the stored stage
+        (step2 if it ran, else step1) rebuilt with one evaluation at its endpoint. ``problem.layout`` is left
+        with the band parameter fixed at ``value``; the caller restores it."""
+        par = str(getattr(self.spec, "band_parameter", "sigma_p"))
+        tag = f"band.{float(value):g}"
+        stage = "step2" if self.rd.stage_done(f"{tag}.step2") else "step1"
+        if not self.rd.stage_done(f"{tag}.{stage}"):
+            raise StageRefused(f"band point {par} = {value:g} has not finished")
+        problem.layout = problem.layout.replace({par: {"free": False, "start": float(value)}})
+        W = np.asarray(self._stage_state(f"{tag}.{stage}")["W"], dtype=float)
+        res = minimize(problem, Fixed(W), self._options(stage=f"{tag}.{stage}"), checkpoint=self.rd)
+        return res, stage
 
     def margin_band(self) -> list[dict[str, Any]]:
         """The margin band stage (module docstring). Returns the rows of margin_band/band.csv."""

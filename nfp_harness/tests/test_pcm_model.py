@@ -450,3 +450,41 @@ def test_recovers_true_theta(medium: dict[str, Any]) -> None:
     np.testing.assert_allclose(res.theta, THETA_TRUE, atol=1e-5)
     np.testing.assert_allclose(res.evaluation.aux["beta"], BETA_TRUE, atol=1e-5)
     prob.model.close()
+
+
+def test_bound_parameter_alpha_lo(small: dict[str, Any]) -> None:
+    """A fixed role-bound parameter alpha_lo (LEARNINGS 29): at 0 the model equals the layout without it, at a
+    positive value the kernel truncates a_i below at alpha_lo / c_i; its D column is zero and it is refused when
+    free."""
+    base = synthetic_layout()
+
+    def with_bound(a: float, free: bool = False) -> ParameterLayout:
+        return ParameterLayout(list(base.specs) + [ParameterSpec("alpha_lo", "bound", None, None, a, a, a, unit=0.1,
+                                                                 free=free)])
+
+    m0 = PCMModel(PCMSpec(CHARS), small["data"], base, small["nu"], small["seed"], total_threads=2)
+    s0 = m0.solve(THETA_TRUE, KernelRequests(), True)
+    mz = PCMModel(PCMSpec(CHARS), small["data"], with_bound(0.0), small["nu"], small["seed"], total_threads=2)
+    sz = mz.solve(np.r_[THETA_TRUE, 0.0], KernelRequests(), True)
+    assert s0.status is EvalStatus.OK and sz.status is EvalStatus.OK
+    np.testing.assert_array_equal(s0.delta, sz.delta)
+    for a, b in zip(s0.D, sz.D):
+        np.testing.assert_array_equal(a, b[:, :-1])
+        assert np.all(b[:, -1] == 0.0)
+    mb = PCMModel(PCMSpec(CHARS), small["data"], with_bound(0.3), small["nu"], small["seed"], total_threads=2)
+    assert mb.alpha_lo(np.r_[THETA_TRUE, 0.3]) == 0.3 and mb.bound_columns == (5,)
+    sb = mb.solve(np.r_[THETA_TRUE, 0.3], KernelRequests(), True)
+    assert sb.status is EvalStatus.OK
+    assert np.max(np.abs(sb.delta - s0.delta)) > 1e-3   # the bound moves the inverted delta
+    # the kernel's own answer at the same delta: shares match the data at alpha_lo = 0.3
+    t = 0
+    km, rows = mb.kernel_market(t), mb.markets[t].rows
+    th, ph, sp = mb.kernel_params(np.r_[THETA_TRUE, 0.3])
+    s = pcm_kernel.evaluate_market(sb.delta[rows], km, th, ph, sp, derivatives=False, alpha_lo=0.3)["s"]
+    np.testing.assert_allclose(s, np.asarray(small["data"]["products"]["shares"])[rows], atol=1e-9)
+    st = mb.state_dict()
+    assert np.all(st["alpha_lo"] == 0.0)   # nothing accepted yet
+    with pytest.raises(ValueError):
+        PCMModel(PCMSpec(CHARS), small["data"], with_bound(0.3, free=True), small["nu"], small["seed"])
+    for m in (m0, mz, mb):
+        m.close()

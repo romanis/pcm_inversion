@@ -4,13 +4,17 @@ Implements ``types.InnerModel`` on ``nfp_harness._native.pcm_kernel`` for the ex
 characteristics model
 
     u_ij = delta_j + x_j . t_i - c_i a_i p_j,   u_i0 = 0,
-    t_i = sum_m theta_m basis_m(i) e_{column(m)},   log c_i = phi . scale_basis_i,   a_i ~ LogNormal(0, sigma_p).
+    t_i = sum_m theta_m basis_m(i) e_{column(m)},   log c_i = phi . scale_basis_i,   a_i ~ LogNormal(0, sigma_p),
+
+with a_i truncated below at alpha_lo / c_i when the layout has a bound (LEARNINGS 29).
 
 Parameters come from the ``ParameterLayout``: role ``"taste"`` (``column`` is a characteristic,
 ``basis`` an agent column for a demographic interaction, any other name for a standard normal taste
-draw, None for 1), role ``"scale"`` (``basis`` is an agent column) and exactly one ``"sigma_p"``. The
-layout order is free; the kernel order [taste, scale, sigma_p] is mapped internally, so ``D`` and the
-micro ``d_theta`` are returned in layout order.
+draw, None for 1), role ``"scale"`` (``basis`` is an agent column), exactly one ``"sigma_p"`` and at most
+one ``"bound"``: the lower bound alpha_lo on alpha_i = c_i a_i, a fixed parameter (``free=False``; it is
+never estimated, its column of ``D`` and of the micro ``d_theta`` is zero). The layout order is free; the
+kernel order [taste, scale, sigma_p] is mapped internally, so ``D`` and the micro ``d_theta`` are returned
+in layout order.
 
 Draws: each market gets ``R_t = 2^ceil(log2(A_t nu_per_agent))`` scrambled Sobol standard normal
 points over the taste draw dimensions (seed ``seed + t`` for the t-th market in sorted id order),
@@ -170,6 +174,7 @@ class _State:
     delta: np.ndarray
     theta: np.ndarray  # stacked [taste, scale, sigma_p]
     signature: np.ndarray | None = None  # frontier signature at (delta, theta), computed on demand
+    alpha_lo: float = 0.0  # the bound the state was solved under
 
 
 @dataclass(eq=False)
@@ -236,13 +241,24 @@ class PCMModel:
         taste = [k for k, s in enumerate(specs) if s.role == "taste"]
         scale = [k for k, s in enumerate(specs) if s.role == "scale"]
         sigp = [k for k, s in enumerate(specs) if s.role == "sigma_p"]
-        other = [s.name for s in specs if s.role not in ("taste", "scale", "sigma_p")]
+        bound = [k for k, s in enumerate(specs) if s.role == "bound"]
+        other = [s.name for s in specs if s.role not in ("taste", "scale", "sigma_p", "bound")]
         if other:
-            raise ValueError(f"PCM parameters must have role taste, scale or sigma_p: {other}")
+            raise ValueError(f"PCM parameters must have role taste, scale, sigma_p or bound: {other}")
         if len(sigp) != 1:
             raise ValueError(f"PCM needs exactly one sigma_p parameter, got {len(sigp)}")
+        if len(bound) > 1:
+            raise ValueError(f"PCM takes at most one bound (alpha_lo) parameter, got {len(bound)}")
+        for k in bound:
+            if specs[k].free or specs[k].lower < 0:
+                raise ValueError(f"{specs[k].name}: the bound alpha_lo is a fixed, non-negative parameter "
+                                 f"(free=False, lower >= 0)")
         self._taste, self._scale, self._sigp = taste, scale, sigp[0]
+        self._bound: int | None = bound[0] if bound else None
+        #: layout columns the kernel does not differentiate (the bound): zero in D and the micro d_theta
+        self.bound_columns: tuple[int, ...] = tuple(bound)
         self._order = np.array(taste + scale + sigp, dtype=int)  # kernel column c is layout index _order[c]
+        self.P_kernel = int(self._order.size)
         agent_cols = set() if agents is None else {c for c in (agents.columns if hasattr(agents, "columns")
                                                               else agents.keys())}
         chars = list(sp.characteristics)
@@ -351,14 +367,24 @@ class PCMModel:
         theta = np.asarray(theta, dtype=float).ravel()
         return theta[self._taste].copy(), theta[self._scale].copy(), float(theta[self._sigp])
 
+    def alpha_lo(self, theta: np.ndarray) -> float:
+        """alpha_lo(theta) -> the lower bound on alpha_i of a layout-order theta (0 without a bound parameter)."""
+        if self._bound is None:
+            return 0.0
+        return float(np.asarray(theta, dtype=float).ravel()[self._bound])
+
+    def kernel_kwargs(self, theta: np.ndarray) -> dict[str, float]:
+        """Keyword arguments every kernel call takes besides (theta, phi, sigma_p): ``{"alpha_lo": ...}``."""
+        return {"alpha_lo": self.alpha_lo(theta)}
+
     def to_kernel_order(self, v: np.ndarray) -> np.ndarray:
-        """Layout-order (P,) vector -> stacked kernel order [taste, scale, sigma_p]."""
+        """Layout-order (P,) vector -> stacked kernel order [taste, scale, sigma_p] (the bound is dropped)."""
         return np.asarray(v, dtype=float)[..., self._order]
 
     def from_kernel_order(self, a: np.ndarray) -> np.ndarray:
-        """Array whose last axis is in kernel order -> layout order."""
+        """Array whose last axis is in kernel order -> layout order (zero in the bound's column)."""
         a = np.asarray(a, dtype=float)
-        out = np.empty_like(a)
+        out = np.zeros(a.shape[:-1] + (self.P,))
         out[..., self._order] = a
         return out
 
@@ -398,8 +424,10 @@ class PCMModel:
     # ---------------------------------------------------------------- solve
 
     def _solve_one(self, m: _Market, th: np.ndarray, ph: np.ndarray, sp: float, parts: tuple[MicroPartRequest, ...],
-                   need_jacobian: bool, price_derivatives: bool, n_threads: int) -> dict[str, Any]:
+                   need_jacobian: bool, price_derivatives: bool, n_threads: int, alpha_lo: float) -> dict[str, Any]:
         acc = self._accepted[m.t]
+        if acc is not None and acc.alpha_lo != alpha_lo:
+            acc = None   # a warm start solved under another bound is not a warm start
         micro = self._micro_for(m, parts)[0] if parts else None
         s = self.spec
         cold = s.cold_evals if acc is None or s.trial_cold_evals is None else s.trial_cold_evals
@@ -408,7 +436,7 @@ class PCMModel:
             None if acc is None else acc.delta, None if acc is None else acc.theta, micro,
             tol=s.tol, warm_evals=s.warm_evals, cold_evals=int(cold), path_evals=s.path_evals,
             path_seconds=s.path_seconds, n_threads=int(n_threads), derivatives=bool(need_jacobian),
-            price_derivatives=bool(price_derivatives), rcond_min=s.rcond_min)
+            price_derivatives=bool(price_derivatives), rcond_min=s.rcond_min, alpha_lo=float(alpha_lo))
 
     def solve(self, theta: np.ndarray, requests: KernelRequests, need_jacobian: bool) -> InnerSolution:
         """solve(theta, requests, need_jacobian) -> InnerSolution. Never raises for model failures."""
@@ -420,13 +448,14 @@ class PCMModel:
         if theta.shape != (self.P,):
             raise ValueError(f"theta has shape {theta.shape}, expected ({self.P},)")
         th, ph, sp = self.kernel_params(theta)
+        al = self.alpha_lo(theta)
         stacked = self.to_kernel_order(theta)
         parts = tuple(requests.micro_parts)
         threads = allocate_threads(self._weights, self.total_threads)
         self.last_threads = threads
         log.info("PCM threads per market: %s", dict(zip([str(m.market_id) for m in self._mk], threads.tolist())))
         futures = [self._pool.submit(self._solve_one, m, th, ph, sp, parts, need_jacobian,
-                                     requests.price_derivatives, int(threads[m.t])) for m in self._mk]
+                                     requests.price_derivatives, int(threads[m.t]), al) for m in self._mk]
         results = [f.result() for f in futures]
 
         delta = np.full(self.n_products, np.nan)
@@ -444,7 +473,7 @@ class PCMModel:
                 shares[m.rows] = r["s"]
             if need_jacobian:
                 dd = np.asarray(r["ddelta_dtheta"])
-                D_t = self.from_kernel_order(dd) if dd.shape == (m.J, self.P) else np.full((m.J, self.P), np.nan)
+                D_t = self.from_kernel_order(dd) if dd.shape == (m.J, self.P_kernel) else np.full((m.J, self.P), np.nan)
                 if st is EvalStatus.OK and not np.all(np.isfinite(D_t)):
                     st = EvalStatus.NUMERICAL
                 assert D is not None
@@ -465,7 +494,7 @@ class PCMModel:
                 mic = np.asarray(r["micro"])
                 md = np.asarray(r["micro_d_delta"])
                 mt = np.asarray(r["micro_d_theta"])
-                jac = need_jacobian and md.shape == (len(parts), m.J) and mt.shape == (len(parts), self.P)
+                jac = need_jacobian and md.shape == (len(parts), m.J) and mt.shape == (len(parts), self.P_kernel)
                 for a, p in enumerate(parts):
                     table[p.name].append({
                         "sum": float(mic[a]) if mic.size == len(parts) else float("nan"),
@@ -475,7 +504,7 @@ class PCMModel:
                     })
             if requests.price_derivatives:
                 ds_dp.append(np.asarray(r["ds_dp"]))
-            self._trial[m.t] = (_State(delta=np.array(r["delta"], dtype=float), theta=stacked.copy())
+            self._trial[m.t] = (_State(delta=np.array(r["delta"], dtype=float), theta=stacked.copy(), alpha_lo=al)
                                 if st is EvalStatus.OK else None)
 
         self._weights = 0.5 * self._weights + 0.5 * cpu if self._measured else cpu
@@ -505,7 +534,8 @@ class PCMModel:
     def _signature(self, m: _Market, state: _State, n_threads: int) -> np.ndarray:
         if state.signature is None:
             th, ph, sp = self._split_stacked(state.theta)
-            state.signature = np.asarray(self._k.frontier_signature(state.delta, m.kernel, th, ph, sp, n_threads))
+            state.signature = np.asarray(self._k.frontier_signature(state.delta, m.kernel, th, ph, sp, n_threads,
+                                                                    alpha_lo=state.alpha_lo))
         return state.signature
 
     def _split_stacked(self, stacked: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
@@ -519,7 +549,8 @@ class PCMModel:
         if not changed.any():
             return 0.0
         th, ph, sp = self._split_stacked(acc.theta)
-        A = np.asarray(self._k.affected_mass(acc.delta, m.kernel, th, ph, sp, changed, n_threads))
+        A = np.asarray(self._k.affected_mass(acc.delta, m.kernel, th, ph, sp, changed, n_threads,
+                                             alpha_lo=acc.alpha_lo))
         return float(A.max()) if A.size else 0.0
 
     def _realised_mass(self) -> float | None:
@@ -537,7 +568,8 @@ class PCMModel:
         """
         with self._lock:
             stacked = self.to_kernel_order(np.asarray(theta, dtype=float).ravel())
-            if any(t is None or not np.array_equal(t.theta, stacked) for t in self._trial):
+            al = self.alpha_lo(theta)
+            if any(t is None or not np.array_equal(t.theta, stacked) or t.alpha_lo != al for t in self._trial):
                 return float("nan")
             mass = self._realised_mass()
             return float("nan") if mass is None else mass
@@ -549,10 +581,11 @@ class PCMModel:
         buys the same products (used to pick kink-free finite-difference steps and by the 4.4 guard).
         """
         th, ph, sp = self.kernel_params(theta)
+        kw = self.kernel_kwargs(theta)
         delta = np.asarray(delta, dtype=float)
         threads = allocate_threads(self._weights, self.total_threads)
         futures = [self._pool.submit(self._k.frontier_signature, delta[m.rows], m.kernel, th, ph, sp,
-                                     int(threads[m.t])) for m in self._mk]
+                                     int(threads[m.t]), **kw) for m in self._mk]
         return [np.asarray(f.result()) for f in futures]
 
     # ---------------------------------------------------------------- max_step (DESIGN 3.3, 4.2)
@@ -572,12 +605,13 @@ class PCMModel:
             raise ValueError(f"dtheta has shape {dtheta.shape}, expected ({self.P},)")
         theta = np.asarray(sol.outputs["theta"], dtype=float)
         th, ph, sp = self.kernel_params(theta)
+        kw = self.kernel_kwargs(theta)
         dk = self.to_kernel_order(dtheta)
         tau_max = float(self.spec.max_step_tau)
         threads = allocate_threads(self._weights, self.total_threads)
         futures = [self._pool.submit(self._k.max_step, np.asarray(sol.delta[m.rows], dtype=float),
                                      np.asarray(sol.D[m.t] @ dtheta, dtype=float), m.kernel, th, ph, sp, dk,
-                                     tau_max, int(threads[m.t])) for m in self._mk]
+                                     tau_max, int(threads[m.t]), **kw) for m in self._mk]
         res = [f.result() for f in futures]
         tau_first = min(float(r["tau_first"]) for r in res)
         tau_vanish = min(float(r["tau_vanish_lb"]) for r in res)
@@ -596,9 +630,10 @@ class PCMModel:
         """commit(theta): promote the trial state solved at theta to the accepted state."""
         with self._lock:
             stacked = self.to_kernel_order(np.asarray(theta, dtype=float).ravel())
+            al = self.alpha_lo(theta)
             promoted = 0
             for t, tri in enumerate(self._trial):
-                if tri is not None and np.array_equal(tri.theta, stacked):
+                if tri is not None and np.array_equal(tri.theta, stacked) and tri.alpha_lo == al:
                     self._accepted[t] = tri
                     promoted += 1
             if promoted < self.T:
@@ -622,10 +657,11 @@ class PCMModel:
         return out
 
     def state_dict(self) -> dict[str, Any]:
-        """state_dict() -> per-market accepted delta and theta (kernel order), thread allocation weights."""
+        """state_dict() -> per-market accepted delta, theta (kernel order) and alpha_lo, thread allocation weights."""
         with self._lock:
             return {
                 "version": 1,
+                "alpha_lo": np.array([0.0 if a is None else a.alpha_lo for a in self._accepted]),
                 "market_ids": [str(m.market_id) for m in self._mk],
                 "has_accepted": np.array([a is not None for a in self._accepted], dtype=bool),
                 "delta": [np.zeros(0) if a is None else a.delta.copy() for a in self._accepted],
@@ -641,16 +677,17 @@ class PCMModel:
             if ids != [str(m.market_id) for m in self._mk]:
                 raise ValueError(f"state is for markets {ids}, model has {[str(m.market_id) for m in self._mk]}")
             has = np.asarray(d["has_accepted"], dtype=bool).ravel()
+            als = np.asarray(d.get("alpha_lo", np.zeros(self.T)), dtype=float).ravel()
             accepted: list[_State | None] = []
-            for m, h, dl, th in zip(self._mk, has, d["delta"], d["theta"]):
+            for m, h, dl, th, al in zip(self._mk, has, d["delta"], d["theta"], als):
                 if not h:
                     accepted.append(None)
                     continue
                 dl, th = np.asarray(dl, dtype=float).ravel(), np.asarray(th, dtype=float).ravel()
-                if dl.shape != (m.J,) or th.shape != (self.P,):
+                if dl.shape != (m.J,) or th.shape != (self.P_kernel,):
                     raise ValueError(f"market {m.market_id}: stored delta {dl.shape} / theta {th.shape} do not fit "
-                                     f"({m.J} products, {self.P} parameters)")
-                accepted.append(_State(delta=dl.copy(), theta=th.copy()))
+                                     f"({m.J} products, {self.P_kernel} kernel parameters)")
+                accepted.append(_State(delta=dl.copy(), theta=th.copy(), alpha_lo=float(al)))
             self._accepted = accepted
             self._trial = [None] * self.T
             w = np.asarray(d.get("thread_weights", self._weights), dtype=float).ravel()

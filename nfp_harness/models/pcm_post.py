@@ -265,18 +265,25 @@ def _threads(model: Any, n_threads: int | None) -> int:
     return int(n_threads) if n_threads else max(1, min(int(getattr(model, "total_threads", 1)), 32))
 
 
+def _alpha_lo(model: Any, theta: np.ndarray) -> float:
+    """The model's lower bound on alpha at theta (0 for a model without one)."""
+    fn = getattr(model, "alpha_lo", None)
+    return float(fn(theta)) if callable(fn) else 0.0
+
+
 def _eval(km: Any, delta: np.ndarray, th: np.ndarray, ph: np.ndarray, sp: float, n_threads: int,
-          price_derivatives: bool = True) -> tuple[np.ndarray, np.ndarray | None]:
+          price_derivatives: bool = True, alpha_lo: float = 0.0) -> tuple[np.ndarray, np.ndarray | None]:
     r = _k().evaluate_market(np.asarray(delta, dtype=float), km, th, ph, sp, derivatives=False,
-                             price_derivatives=price_derivatives, n_threads=n_threads)
+                             price_derivatives=price_derivatives, n_threads=n_threads, alpha_lo=float(alpha_lo))
     return np.asarray(r["s"]), (np.asarray(r["ds_dp"]) if price_derivatives else None)
 
 
-def _cs(km: Any, delta: np.ndarray, th: np.ndarray, ph: np.ndarray, sp: float, n_threads: int) -> dict[str, Any]:
+def _cs(km: Any, delta: np.ndarray, th: np.ndarray, ph: np.ndarray, sp: float, n_threads: int,
+        alpha_lo: float = 0.0) -> dict[str, Any]:
     if np.size(delta) == 0:
         w = np.asarray(km.weights)
         return {"total": 0.0, "per_draw": np.zeros(w.size)}
-    r = _k().consumer_surplus(np.asarray(delta, dtype=float), km, th, ph, sp, n_threads)
+    r = _k().consumer_surplus(np.asarray(delta, dtype=float), km, th, ph, sp, n_threads, alpha_lo=float(alpha_lo))
     return {"total": float(r["total"]), "per_draw": np.asarray(r["per_draw"])}
 
 
@@ -300,7 +307,8 @@ def market_post(model: Any, theta: np.ndarray, delta: np.ndarray, t: int, *, fir
     rows = np.asarray(model.markets[t].rows)
     km = model.kernel_market(t)
     p = np.asarray(km.p, dtype=float)
-    s, J = _eval(km, np.asarray(delta, dtype=float)[rows], th, ph, sp, _threads(model, n_threads))
+    s, J = _eval(km, np.asarray(delta, dtype=float)[rows], th, ph, sp, _threads(model, n_threads),
+                 alpha_lo=_alpha_lo(model, theta))
     assert J is not None
     e = elasticities(s, J, p)
     D = diversion(J)
@@ -420,7 +428,8 @@ def consumer_surplus(model: Any, theta: np.ndarray, delta: np.ndarray, market: A
     t = market_position(model, market)
     th, ph, sp = model.kernel_params(theta)
     km = model.kernel_market(t)
-    out = _cs(km, np.asarray(delta, dtype=float)[model.markets[t].rows], th, ph, sp, _threads(model, n_threads))
+    out = _cs(km, np.asarray(delta, dtype=float)[model.markets[t].rows], th, ph, sp, _threads(model, n_threads),
+              _alpha_lo(model, theta))
     out["weights"] = np.asarray(km.weights)
     return out
 
@@ -487,6 +496,26 @@ def cs_by_group(per_draw: np.ndarray | Mapping[str, np.ndarray], weights: np.nda
     return rows
 
 
+def _buyer_terms(lb: np.ndarray, sp: float, l_lo: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    """(P(a < b), E[a; a < b]) per draw for log b = ``lb`` and a ~ LogNormal(0, sp), truncated below at
+    log a_lo = ``l_lo`` when given (LEARNINGS 29): P = (Phi(lb / s) - Phi(l_lo / s)) / Z and
+    E = exp(s^2/2) (Phi((lb - s^2)/s) - Phi((l_lo - s^2)/s)) / Z for lb > l_lo, else 0."""
+    s2 = sp * sp
+    if l_lo is None:
+        return norm.cdf(lb / sp), math.exp(s2 / 2) * norm.cdf((lb - s2) / sp)
+    Z = norm.sf(l_lo / sp)
+    inside = lb > l_lo
+    with np.errstate(invalid="ignore", divide="ignore"):
+        P = np.where(inside, (norm.cdf(lb / sp) - norm.cdf(l_lo / sp)) / Z, 0.0)
+        E = np.where(inside, math.exp(s2 / 2) * (norm.cdf((lb - s2) / sp) - norm.cdf((l_lo - s2) / sp)) / Z, 0.0)
+    return P, E
+
+
+def _log_a_lo(model: Any, theta: np.ndarray, c: np.ndarray) -> np.ndarray | None:
+    al = _alpha_lo(model, theta)
+    return np.log(al / c) if al > 0 else None
+
+
 def spread_in_buyer_dollars(model: Any, theta: np.ndarray, delta: np.ndarray) -> dict[str, Any]:
     """spread_in_buyer_dollars(model, theta, delta) -> taste spreads divided by the mean alpha among
     predicted buyers (LEARNINGS 11, DESIGN 5.6).
@@ -494,7 +523,8 @@ def spread_in_buyer_dollars(model: Any, theta: np.ndarray, delta: np.ndarray) ->
     Draw i buys when ``c_i a < A_i = max_j y_ij / p_j`` with ``y_ij = delta_j + x_j . t_i``. With
     a ~ LogNormal(0, s): ``P(buy_i) = Phi(ln b_i / s)`` and ``E[a; buy_i] = exp(s^2/2) Phi((ln b_i - s^2)/s)``,
     ``b_i = A_i / c_i``. ``mean_alpha_buyers = sum_i w_i c_i E[a; buy_i] / sum_i w_i P(buy_i)`` pooled over
-    markets. Returns ``mean_alpha_buyers``, ``inside_share`` (the pooled ``sum w P(buy)`` divided by the
+    markets (truncated at a_lo,i = alpha_lo / c_i under a bound). Returns ``mean_alpha_buyers``, ``inside_share``
+    (the pooled ``sum w P(buy)`` divided by the
     number of markets, a check against the model shares) and ``spreads``: name -> |sigma| / mean alpha for
     every taste parameter whose basis is a standard normal draw.
     """
@@ -512,8 +542,7 @@ def spread_in_buyer_dollars(model: Any, theta: np.ndarray, delta: np.ndarray) ->
         c = draw_price_scale(model, theta, t)
         with np.errstate(divide="ignore", invalid="ignore"):
             lb = np.where(A > 0, np.log(np.where(A > 0, A, 1.0) / c), -np.inf)
-        P = norm.cdf(lb / sp)
-        Ea = math.exp(sp * sp / 2) * norm.cdf((lb - sp * sp) / sp)
+        P, Ea = _buyer_terms(lb, sp, _log_a_lo(model, theta, c))
         num += float(f["weights"] @ (c * Ea))
         den += float(f["weights"] @ P)
     mab = num / den if den > 0 else float("nan")
@@ -539,8 +568,8 @@ def purchase_probability(model: Any, theta: np.ndarray, delta: np.ndarray, t: in
     """purchase_probability(model, theta, delta, t) -> (R,) P(draw i buys a car) in market t, exact.
 
     Draw i buys when ``c_i a < A_i = max_j y_ij / p_j`` with ``y_ij = delta_j + x_j . t_i`` and
-    a ~ LogNormal(0, sigma_p), so ``P_i = Phi(ln(A_i / c_i) / sigma_p)`` (0 when A_i <= 0). The weighted
-    sum over draws is the inside share.
+    a ~ LogNormal(0, sigma_p), so ``P_i = Phi(ln(A_i / c_i) / sigma_p)`` (0 when A_i <= 0), truncated at
+    alpha_lo / c_i under a bound. The weighted sum over draws is the inside share.
     """
     _, _, sp = model.kernel_params(theta)
     U, f = _taste_utility(model, theta, t)
@@ -549,7 +578,7 @@ def purchase_probability(model: Any, theta: np.ndarray, delta: np.ndarray, t: in
     c = draw_price_scale(model, theta, t)
     with np.errstate(divide="ignore", invalid="ignore"):
         lb = np.where(A > 0, np.log(np.where(A > 0, A, 1.0) / c), -np.inf)
-    return norm.cdf(lb / sp)
+    return _buyer_terms(lb, sp, _log_a_lo(model, theta, c))[0]
 
 
 def quality_dispersion(model: Any, theta: np.ndarray, delta: np.ndarray) -> dict[str, Any]:
@@ -665,6 +694,7 @@ def drop_products_counterfactual(model: Any, theta: np.ndarray, delta: np.ndarra
     """
     t = market_position(model, market)
     th, ph, sp = model.kernel_params(theta)
+    al = _alpha_lo(model, theta)
     nt = _threads(model, n_threads)
     rows = np.asarray(model.markets[t].rows)
     km = model.kernel_market(t)
@@ -686,8 +716,8 @@ def drop_products_counterfactual(model: Any, theta: np.ndarray, delta: np.ndarra
 
     def scenario(idx: np.ndarray, p: np.ndarray) -> tuple[dict[str, Any], np.ndarray | None]:
         mk = _market_like(f, idx, p)
-        s, J = _eval(mk, d_t[idx], th, ph, sp, nt) if idx.size else (np.zeros(0), np.zeros((0, 0)))
-        cs = _cs(mk, d_t[idx], th, ph, sp, nt)
+        s, J = _eval(mk, d_t[idx], th, ph, sp, nt, alpha_lo=al) if idx.size else (np.zeros(0), np.zeros((0, 0)))
+        cs = _cs(mk, d_t[idx], th, ph, sp, nt, al)
         return ({"rows": rows[idx], "prices": np.asarray(p, dtype=float), "shares": s, "inside_share": float(s.sum()),
                  "cs": cs["total"], "per_draw": cs["per_draw"]}, J)
 
@@ -729,7 +759,7 @@ def drop_products_counterfactual(model: Any, theta: np.ndarray, delta: np.ndarra
             if ps.size and ps[0] <= 0:
                 return None, "nonpositive_price", float("nan"), pk
             idx = keep[order]
-            s, J = _eval(_market_like(f, idx, ps), d_t[idx], th, ph, sp, n_thr)
+            s, J = _eval(_market_like(f, idx, ps), d_t[idx], th, ph, sp, n_thr, alpha_lo=al)
             assert J is not None
             nm = nash_markups(s, J, fkk[order], rcond_min)
             if nm["status"] != NASH_OK:

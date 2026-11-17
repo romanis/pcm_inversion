@@ -595,12 +595,16 @@ class SupplyMoments:
             d0 = delta[rows]
             D_t = np.asarray(sol.D[t], dtype=float)
             nt = int(thr[t])
-            sig0 = np.asarray(pcm_kernel.frontier_signature(d0, km, *model.kernel_params(theta), nt))
+            kw = model.kernel_kwargs(theta) if hasattr(model, "kernel_kwargs") else {}
+            sig0 = np.asarray(pcm_kernel.frontier_signature(d0, km, *model.kernel_params(theta), nt, **kw))
             out = np.zeros((rows.size, self.P))
             kinks = shrinks = 0
             unit_rule = self.fd_scale == "unit"
             shrink = 0 if unit_rule else self.fd_shrink
+            skip = set(getattr(model, "bound_columns", ()))   # fixed bounds: no secant, zero column
             for k in range(self.P):
+                if k in skip:
+                    continue
                 if unit_rule:
                     assert self.units is not None
                     h = self.fd_step * float(self.units[k])
@@ -614,13 +618,13 @@ class SupplyMoments:
                         dl = d0 + sgn * h * D_t[:, k]
                         kp = model.kernel_params(th)
                         r = pcm_kernel.evaluate_market(dl, km, *kp, derivatives=False, price_derivatives=True,
-                                                       n_threads=nt)
+                                                       n_threads=nt, **kw)
                         mc, _ = self._market_costs(t, s, p, firms, np.asarray(r["ds_dp"]))
                         with np.errstate(invalid="ignore", divide="ignore"):
                             ys.append(np.log(mc))
                         if attempt < shrink or unit_rule:
-                            same &= bool(np.array_equal(np.asarray(pcm_kernel.frontier_signature(dl, km, *kp, nt)),
-                                                        sig0))
+                            same &= bool(np.array_equal(np.asarray(pcm_kernel.frontier_signature(dl, km, *kp, nt,
+                                                                                                 **kw)), sig0))
                     if same or attempt == shrink:
                         if not same:
                             kinks += 1

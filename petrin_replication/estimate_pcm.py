@@ -4,6 +4,7 @@
     x     = [1, hpwt, space, air, mpd, fwd, fam],   fam = max(mi, sw, su, pv)   (the taste columns, TASTE)
     t_ik  = sigma_k nu_ik on the 7 taste columns  +  pi_b log(fs_i) fv_i on b in {mi, sw, su, pv}
     log alpha_i = phi_mid mid_i + phi_high high_i + sigma_p nu_ip        (low income is the reference, c = 1)
+    alpha_i >= alpha_lo = 0.2: nu_ip is truncated below at log(alpha_lo / c_i) / sigma_p   (LEARNINGS 29)
     delta_jt = X1_jt beta + xi_jt,  X1 = [1, hpwt, space, air, mpd, fwd, mi, sw, su, pv, pgnp, trend, trend2]
     Z     = [X1, demand_instruments0..21]  (35 columns; LEARNINGS 16)
 
@@ -17,8 +18,9 @@ is in Sargan form (``SarganIVMoments``, scale-free; LEARNINGS 24, 25) unless ``-
 ``--margin m`` one calibration row binds the markup level: the 25th-75th percentile trimmed mean of the Nash
 margins (p - mc)/p equals m (``MarginMoment``, weight 1e4 / (n 0.01^2); LEARNINGS 25). The supply Jacobian is
 the central secant over 1e-3 natural units. Taste spreads
-start at $3k on const, $2k on fam and $1k per sd on the other five; sigma_p starts at 1.5 in [0.1, 4]. Normalisations: median alpha = 1 in the low-income group (mu = 0,
-LEARNINGS 11); sigma_fam capped at $25k; taste spreads non-negative; u_i0 = 0 in every year with pgnp and
+start at $3k on const, $2k on fam and $1k per sd on the other five; sigma_p starts at 1.5 in [0.1, 5]. Normalisations: median alpha = 1 in the low-income group (mu = 0,
+LEARNINGS 11) on the untruncated parent; price sensitivity bounded below, alpha_i >= alpha_lo = 0.2 (a fixed
+parameter of role bound, the richest CEX household's alpha under Petrin's alpha = pi / income); sigma_fam capped at $25k; taste spreads non-negative; u_i0 = 0 in every year with pgnp and
 trends in X1. Data: the 17 same-firm exact twins (identical price and characteristics) are merged into one
 row with summed shares, then the remaining price ties are spread to a $10 gap. Consumers: the 1,000 CEX
 agents per market crossed with scrambled Sobol standard normal taste draws, 2^ceil(log2(1000 nu)) draws per
@@ -26,13 +28,17 @@ market. Exact PCM shares, no smoothing (LEARNINGS 15). Specification: LEARNINGS 
 files: nfp_harness.pipeline (DESIGN 6.4); the gate is a sigma_p profile concentrated in (phi_mid, phi_high),
 read on q_fixed and on its supply block. step1 starts from the gate minimum (lambda = 1 slice, lowest q_fixed)
 with pi_b re-solved on the eight body micro moments; ``margin_band`` estimates everything at m* in
-{0.10, 0.15, 0.20, 0.24, 0.30} (headline 0.24, Petrin's BLP median margin).
+{0.10, 0.15, 0.20, 0.24, 0.30} (headline 0.24, Petrin's BLP median margin). ``sigma_p_band`` fixes sigma_p at
+2.5, 3, 3.5 and 4 under the bound and estimates the rest on Sargan + micro + supply; its headline row is the
+point whose median margin is nearest 0.24, a calibration (LEARNINGS 29).
 
 Robustness switches (each changes the run directory): ``--robustness body_sigma`` frees taste spreads on
 mi, sw, su, pv (cap $25k); ``--robustness income_winsor`` adds phi_y log(ybar / clip(income, 1, 150)) to
 log alpha with phi_y fixed at 1 (Petrin's alpha ~ 1/income, winsorised); ``--robustness fixed_w`` uses the
 fixed-W aggregate block (IVMoments) instead of the Sargan form; ``--robustness sargan`` is accepted as a no-op
-alias (Sargan is the default) so commands and run directories written with it keep their run key.
+alias (Sargan is the default) so commands and run directories written with it keep their run key;
+``--robustness alpha_lo_01`` and ``alpha_lo_04`` set the bound alpha_lo to 0.1 (a factor two of non-income
+heterogeneity in the marginal utility of money) and 0.4 (the first percentile of the CEX alpha).
 
 Run (results under petrin_replication/results/harness/, untracked):
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage prefit --nu 4
@@ -40,6 +46,7 @@ Run (results under petrin_replication/results/harness/, untracked):
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage all --nu 16 --detach
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage margin_band --nu 16 \
       --start-gate <gate dir> --detach
+  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage sigma_p_band --nu 16 --detach
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py status --nu 16
 Resume a killed run by relaunching the identical command.
 """
@@ -96,17 +103,25 @@ NASH_RCOND_MIN = 1e-12
 SIG_FIXED_DOLLARS = {"const": 3.0, "fam": 2.0}
 PER_SD_COLUMNS = ("hpwt", "space", "air", "mpd", "fwd")
 PER_SD_DOLLARS = 1.0
-SIGMA_P = {"start": 1.5, "lower": 0.1, "upper": 4.0, "unit": 0.25}
+SIGMA_P = {"start": 1.5, "lower": 0.1, "upper": 5.0, "unit": 0.25}
+# Lower bound on price sensitivity, in units of the low-income median alpha (LEARNINGS 29): under Petrin's
+# alpha = pi_g / income on the 1984 CEX (income winsorised to [1, 150]) the richest household's alpha is 0.235
+# of the low-group median's, the first percentile 0.415. Main value 0.2; robustness 0.1 and 0.4.
+ALPHA_LO = 0.2
+ALPHA_LO_ROBUSTNESS = {"alpha_lo_01": 0.1, "alpha_lo_04": 0.4}
+ALPHA_LO_UNIT = 0.1
 GATE_LAMBDAS = (0.5, 1.0, 2.0)
 GATE_SIGMA_P = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
 GATE_SLICE = {"lambda": 1.0}
 HAULERS = ("mi", "sw", "su", "pv")
-BAND_SIGMA_P = (1.5, 2.0, 2.5, 2.75, 3.0)   # sigma_p set-identified; 2.75 gives about the BLP median margin 0.24 at the gate (LEARNINGS 27)
-BAND_HEADLINE = 2.0
+# sigma_p set-identified; under the bound the margin-0.24 point moves to about 3 to 3.5 (LEARNINGS 29)
+BAND_SIGMA_P = (2.5, 3.0, 3.5, 4.0)
+BAND_MARGIN_TARGET = 0.24   # headline: the band point whose median margin is nearest Petrin's BLP median margin
 BAND_COLUMNS = ("own_elasticity_median", "own_elasticity_times_sigma_p", "share_own_elasticity_below_-20",
                 "margin_median", "inside_share_semi_elasticity", "minivan_cs_gain_1984_fixed_prices_musd",
-                "minivan_cs_gain_1984_musd", "nash_status_1984", "minivan_diversion_haulers_share_of_inside",
-                "car_to_hauler_diversion_over_hauler_inside_share", "nonzero_cross_median")
+                "minivan_cs_gain_1984_bounded_nash_musd", "bounded_nash_status_1984",
+                "minivan_diversion_haulers_share_of_inside", "car_to_hauler_diversion_over_hauler_inside_share",
+                "nonzero_cross_median")
 PI_STARTS = {"mi": 0.75, "sw": 0.28, "su": 0.20, "pv": 0.41}   # pyblp BLP-micro pi / 0.65 (SPEC 3.2)
 FAM_CAP = 25.0       # $1000: 2 (1 - Phi(66.1 / 25)) = 0.8% of consumers value fam beyond the price range
 BODY_SIGMA_CAP = 25.0
@@ -117,7 +132,7 @@ TWIN_KEYS = ("market_ids", "firm_ids", "prices", "hpwt", "space", "air", "mpd", 
 # at sigma_p 3-4 it is 94-336, and the log-cost residual of a clipped product (log 0.5 against about 2.5)
 # is the supply block's penalty on that region (LEARNINGS 22).
 MC_FLOOR = 0.5
-ROBUSTNESS = ("body_sigma", "income_winsor", "sargan", "fixed_w")
+ROBUSTNESS = ("body_sigma", "income_winsor", "sargan", "fixed_w") + tuple(ALPHA_LO_ROBUSTNESS)
 # Markup-level calibration (round-3 analysis 5.2-5.3, LEARNINGS 25)
 MARGIN_TRIM = (0.25, 0.75)
 MARGIN_SD = 0.01          # declared sd of the margin row: W1 entry 1 / (n 0.01^2)
@@ -202,6 +217,8 @@ class PetrinSpec:
 
     def __init__(self, robustness: tuple[str, ...] = ()) -> None:
         self.robustness: tuple[str, ...] = tuple(sorted(set(robustness)))
+        self.alpha_lo = ALPHA_LO
+        self.band_nash_all = False
         self.margin: float | None = None
         self.start_gate: str | None = None
         self.products, self.agents, self.price_range, self.n_merged_twins = load_data()
@@ -221,7 +238,8 @@ class PetrinSpec:
         self.micro_covariances = pd.read_csv(pyblp.data.PETRIN_COVARIANCES_LOCATION, index_col=0)
         self.normalisations = [
             "median alpha = 1 in the low-income group: log alpha_i = phi_mid mid_i + phi_high high_i + log a_i, "
-            "a_i ~ LogNormal(0, sigma_p), no constant (mu = 0; LEARNINGS 11)",
+            "a_i ~ LogNormal(0, sigma_p), no constant (mu = 0; LEARNINGS 11), on the untruncated parent",
+            "",   # the lower bound on alpha, set by set_robustness
             f"taste spread on the family-hauler factor fam = max(mi, sw, su, pv) capped at {FAM_CAP:g} ($1000), "
             f"so under 1% of consumers value it beyond the pooled price range {self.price_range:.1f}",
             "",   # body sigmas, set by set_robustness
@@ -251,18 +269,34 @@ class PetrinSpec:
             raise ValueError(f"unknown robustness switches {unknown}; known: {ROBUSTNESS}")
         if "sargan" in r and "fixed_w" in r:
             raise ValueError("robustness sargan (the default aggregate block) and fixed_w exclude each other")
+        bounds = [x for x in r if x in ALPHA_LO_ROBUSTNESS]
+        if len(bounds) > 1:
+            raise ValueError(f"robustness switches {bounds} set alpha_lo twice; pick one")
         self.robustness = r
-        self.normalisations[2] = (
+        self.alpha_lo = ALPHA_LO_ROBUSTNESS[bounds[0]] if bounds else ALPHA_LO
+        self.normalisations[1] = self.alpha_lo_normalisation(self.alpha_lo) + (
+            f" (robustness {bounds[0]})" if bounds else "")
+        self.normalisations[3] = (
             "taste spreads on the body dummies mi, sw, su, pv fixed at 0 (only second-choice data would pin "
             "them, LEARNINGS 14)" if "body_sigma" not in r else
             f"taste spreads on the body dummies mi, sw, su, pv free and capped at {BODY_SIGMA_CAP:g} ($1000) "
             f"(robustness body_sigma)")
 
+    @staticmethod
+    def alpha_lo_normalisation(a: float) -> str:
+        return (f"alpha_i >= alpha_lo = {a:g} x the low-group median alpha, the richest CEX household's alpha under "
+                f"Petrin's alpha = pi / income (minimum 0.235): a_i is truncated below at alpha_lo / c_i, a fixed "
+                f"parameter of role bound (LEARNINGS 29)")
+
     def add_arguments(self, parser: Any) -> None:
         parser.add_argument("--robustness", action="append", choices=ROBUSTNESS, default=None,
                             help="robustness switch (repeatable): body_sigma frees the 4 body taste spreads "
                                  "(cap 25); income_winsor adds phi_y = 1 on log(ybar / clip(income, 1, 150)); "
-                                 "fixed_w uses the fixed-W aggregate block; sargan is a no-op alias of the default")
+                                 "fixed_w uses the fixed-W aggregate block; sargan is a no-op alias of the default; "
+                                 "alpha_lo_01 / alpha_lo_04 set the bound on alpha to 0.1 / 0.4 (main 0.2)")
+        parser.add_argument("--band-nash-all", action="store_true",
+                            help="sigma_p_band: run the bounded Nash counterfactual at every band point, not only "
+                                 "at the headline point (does not change estimates)")
         parser.add_argument("--margin", type=float, default=None,
                             help="calibrated markup level m*: one binding row, trimmed mean (25th-75th percentile) "
                                  "of the Nash margins = m*; absent: no margin row")
@@ -273,6 +307,7 @@ class PetrinSpec:
     def configure(self, args: Any) -> None:
         self.set_robustness(getattr(args, "robustness", None))
         self.set_margin(getattr(args, "margin", None))
+        self.band_nash_all = bool(getattr(args, "band_nash_all", False))
         sg = getattr(args, "start_gate", None)
         self.start_gate = str(pathlib.Path(sg).resolve()) if sg else None
 
@@ -292,9 +327,11 @@ class PetrinSpec:
                 f"entry {MARGIN_BINDING:g} / (n {MARGIN_SD:g}^2) so it binds (LEARNINGS 25)")
 
     def run_key(self) -> dict[str, Any]:
-        """Result-changing options beyond nu and seed: the robustness switches (none: the main run) and the
+        """Result-changing options beyond nu and seed: the robustness switches (none: the main run), the bound
+        alpha_lo (always, so runs of the bounded model never share a directory with the unbounded ones) and the
         margin calibration."""
         out: dict[str, Any] = {"robustness": list(self.robustness)} if self.robustness else {}
+        out["alpha_lo"] = self.alpha_lo
         if self.margin is not None:
             out["margin"] = self.margin
         return out
@@ -333,8 +370,11 @@ class PetrinSpec:
                                    free=False, note="log alpha on log(ybar / clip(income, 1, 150)); fixed, 1 under "
                                                     "income_winsor, else 0"))
         specs.append(ParameterSpec("sigma_p", "sigma_p", None, None, SIGMA_P["start"], SIGMA_P["lower"], SIGMA_P["upper"],
-                                   unit=SIGMA_P["unit"], note="sd of log alpha; upper 4 so a minimum near 2 to 3 is "
-                                                              "not clipped"))
+                                   unit=SIGMA_P["unit"], note="sd of log alpha (untruncated parent); upper 5 for the "
+                                                              "band under the bound (LEARNINGS 29)"))
+        a = self.alpha_lo
+        specs.append(ParameterSpec("alpha_lo", "bound", None, None, a, a, a, unit=ALPHA_LO_UNIT, free=False,
+                                   note="alpha_i >= alpha_lo x the low-group median alpha; fixed (LEARNINGS 29)"))
         return ParameterLayout(specs)
 
     def micro_moment(self, which: str) -> RatioMicroMoment:
@@ -409,6 +449,8 @@ class PetrinSpec:
                 "micro": {"values": self.values, "observations": 29125, "covariance": MICRO_COVARIANCE_SOURCE},
                 "caps": {"sigma_fam": FAM_CAP, "body_sigma": BODY_SIGMA_CAP, "income_clip": INCOME_CLIP},
                 "robustness": list(self.robustness), "pcm": dataclasses.asdict(self.pcm_spec()),
+                "alpha_lo": {"value": self.alpha_lo, "role": "bound", "free": False,
+                             "distribution": "a_i lognormal(0, sigma_p) truncated below at alpha_lo / c_i"},
                 "draws": "Sobol normals, seed + market position, crossed with agents", "max_step": self.use_max_step,
                 "optimizer": self.optimizer_options,
                 "prefit": {"free": self.prefit_free, "max_iterations": self.prefit_max_iterations},
@@ -418,7 +460,8 @@ class PetrinSpec:
                          "required": list(self.gate_required), "rules": "q_fixed NotMonotoneDecreasing, "
                          "q_fixed:supply RisesAtBothEnds, rise 3.84"},
                 "band": {"parameter": self.band_parameter, "values": list(self.band_values),
-                         "moments": self.band_moments, "headline": BAND_HEADLINE},
+                         "moments": self.band_moments,
+                         "headline": f"median margin nearest {BAND_MARGIN_TARGET:g} (calibration)"},
                 "plausible": self.plausible}
 
     def concentrate_weighting(self, problem: NFPGMMProblem, W: np.ndarray) -> np.ndarray:
@@ -548,7 +591,7 @@ class PetrinSpec:
     fallback_stage = "margin_band"
     band_parameter = "sigma_p"
     band_values = BAND_SIGMA_P
-    band_moments = "demand"
+    band_moments = "all"   # Sargan + micro + supply (LEARNINGS 27, SPEC_ANALYSIS v4 change 8)
 
     def band_row(self, pipe: Any, problem: Any, result: Any, value: float) -> dict[str, Any]:
         """One row of band.csv at the band estimate with sigma_p fixed at ``value``: elasticities, margins, the
@@ -563,7 +606,7 @@ class PetrinSpec:
         own = np.asarray(post["products"]["own_elasticity"], dtype=float)
         sigma_p = float(theta[problem.layout.names.index("sigma_p")])
         row: dict[str, Any] = {
-            "label": f"headline (calibration, sigma_p = {BAND_HEADLINE:g})" if value == BAND_HEADLINE else "",
+            "label": "",   # the headline is chosen once every point is in (band_finish)
             "own_elasticity_median": summ["own_elasticity_median"],
             "own_elasticity_times_sigma_p": -summ["own_elasticity_median"] * sigma_p,
             "share_own_elasticity_below_-20": float(np.mean(own[np.isfinite(own)] < -20.0)),
@@ -573,12 +616,24 @@ class PetrinSpec:
         }
         row.update({k: v for k, v in self.diversion_stats(summ["group_diversion"]).items()
                     if k in BAND_COLUMNS})
-        cf, _ = self.counterfactual(model, theta, delta, resolve_prices=True)
-        row.update({k: cf.get(k) for k in ("minivan_cs_gain_1984_fixed_prices_musd", "minivan_cs_gain_1984_musd",
-                                           "nash_status_1984")})
+        cf, _ = self.counterfactual(model, theta, delta, resolve_prices=False)
+        row.update({k: cf.get(k) for k in ("minivan_cs_gain_1984_fixed_prices_musd",)})
         row.update({f"q:{b}": float(v) for b, v in (ev.aux.get("q_blocks") or {}).items()})
         row.update({f"theta:{n}": float(x) for n, x in zip(problem.layout.names, theta)})
         return row
+
+    def band_finish(self, pipe: Any, problem: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """After every band point: label the headline row, the point whose median margin is nearest
+        BAND_MARGIN_TARGET (a calibration of the markup level, not an estimate of sigma_p)."""
+        ok = [r for r in rows if np.isfinite(float(r.get("margin_median", float("nan"))))]
+        if not ok:
+            return rows
+        head = min(ok, key=lambda r: abs(float(r["margin_median"]) - BAND_MARGIN_TARGET))
+        for r in rows:
+            r["label"] = ""
+        head["label"] = (f"headline (calibration: median margin {float(head['margin_median']):.3f} nearest "
+                         f"{BAND_MARGIN_TARGET:g}, sigma_p = {float(head['sigma_p']):g})")
+        return rows
 
     def margin_band_row(self, pipe: Any, problem: Any, result: Any, value: float) -> dict[str, Any]:
         """One row of margin_band/band.csv at m* = ``value``: the ``band_row`` statistics (elasticities, margins,
@@ -614,9 +669,13 @@ class PetrinSpec:
             d = json.loads(f.read_text())
             if d.get("group_diversion"):
                 d.update(self.diversion_stats(d["group_diversion"]))
-            rows.append({"label": label, **{k: d.get(k, "") for k in BAND_COLUMNS
-                                            if k not in ("own_elasticity_times_sigma_p", "share_own_elasticity_below_-20",
-                                                         "inside_share_semi_elasticity")}})
+            ref = {k: d.get(k, "") for k in BAND_COLUMNS
+                   if k not in ("own_elasticity_times_sigma_p", "share_own_elasticity_below_-20",
+                                "inside_share_semi_elasticity")}
+            # BLP's Nash gain is an equilibrium; the PCM column beside it is the bounded Nash approximation
+            ref["minivan_cs_gain_1984_bounded_nash_musd"] = d.get("minivan_cs_gain_1984_musd", "")
+            ref["bounded_nash_status_1984"] = f"BLP Nash {d.get('nash_status_1984', '')}".strip()
+            rows.append({"label": label, **ref})
         return rows
 
     def gate_economics(self, problem: Any, ev: Any) -> dict[str, float]:

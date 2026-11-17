@@ -60,6 +60,19 @@ class ToySpec:
     def band_reference_rows(self) -> list[dict[str, Any]]:
         return [{"label": "reference", "sigma_p_echo": -1.0}]
 
+    def band_finish(self, pipe: Any, problem: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Headline = the last point; rebuild its estimate through the pipeline and echo its q."""
+        self.finish_calls = getattr(self, "finish_calls", 0) + 1
+        layout = problem.layout
+        try:
+            res, stage = pipe.band_result(problem, rows[-1]["sigma_p"])
+        finally:
+            problem.layout = layout
+        rows[-1]["label"] = "headline"
+        rows[-1]["rebuilt_q"] = float(res.q)
+        rows[-1]["rebuilt_stage"] = stage
+        return rows
+
 
 def test_sigma_p_band_rows_and_resume(tmp_path: pathlib.Path) -> None:
     syn = make_synthetic(2, 8, 32, 8, seed=2)
@@ -77,7 +90,9 @@ def test_sigma_p_band_rows_and_resume(tmp_path: pathlib.Path) -> None:
     assert spec.calls == 2
     with open(pipe.path / "sigma_p_band" / "band.csv") as fh:
         table = list(csv.DictReader(fh))
-    assert [t["label"] for t in table][-1] == "reference" and len(table) == 3
+    assert [t["label"] for t in table] == ["", "headline", "reference"]
+    assert rows[-1]["rebuilt_q"] == rows[-1]["q"] and rows[-1]["rebuilt_stage"] == rows[-1]["estimate_stage"]
+    assert spec.finish_calls == 1
     assert pipe.rd.stage_done("band.0.8.row") and pipe.rd.stage_done("band.1.step1")
 
     spec2 = ToySpec(syn)
@@ -86,7 +101,7 @@ def test_sigma_p_band_rows_and_resume(tmp_path: pathlib.Path) -> None:
         rows2 = pipe2.sigma_p_band()
     finally:
         pipe2.close()
-    assert spec2.calls == 0 and rows2 == rows
+    assert spec2.calls == 0 and rows2 == rows and getattr(spec2, "finish_calls", 0) == 0
 
 
 def test_gate_failure_is_a_typed_refusal(tmp_path: pathlib.Path) -> None:
