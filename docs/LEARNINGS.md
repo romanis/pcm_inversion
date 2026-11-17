@@ -900,3 +900,49 @@ firm's profit by 0.26%.
 These numbers are at a theta estimated without the bound; the band re-estimates everything else at
 each sigma_p. Because the margin at sigma_p 2.5 fell to 0.06, the band grid is extended to
 {2.5, 3, 3.5, 4, 4.5, 5}.
+
+## 31. MPEC on the exact PCM: sound for demand-only problems, not for the supply-side estimator; entry 14 amended (2026-11-17)
+
+**What entry 14 got right and wrong.** The share constraints of the exact PCM with alpha integrated in
+closed form are C0 and piecewise C-infinity in delta (Jacobian jumps of w f(e)/gap when a product enters a
+draw's hull), not C1 as in BLP. That is a semismooth system, and Newton-type methods on it converge
+superlinearly when they use the Jacobian of the active piece, which is what the nested inversion already does
+and what an NLP solver with exact first derivatives does. On Petrin 1984 at 16,384 draws the aggregate
+Jacobian's rate of change along the Newton direction is 0.19 relative per unit step whether 0 or 136 draws
+change frontier inside the step, and the Taylor remainder is quadratic with an event-independent constant
+(numerical checks kept in the untracked review `docs/estimation_harness/MPEC_REVIEW.md`). So objection 1 of entry 14 (no second-order convergence because the
+Hessian is a train of spikes) is withdrawn for the share constraints; it stands for Hessians built by finite
+differences (a kink inside the difference step gives spurious curvature w f/(gap h)) and for the supply block
+(below). Objection 2 (LICQ fails at zero-share products) stands and is sharper: with log-share constraints a
+zero share is log 0, IPOPT refuses to start there and treats it as an evaluation error in the line search, so
+an MPEC needs a lifted feasible start and lift-and-restart restoration; the level form s/s_data - 1 lets theta
+run away. Objection 3 (micro moments break the quadratic objective) is mild: the ratio micro moments and the
+Sargan block are cheap smooth functions of (delta, theta) with analytic gradients from the kernel's existing
+outputs.
+
+**Prototype.** On the harness's synthetic data (3 markets, 76 products, 1,024 draws, aggregate + micro, fixed
+W; the `test_recovers_true_theta` problem), IPOPT 3.14.20 (conda-forge cyipopt; the brew build is
+glibc-incompatible) with log constraints, exact Jacobians and a Gauss-Newton Lagrangian Hessian converged
+quadratically in 10 iterations and 25 share passes to theta_true within 5e-11, against 29 nested Gauss-Newton
+evaluations (about 260 share passes) to 3e-7; from a far start it recovered theta_true where nested GN ended
+FLAT_PROGRESS. With micro values shifted so the optimum has a non-zero residual, the Gauss-Newton Hessian lost
+its edge (150 iterations without convergence; L-BFGS reached the nested point to 6e-3 but also did not
+converge), and a finite-difference Lagrangian Hessian got worse the larger the step (35, 85 iterations, failure
+at h = 1e-6, 1e-4, 1e-3): the kink effect, where it exists.
+
+**Why it does not replace the nested outer on Petrin.** The supply block is discontinuous in (delta, theta)
+at finite draws: Nash markups depend on ds/dp, a staircase with jumps of 2e-3 to 4e-2 in log mc per frontier
+event on 1984, which exceed the smooth first-order change at 3% of a Newton step. Its gradient needs second
+derivatives of shares that the kernel does not compute, and the active-piece slope is the wrong slope (entry
+25). The nested code handles this with secants at 1e-3 and the CONVERGED_NOISE class; IPOPT has neither and
+would stall at the same floor. MPEC fixes none of the current failure modes: failed trial inversions become
+evaluation errors and restarts, the noise-floor stall is the supply block's, and the kernel cost (1.3 s per
+derivative pass over 13 markets at 16 threads; 0.24 s for a warm inversion of 1984) is not what the band runs
+spend their time on. A demand-only MPEC is kept as an optional cross-check (`--outer mpec`, refused with a
+supply block); the default stays nested. For a small demand-only PCM (20-30 products, one horizontal dimension,
+few quadrature nodes) MPEC is a sound and fast estimator, with the same lift-at-start requirement.
+
+**Rule for the write-up.** Smoothness of the exact PCM in delta equals the number of continuous taste
+dimensions integrated analytically: 0 gives step functions, 1 (alpha) gives C0 with a Lipschitz-like aggregate
+Jacobian at large R, 2 gives C1, the population model is C1. Objects that are functions of the share Jacobian
+(markups, elasticities) are one order rougher than shares and are the real nonsmoothness of the estimator.
