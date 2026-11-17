@@ -724,3 +724,47 @@ products below -20, margin 7.1%, minivan diversion to haulers 0.51 of inside, ca
 
 **Next.** The fixed-W aggregate block must be scale-free when every nonlinear parameter is free:
 the Sargan form (entry 19 fallback) with the micro and supply blocks, gate first at nu = 4.
+
+## 25. Economist review round 3: the markup level is not pinned by the data; calibrate it, estimate the rest scale-free (2026-11-17)
+
+Third review by the economist agent (claude-fable-5.1), with checks at 4,096 draws at the
+extensive point and the step-1 stall of entry 24.
+
+**What the slide was.** Not a pure rescaling: elasticities and margins changed (-10.2 to -25.6,
+18.4% to 7.1%). The taste spreads shrank 2.5x (const) to 50x (fwd) in median-consumer units, so who
+buys was decided by alpha alone, buyers became the far tail of a lognormal with sd 2.3 (mean alpha of
+buyers 0.24 to 0.053), and the inversion set delta near tail-alpha x p. sd(xi) fell 8x: 2.7x from
+sd(delta), 3x from fit. The fixed-W block fell 47x against 64x for sd(xi)^2 while CUE rose: entry 1,
+reached through sigma_x.
+
+**Sargan is necessary, not sufficient.** At nu = 4 the Sargan block charges the slide 74 points (175
+at the extensive point, 248 at the stall; CUE 78) against a supply gain of 7. The supply block is
+invariant to rescaling but not neutral: PCM markups are lumpy (own elasticity 5th percentile -166,
+95th -4.4), lumpy markups are log-cost noise Z_s cannot explain, so the block falls as elasticities
+grow. It bounds markups only from above through the cost floor; the passing gate of entry 23 was the
+fixed-W artifact balanced against the floor, not an estimate. Scale-free blocks are nearly flat in
+sigma_p, so a free Sargan step 1 will sit on a weak ridge (Cragg-Donald 4.1 against 79).
+
+**No normalisation fixes a fixed-W objective.** Median alpha in another group only rescales xi;
+mean alpha makes it worse; buyer anchors are equilibrium objects (entry 11); fixing phi or beta_hpwt
+closes too little or is weakly pinned. Two-step S(theta_gate)^-1 is not scale-free even to first
+order. CUE on the aggregate block with fixed micro and supply blocks is coherent; Sargan is preferred
+for the lumpy-xi route, CUE as a cross-check.
+
+**The stall was not a Jacobian error.** The micro block is stiff along pi_b (curvature about 1.7e6
+per natural unit squared from Petrin's covariance weights; a 1e-3 probe raised it 0.54 as predicted).
+The supply block has step-size-independent jumps of about 0.01 where a draw's frontier changes ds/dp,
+and its central difference at h = 1e-6 returns the slope of a piece 1e-6 wide. A projected-gradient
+tolerance of 0.005 sits below that noise floor. Fixes: supply secant step 1e-3 in natural units, a
+CONVERGED_NOISE class, Levenberg-Marquardt damping on rejection, pi_b concentrated on the body micro
+moments at the start of step 1.
+
+**Main path.** Sargan aggregate block by default. A binding markup-level moment, median (p - mc)/p =
+m*, reported as a margin calibration. A margin_band stage over m* in {0.10, 0.15, 0.20, 0.24, 0.30}
+with all other nonlinear parameters free; headline m* = 0.24, the median margin of Petrin's BLP with
+micro and supply on this product set, so the comparison with BLP holds the markup level fixed and
+isolates substitution. The Sargan J across m* decides whether m* is estimated (interior minimum
+rising 3.84 at both ends) or calibrated (the band is the result). Fallback: fixed W1 with the margin
+moment binding, sigma_p fixed at 2.0, lambda free, band over m*.
+
+Full analysis kept locally at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v3.keep.md.
