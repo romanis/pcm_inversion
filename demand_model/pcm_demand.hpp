@@ -9,7 +9,10 @@
  *
  * Consumer i (a draw with weight w_i) gets utility from product j
  *     u_ij = delta_j + x_j . t_i - c_i * a_i * p_j,     u_i0 = 0,
- * with a_i ~ LogNormal(0, sigma_p) integrated in closed form.
+ * with a_i ~ LogNormal(0, sigma_p) integrated in closed form. With Params::alpha_lo > 0 the price
+ * sensitivity is bounded below: a_i is the lognormal truncated below at a_lo,i = alpha_lo / c_i, so
+ * alpha_i = c_i a_i >= alpha_lo (LEARNINGS 29). The median normalisation stays on the untruncated
+ * parent. alpha_lo = 0 is the untruncated model, computed by the same code as before the bound existed.
  *   t_i (taste vector, size K) = sum_m theta_m * taste_basis(i, m) on column taste_col[m]
  *   log c_i (price-sensitivity scale) = sum_q phi_q * scale_basis(i, q)
  * Dividing utility by c_i gives a pure vertical model in "dollar" qualities
@@ -34,6 +37,7 @@ struct Params {
     Eigen::ArrayXd theta;            //!< M taste parameters
     Eigen::ArrayXd phi;              //!< Q price-scale parameters
     double sigma_p;                  //!< sd of log price sensitivity
+    double alpha_lo = 0.0;           //!< lower bound on alpha_i = c_i a_i (0: no bound); fixed, not estimated
 };
 
 struct Shares {
@@ -75,18 +79,31 @@ namespace detail {
 
 /**
  * Vertical model for one draw in conditional qualities d (N), prices p (N, increasing) and
- * LogNormal(0, sigma) price sensitivity. Writes into global-index outputs, which must be zeroed:
- * s (N) shares, and when Jd is not null also Jd (N x N) ds/dd, dsig (N) ds/dsigma and Jp (N x N)
- * ds/dp. Products off the frontier get zero share and zero derivatives.
+ * LogNormal(0, sigma) price sensitivity truncated below at a_lo (a_lo <= 0: not truncated). Writes
+ * into global-index outputs, which must be zeroed: s (N) shares, and when Jd is not null also Jd
+ * (N x N) ds/dd, dsig (N) ds/dsigma, Jp (N x N) ds/dp and, when dlogc is not null, dlogc (N) the
+ * derivative of s through a_lo = alpha_lo / c with respect to log c at fixed d (the d = y / c part is
+ * the caller's -Jd d term). Products off the frontier, and frontier products whose window lies
+ * entirely below a_lo, get zero share and zero derivatives.
  */
-void cond_vertical(const Eigen::ArrayXd & d, const Eigen::ArrayXd & p, double sigma,
-                   Eigen::ArrayXd & s, Eigen::MatrixXd * Jd, Eigen::ArrayXd * dsig, Eigen::MatrixXd * Jp);
+void cond_vertical(const Eigen::ArrayXd & d, const Eigen::ArrayXd & p, double sigma, double a_lo,
+                   Eigen::ArrayXd & s, Eigen::MatrixXd * Jd, Eigen::ArrayXd * dsig, Eigen::MatrixXd * Jp,
+                   Eigen::ArrayXd * dlogc);
 
 /**
  * For every product, the smallest increase in delta_j that puts it on at least one consumer's
- * frontier (zero for products already on some frontier, +inf if none is reachable).
+ * frontier with a window of positive mass (zero for products already there, +inf if none is
+ * reachable). With alpha_lo > 0 the hull is that of (p, dc - a_lo p), whose increasing part holds
+ * exactly the vertices with entry slope above a_lo (LEARNINGS 29).
  */
 Eigen::ArrayXd frontier_lift(const Eigen::ArrayXd & delta, const Market & mk, const Params & prm);
+
+/**
+ * The vertical-model starting point at prm.sigma_p and prm.alpha_lo (c = 1, no taste heterogeneity),
+ * which inverts the shares exactly in that model: F_T(e_k) = sum_{j >= k} s_j. alpha_lo = 0 is
+ * pcm_share::initial_guess.
+ */
+Eigen::ArrayXd initial_guess(const Eigen::ArrayXd & s_data, const Eigen::ArrayXd & p, const Params & prm);
 
 }  // namespace detail
 

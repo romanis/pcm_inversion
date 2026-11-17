@@ -26,6 +26,7 @@ void check_input(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm
     if (delta.size() != N) fail("delta has " + std::to_string(delta.size()) + " entries, prices " + std::to_string(N));
     if (mk.x.rows() != N) fail("x has " + std::to_string(mk.x.rows()) + " rows, prices " + std::to_string(N));
     if (!(prm.sigma_p > 0.0) || !std::isfinite(prm.sigma_p)) fail("sigma_p must be positive and finite");
+    if (!(prm.alpha_lo >= 0.0) || !std::isfinite(prm.alpha_lo)) fail("alpha_lo must be finite and non-negative");
     if (N > 0 && !(mk.p[0] > 0.0)) fail("prices must be positive");
     for (Eigen::Index k = 1; k < N; ++k)
         if (!(mk.p[k] > mk.p[k - 1])) fail("prices must be strictly increasing");
@@ -67,6 +68,17 @@ Surplus consumer_surplus(const ArrayXd & delta, const pcm_demand::Market & mk,
             const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
             const double c = std::exp(log_c);
             q = (delta + (mk.x * t).array()) / c;
+            // Truncation below at a_lo = alpha_lo / c (LEARNINGS 29): F and E(1/a; a < e) become
+            // F_T(e) = (Phi(z) - Phi(z_lo)) / Z and E_T(e) = exp(s^2/2) [Phi((l + s^2)/s) - Phi((l_lo + s^2)/s)] / Z
+            // for e > a_lo and 0 below, so the last window ends at a_lo and CS_i <= max_j q_j / a_lo - p_j.
+            const bool bound = prm.alpha_lo > 0.0;
+            double l_lo = 0.0, F0 = 0.0, E0 = 0.0, Z = 1.0;
+            if (bound) {
+                l_lo = std::log(prm.alpha_lo / c);
+                F0 = Phi(l_lo / s);
+                Z = 0.5 * std::erfc(l_lo / s * SQRT1_2);
+                E0 = inv_mass_all * Phi((l_lo + s2) / s);
+            }
             // upper hull by price (prices are sorted); index -1 is the origin (0, 0)
             auto px = [&](int k) { return k < 0 ? 0.0 : mk.p[k]; };
             auto qy = [&](int k) { return k < 0 ? 0.0 : q[k]; };
@@ -93,8 +105,13 @@ Surplus consumer_surplus(const ArrayXd & delta, const pcm_demand::Market & mk,
                     const int a = hull[h - 1], v = hull[h];
                     if (qy(v) > qy(a)) {
                         const double l = std::log((qy(v) - qy(a)) / (px(v) - px(a)));
-                        F_lo = Phi(l / s);
-                        E_lo = inv_mass_all * Phi((l + s2) / s);
+                        if (!bound) {
+                            F_lo = Phi(l / s);
+                            E_lo = inv_mass_all * Phi((l + s2) / s);
+                        } else if (l > l_lo && Z > 0.0) {
+                            F_lo = (Phi(l / s) - F0) / Z;
+                            E_lo = (inv_mass_all * Phi((l + s2) / s) - E0) / Z;
+                        }   // else the window lies below the bound: F = E = 0, as after the last vertex
                         next = true;
                     }
                 }

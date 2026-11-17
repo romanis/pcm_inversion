@@ -18,13 +18,48 @@ namespace {
 
 constexpr double INV_SQRT_2PI = 0.39894228040143267794;
 
-// LogNormal(0, sigma) cdf F, pdf f and dF/dsigma g at e > 0. All are 0 at e <= 0.
-struct LnTerms { double F, f, g; };
-inline LnTerms ln_terms(double e, double sigma) {
-    if (e <= 0.0) return {0.0, 0.0, 0.0};
+// LogNormal(0, sigma) cdf F, pdf f and dF/dsigma g at e > 0. All are 0 at e <= 0. h = dF/dlog c is
+// zero without truncation.
+struct LnTerms { double F, f, g, h; };
+
+// Lower truncation of a ~ LogNormal(0, sigma) at a_lo for one draw: z_lo = log(a_lo) / sigma, the mass
+// kept Z = 1 - Phi(z_lo) and phi(z_lo). Off when a_lo <= 0 (the untruncated model, exactly the old code).
+struct Trunc {
+    bool on = false;
+    double a_lo = 0.0, z_lo = 0.0, Phi_lo = 0.0, Z = 1.0, phi_lo = 0.0;
+};
+
+inline Trunc make_trunc(double a_lo, double sigma) {
+    Trunc tr;
+    if (!(a_lo > 0.0)) return tr;
+    tr.on = true;
+    tr.a_lo = a_lo;
+    tr.z_lo = std::log(a_lo) / sigma;
+    tr.Phi_lo = 0.5 * std::erfc(-tr.z_lo / std::sqrt(2.0));
+    tr.Z = 0.5 * std::erfc(tr.z_lo / std::sqrt(2.0));
+    tr.phi_lo = INV_SQRT_2PI * std::exp(-0.5 * tr.z_lo * tr.z_lo);
+    return tr;
+}
+
+inline LnTerms ln_terms(double e, double sigma, const Trunc & tr) {
+    if (!tr.on) {
+        if (e <= 0.0) return {0.0, 0.0, 0.0, 0.0};
+        const double z = std::log(e) / sigma;
+        const double phi = INV_SQRT_2PI * std::exp(-0.5 * z * z);
+        return {0.5 * std::erfc(-z / std::sqrt(2.0)), phi / (e * sigma), -phi * z / sigma, 0.0};
+    }
+    // F_T(e) = (Phi(z) - Phi(z_lo)) / Z for e > a_lo, else 0 (SPEC_ANALYSIS v4 section 2). Z underflowing
+    // to 0 means no mass above the bound at all: every window is empty.
+    if (e <= tr.a_lo || !(tr.Z > 0.0)) return {0.0, 0.0, 0.0, 0.0};
     const double z = std::log(e) / sigma;
     const double phi = INV_SQRT_2PI * std::exp(-0.5 * z * z);
-    return {0.5 * std::erfc(-z / std::sqrt(2.0)), phi / (e * sigma), -phi * z / sigma};
+    const double Qz = 0.5 * std::erfc(z / std::sqrt(2.0));          // 1 - Phi(z)
+    // the difference of the two cdfs taken in the tail where it is accurate
+    const double num = tr.z_lo < 0.0 ? 0.5 * std::erfc(-z / std::sqrt(2.0)) - tr.Phi_lo : tr.Z - Qz;
+    const double one_minus_F = Qz / tr.Z;
+    const double sZ = sigma * tr.Z;
+    return {num / tr.Z, phi / (e * sZ), (-phi * z + tr.phi_lo * tr.z_lo * one_minus_F) / sZ,
+            tr.phi_lo * one_minus_F / sZ};
 }
 
 bool feasible(const ArrayXd & s) { return (s > 0).all() && s.sum() < 1.0; }
@@ -35,8 +70,8 @@ namespace pcm_demand::detail {
 
 // Vertical model for one draw, written into global-index outputs (which must be zeroed).
 // Products off the frontier get zero share and zero derivatives.
-void cond_vertical(const ArrayXd & d, const ArrayXd & p, double sigma,
-                   ArrayXd & s, MatrixXd * Jd, ArrayXd * dsig, MatrixXd * Jp)
+void cond_vertical(const ArrayXd & d, const ArrayXd & p, double sigma, double a_lo,
+                   ArrayXd & s, MatrixXd * Jd, ArrayXd * dsig, MatrixXd * Jp, ArrayXd * dlogc)
 {
     const std::vector<int> ind = index_positive_shares(d, p);
     const int m = static_cast<int>(ind.size());
@@ -50,8 +85,9 @@ void cond_vertical(const ArrayXd & d, const ArrayXd & p, double sigma,
         gap[k] = p[ind[k]] - p[ind[k - 1]];
         e[k] = (d[ind[k]] - d[ind[k - 1]]) / gap[k];
     }
+    const Trunc tr = make_trunc(a_lo, sigma);
     std::vector<LnTerms> t(m + 1);
-    for (int k = 0; k <= m; ++k) t[k] = ln_terms(e[k], sigma);
+    for (int k = 0; k <= m; ++k) t[k] = ln_terms(e[k], sigma, tr);
 
     for (int k = 0; k < m; ++k) s[ind[k]] = t[k].F - t[k + 1].F;
     if (!Jd) return;
@@ -60,6 +96,7 @@ void cond_vertical(const ArrayXd & d, const ArrayXd & p, double sigma,
     for (int k = 0; k < m; ++k) {
         const int gk = ind[k];
         (*dsig)[gk] = t[k].g - t[k + 1].g;
+        if (dlogc) (*dlogc)[gk] = t[k].h - t[k + 1].h;
         // through e_k
         (*Jd)(gk, gk) += t[k].f / gap[k];
         (*Jp)(gk, gk) += t[k].f * (-e[k] / gap[k]);
@@ -104,7 +141,11 @@ ArrayXd frontier_lift(const ArrayXd & delta, const Market & mk, const Params & p
             for (int m = 0; m < M; ++m) t[mk.taste_col[m]] += prm.theta[m] * mk.taste_basis(i, m);
             const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
             const double c = std::exp(log_c);
-            const ArrayXd dc = (delta + (mk.x * t).array()) / c;
+            ArrayXd dc = (delta + (mk.x * t).array()) / c;
+            // With a bound, the hull of the sheared qualities dc - a_lo p: its increasing part holds exactly
+            // the vertices with entry slope above a_lo, the products with a window of positive mass. The
+            // vertical gap, and so the lift, is the same in both coordinates.
+            if (prm.alpha_lo > 0.0) dc -= (prm.alpha_lo / c) * mk.p;
             // upper hull by price (prices are sorted); index -1 stands for the origin (0, 0)
             auto px = [&](int k) { return k < 0 ? 0.0 : mk.p[k]; };
             auto qy = [&](int k) { return k < 0 ? 0.0 : dc[k]; };
@@ -144,6 +185,24 @@ ArrayXd frontier_lift(const ArrayXd & delta, const Market & mk, const Params & p
     return lift;
 }
 
+ArrayXd initial_guess(const ArrayXd & s_data, const ArrayXd & p, const Params & prm)
+{
+    if (!(prm.alpha_lo > 0.0)) return pcm_share::initial_guess(s_data, p, prm.sigma_p);
+    // F_T(e_k) = cum_k means Phi(z(e_k)) = Phi_lo + Z cum_k: the untruncated quantile at Phi_lo + Z cum_k.
+    // pcm_share::initial_guess takes quantiles at the shares cumulated from each product up, so scale the
+    // shares by Z and append one dearer dummy product of share Phi_lo; the real products' guesses do not
+    // depend on the dummy's price.
+    const Trunc tr = make_trunc(prm.alpha_lo, prm.sigma_p);
+    const int N = static_cast<int>(s_data.size());
+    if (N == 0) return ArrayXd();
+    ArrayXd s2(N + 1), p2(N + 1);
+    s2.head(N) = tr.Z * s_data;
+    s2[N] = tr.Phi_lo;
+    p2.head(N) = p;
+    p2[N] = p[N - 1] + std::max(1.0, std::abs(p[N - 1]));
+    return pcm_share::initial_guess(s2, p2, prm.sigma_p).head(N);
+}
+
 }  // namespace pcm_demand::detail
 
 namespace pcm_demand {
@@ -167,6 +226,8 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
         if (!(mk.p[j] > mk.p[j - 1])) throw std::runtime_error("pcm_demand::shares: prices must be strictly increasing");
     if (N > 0 && !(mk.p[0] > 0)) throw std::runtime_error("pcm_demand::shares: prices must be positive");
     if (!(prm.sigma_p > 0)) throw std::runtime_error("pcm_demand::shares: sigma_p must be positive");
+    if (!(prm.alpha_lo >= 0) || !std::isfinite(prm.alpha_lo))
+        throw std::runtime_error("pcm_demand::shares: alpha_lo must be finite and non-negative");
 
     Shares out;
     out.s = ArrayXd::Zero(N);
@@ -191,7 +252,7 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
             acc.d_theta = MatrixXd::Zero(N, M + Q + 1);
             acc.d_price = MatrixXd::Zero(N, N);
         }
-        ArrayXd s_c(N), dsig(N);
+        ArrayXd s_c(N), dsig(N), dlogc(N);
         MatrixXd Jd(N, N), Jp(N, N);
         VectorXd t(K);
         const int i0 = static_cast<int>((static_cast<long>(R) * b) / n_blocks);
@@ -205,9 +266,9 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
             const ArrayXd dc = (delta + (mk.x * t).array()) / c;
 
             s_c.setZero();
-            if (with_derivatives) { Jd.setZero(); Jp.setZero(); dsig.setZero(); }
-            detail::cond_vertical(dc, mk.p, prm.sigma_p, s_c,
-                                  with_derivatives ? &Jd : nullptr, &dsig, &Jp);
+            if (with_derivatives) { Jd.setZero(); Jp.setZero(); dsig.setZero(); dlogc.setZero(); }
+            detail::cond_vertical(dc, mk.p, prm.sigma_p, prm.alpha_lo / c, s_c,
+                                  with_derivatives ? &Jd : nullptr, &dsig, &Jp, &dlogc);
 
             const double w = mk.weights[i];
             acc.s += w * s_c;
@@ -218,7 +279,9 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
             for (int m = 0; m < M; ++m)
                 acc.d_theta.col(m).noalias() += (w * mk.taste_basis(i, m) / c) * (Jd * mk.x.col(mk.taste_col[m]));
             if (Q > 0) {
-                const VectorXd Jdc = Jd * dc.matrix();
+                // log c moves s through dc = y / c (-Jd dc) and, with a bound, through a_lo = alpha_lo / c
+                VectorXd Jdc = Jd * dc.matrix();
+                if (prm.alpha_lo > 0.0) Jdc -= dlogc.matrix();
                 for (int q = 0; q < Q; ++q)
                     acc.d_theta.col(M + q).noalias() += (-w * mk.scale_basis(i, q)) * Jdc;
             }
@@ -251,12 +314,12 @@ InversionResult invert(const ArrayXd & s_data, const Market & mk, const Params &
     // Continuation in the heterogeneity: at lambda = 0 (no taste or scale heterogeneity) the
     // vertical-model guess is exact; raise lambda to 1, warm-starting each step from the last.
     {
-        ArrayXd delta = pcm_share::initial_guess(s_data, mk.p, prm.sigma_p);
+        ArrayXd delta = detail::initial_guess(s_data, mk.p, prm);
         double lambda = 0.0, step = 0.25;
         unsigned iters = 0;
         while (lambda < 1.0 && evals < max_evals && step > 1e-5) {
             const double target = std::min(1.0, lambda + step);
-            Params pl{prm.theta * target, prm.phi * target, prm.sigma_p};
+            Params pl{prm.theta * target, prm.phi * target, prm.sigma_p, prm.alpha_lo};
             InversionResult r = invert_from(s_data, mk, pl, delta, tol, max_evals, evals);
             iters += r.iterations;
             if (r.converged) { delta = r.delta; lambda = target; step = std::min(0.5, step * 1.5); }
@@ -310,7 +373,7 @@ InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Par
 
     // starting point: caller's warm start, else the no-heterogeneity vertical guess; either is
     // repaired if some products have zero share
-    ArrayXd delta = delta0.size() == N ? delta0 : pcm_share::initial_guess(s_data, mk.p, prm.sigma_p).eval();
+    ArrayXd delta = delta0.size() == N ? delta0 : detail::initial_guess(s_data, mk.p, prm);
     ArrayXd s = S(delta);
     {
         // repair: lift every zero-share product onto some consumer's frontier plus a margin that

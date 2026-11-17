@@ -60,6 +60,7 @@ void validate_market(const pcm_demand::Market & mk, const pcm_demand::Params & p
     require(Q == 0 || mk.scale_basis.allFinite(), "scale_basis must be finite");
     require(prm.theta.allFinite() && prm.phi.allFinite(), "theta and phi must be finite");
     require(std::isfinite(prm.sigma_p) && prm.sigma_p > 0, "sigma_p must be positive and finite");
+    require(std::isfinite(prm.alpha_lo) && prm.alpha_lo >= 0, "alpha_lo must be finite and non-negative");
 }
 
 void validate_micro(const MicroRequest & mr, int N, int R) {
@@ -91,7 +92,7 @@ void append(std::string & stages, const std::string & s) {
 
 pcm_demand::Params interpolate(const pcm_demand::Params & a, const pcm_demand::Params & b, double tau) {
     return pcm_demand::Params{(1.0 - tau) * a.theta + tau * b.theta, (1.0 - tau) * a.phi + tau * b.phi,
-                              (1.0 - tau) * a.sigma_p + tau * b.sigma_p};
+                              (1.0 - tau) * a.sigma_p + tau * b.sigma_p, b.alpha_lo};
 }
 
 }  // namespace
@@ -144,14 +145,15 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
                 acc.micro_d_theta = MatrixXd::Zero(Pm, P);
             }
         }
-        ArrayXd s_c = ArrayXd::Zero(N), dsig = ArrayXd::Zero(N);
+        ArrayXd s_c = ArrayXd::Zero(N), dsig = ArrayXd::Zero(N), dlogc = ArrayXd::Zero(N);
+        const bool bound = prm.alpha_lo > 0.0;
         MatrixXd Jd, Jp;
         if (jac) { Jd = MatrixXd::Zero(N, N); Jp = MatrixXd::Zero(N, N); }
         VectorXd t(K);
         std::vector<int> S;
         S.reserve(N);
         MatrixXd Jc, uJ;
-        VectorXd us, ud, xs;
+        VectorXd us, ud, ul, xs;
         const int i0 = static_cast<int>((static_cast<long>(R) * b) / n_blocks);
         const int i1 = static_cast<int>((static_cast<long>(R) * (b + 1)) / n_blocks);
 
@@ -163,8 +165,9 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
             const ArrayXd dc = (delta + (mk.x * t).array()) / c;
 
             s_c.setZero();
-            if (jac) dsig.setZero();
-            pcm_demand::detail::cond_vertical(dc, mk.p, prm.sigma_p, s_c, jac ? &Jd : nullptr, &dsig, &Jp);
+            if (jac) { dsig.setZero(); if (bound) dlogc.setZero(); }
+            pcm_demand::detail::cond_vertical(dc, mk.p, prm.sigma_p, prm.alpha_lo / c, s_c, jac ? &Jd : nullptr,
+                                              &dsig, &Jp, bound ? &dlogc : nullptr);
 
             const double w = mk.weights[i];
             acc.s += w * s_c;
@@ -180,7 +183,7 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
             // of N x N gives the same entries at a fraction of the cost.
             S.clear();
             for (int j = 0; j < N; ++j)
-                if (Jd(j, j) != 0.0 || s_c[j] != 0.0 || dsig[j] != 0.0) S.push_back(j);
+                if (Jd(j, j) != 0.0 || s_c[j] != 0.0 || dsig[j] != 0.0 || (bound && dlogc[j] != 0.0)) S.push_back(j);
             const int ns = static_cast<int>(S.size());
             Jc = Jd(S, S);
             if (derivatives) {
@@ -190,7 +193,9 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
                     acc.ds_dtheta(S, m) += (w * mk.taste_basis(i, m) / c) * (Jc * xs);
                 }
                 if (Q > 0) {
-                    const VectorXd Jdc = Jc * dc(S).matrix();
+                    // log c acts through dc = y / c (-Jd dc) and, with a bound, through a_lo = alpha_lo / c
+                    VectorXd Jdc = Jc * dc(S).matrix();
+                    if (bound) Jdc -= dlogc(S).matrix();
                     for (int q = 0; q < Q; ++q) acc.ds_dtheta(S, M + q) += (-w * mk.scale_basis(i, q)) * Jdc;
                 }
                 acc.ds_dtheta.col(M + Q) += w * dsig.matrix();
@@ -201,6 +206,7 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
                 if (derivatives) {
                     uJ.noalias() = micro->U(S, Eigen::all).transpose() * Jc;   // Pm x ns
                     ud.noalias() = micro->U.transpose() * dsig.matrix();
+                    if (bound && Q > 0) ul.noalias() = micro->U.transpose() * dlogc.matrix();
                 }
                 for (int p = 0; p < Pm; ++p) {
                     const double wh = w * micro->H(i, micro->h_of_part[p]);
@@ -216,6 +222,7 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
                     if (Q > 0) {
                         double v = 0.0;
                         for (int k = 0; k < ns; ++k) v += uJ(p, k) * dc[S[k]];
+                        if (bound) v -= ul[p];
                         for (int q = 0; q < Q; ++q) acc.micro_d_theta(p, M + q) += -wh * mk.scale_basis(i, q) * v;
                     }
                     acc.micro_d_theta(p, M + Q) += wh * ud[p];
@@ -267,6 +274,7 @@ SolveResult solve_market(const ArrayXd & s_data, const pcm_demand::Market & mk,
                     "theta_warm must have the layout of theta");
             require(prm_warm->theta.allFinite() && prm_warm->phi.allFinite() && std::isfinite(prm_warm->sigma_p) &&
                     prm_warm->sigma_p > 0, "theta_warm must be finite with positive sigma_p");
+            require(prm_warm->alpha_lo == prm.alpha_lo, "theta_warm must have the alpha_lo of theta");
         }
         if (micro) validate_micro(*micro, N, static_cast<int>(mk.weights.size()));
         require(opt.tol > 0 && opt.n_threads >= 1 && opt.rcond_min >= 0 && opt.path_seconds >= 0,
@@ -347,7 +355,7 @@ SolveResult solve_market(const ArrayXd & s_data, const pcm_demand::Market & mk,
     }
 
     // 5. status
-    if (best_delta.size() != N) best_delta = pcm_share::initial_guess(s_data, mk.p, prm.sigma_p);
+    if (best_delta.size() != N) best_delta = pcm_demand::detail::initial_guess(s_data, mk.p, prm);
     res.delta = best_delta;
     const bool feasible_seen = std::isfinite(best_res);
 

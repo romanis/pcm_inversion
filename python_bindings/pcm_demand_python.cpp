@@ -24,8 +24,8 @@ PYBIND11_MODULE(python_pcm_demand, m) {
 
     m.def("shares",
           [](const Eigen::ArrayXd & delta, const pcm_demand::Market & mk, const Eigen::ArrayXd & theta,
-             const Eigen::ArrayXd & phi, double sigma_p, bool with_derivatives) {
-              pcm_demand::Params prm{theta, phi, sigma_p};
+             const Eigen::ArrayXd & phi, double sigma_p, bool with_derivatives, double alpha_lo) {
+              pcm_demand::Params prm{theta, phi, sigma_p, alpha_lo};
               pcm_demand::Shares sh;
               {
                   py::gil_scoped_release release;
@@ -41,14 +41,14 @@ PYBIND11_MODULE(python_pcm_demand, m) {
               return d;
           },
           py::arg("delta"), py::arg("market"), py::arg("theta"), py::arg("phi"), py::arg("sigma_p"),
-          py::arg("with_derivatives") = true,
+          py::arg("with_derivatives") = true, py::arg("alpha_lo") = 0.0,
           "Shares and derivatives. d_theta columns are [theta..., phi..., sigma_p].");
 
     m.def("invert",
           [](const Eigen::ArrayXd & s_data, const pcm_demand::Market & mk, const Eigen::ArrayXd & theta,
              const Eigen::ArrayXd & phi, double sigma_p, const Eigen::ArrayXd & delta0, double tol,
-             unsigned max_evals) {
-              pcm_demand::Params prm{theta, phi, sigma_p};
+             unsigned max_evals, double alpha_lo) {
+              pcm_demand::Params prm{theta, phi, sigma_p, alpha_lo};
               pcm_demand::InversionResult r;
               {
                   py::gil_scoped_release release;
@@ -63,5 +63,6 @@ PYBIND11_MODULE(python_pcm_demand, m) {
               return d;
           },
           py::arg("s_data"), py::arg("market"), py::arg("theta"), py::arg("phi"), py::arg("sigma_p"),
-          py::arg("delta0") = Eigen::ArrayXd(), py::arg("tol") = 1e-12, py::arg("max_evals") = 5000);
+          py::arg("delta0") = Eigen::ArrayXd(), py::arg("tol") = 1e-12, py::arg("max_evals") = 5000,
+          py::arg("alpha_lo") = 0.0);
 }

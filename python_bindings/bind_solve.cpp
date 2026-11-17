@@ -50,13 +50,13 @@ std::unique_ptr<pcm_kernel::MicroRequest> micro_from(const py::object & obj, con
 }
 
 // theta_warm is the stacked (P,) vector [theta, phi, sigma_p], in the column order of ds_dtheta.
-std::unique_ptr<pcm_demand::Params> params_from_stacked(const py::object & obj, int M, int Q) {
+std::unique_ptr<pcm_demand::Params> params_from_stacked(const py::object & obj, int M, int Q, double alpha_lo) {
     if (obj.is_none()) return nullptr;
     const Eigen::ArrayXd v = obj.cast<Eigen::ArrayXd>();
     if (v.size() != M + Q + 1)
         throw py::value_error("solve_market: theta_warm must be the stacked vector [theta, phi, sigma_p] of length " +
                               std::to_string(M + Q + 1) + ", got " + std::to_string(v.size()));
-    return std::make_unique<pcm_demand::Params>(pcm_demand::Params{v.head(M), v.segment(M, Q), v[M + Q]});
+    return std::make_unique<pcm_demand::Params>(pcm_demand::Params{v.head(M), v.segment(M, Q), v[M + Q], alpha_lo});
 }
 
 }  // namespace
@@ -81,11 +81,12 @@ void bind_solve(py::module_ & m) {
              const Eigen::ArrayXd & phi, double sigma_p, const py::object & delta_warm,
              const py::object & theta_warm, const py::object & micro, double tol, unsigned warm_evals,
              unsigned cold_evals, unsigned path_evals, double path_seconds, int n_threads, bool derivatives,
-             bool price_derivatives, double rcond_min) {
+             bool price_derivatives, double rcond_min, double alpha_lo) {
               const pcm_demand::Market mk = market_from(market, "solve_market");
-              const pcm_demand::Params prm{theta, phi, sigma_p};
+              const pcm_demand::Params prm{theta, phi, sigma_p, alpha_lo};
               const Eigen::ArrayXd dw = delta_warm.is_none() ? Eigen::ArrayXd() : delta_warm.cast<Eigen::ArrayXd>();
-              const auto pw = params_from_stacked(theta_warm, static_cast<int>(theta.size()), static_cast<int>(phi.size()));
+              const auto pw = params_from_stacked(theta_warm, static_cast<int>(theta.size()), static_cast<int>(phi.size()),
+                                                  alpha_lo);
               const auto mr = micro_from(micro, "solve_market");
               pcm_kernel::SolveOptions opt;
               opt.tol = tol;
@@ -125,9 +126,10 @@ void bind_solve(py::module_ & m) {
           py::kw_only(), py::arg("tol") = 1e-9, py::arg("warm_evals") = 2500u, py::arg("cold_evals") = 40000u,
           py::arg("path_evals") = 1500u, py::arg("path_seconds") = 90.0, py::arg("n_threads") = 1,
           py::arg("derivatives") = true, py::arg("price_derivatives") = false, py::arg("rcond_min") = 1e-13,
+          py::arg("alpha_lo") = 0.0,
           "solve_market(s_data, market, theta, phi, sigma_p, delta_warm=None, theta_warm=None, micro=None, *, "
           "tol=1e-9, warm_evals=2500, cold_evals=40000, path_evals=1500, path_seconds=90.0, n_threads=1, "
-          "derivatives=True, price_derivatives=False, rcond_min=1e-13) -> dict\n\n"
+          "derivatives=True, price_derivatives=False, rcond_min=1e-13, alpha_lo=0.0) -> dict\n\n"
           "Frontier lift, inversion and derivatives for one market in one call (DESIGN 3.2). market is a "
           "pcm_kernel.Market or any mapping or object with x, p, weights, taste_basis, taste_col, scale_basis. "
           "theta_warm is the stacked vector [theta, phi, sigma_p] at which delta_warm was solved. micro is "
@@ -137,14 +139,14 @@ void bind_solve(py::module_ & m) {
           "rcond, seconds, share_evaluations, stages. Derivative arrays have shape (0, 0) unless the inversion "
           "converged and they were requested; ddelta_dtheta is NaN when status is 'singular_ds_ddelta'. "
           "Columns of the theta derivatives are [theta, phi, sigma_p]. Bad input is status 'invalid_input' with "
-          "the reason in stages. Releases the GIL; n_threads is this call's OpenMP team size.");
+          "the reason in stages. Releases the GIL; n_threads is this call's OpenMP team size. alpha_lo is the lower bound on alpha_i = c_i a_i (a_i truncated below at alpha_lo / c_i, LEARNINGS 29); 0 is the untruncated model. theta_warm is taken at the same alpha_lo.");
 
     m.def("evaluate_market",
           [](const Eigen::ArrayXd & delta, const py::object & market, const Eigen::ArrayXd & theta,
              const Eigen::ArrayXd & phi, double sigma_p, const py::object & micro, bool derivatives,
-             bool price_derivatives, int n_threads) {
+             bool price_derivatives, int n_threads, double alpha_lo) {
               const pcm_demand::Market mk = market_from(market, "evaluate_market");
-              const pcm_demand::Params prm{theta, phi, sigma_p};
+              const pcm_demand::Params prm{theta, phi, sigma_p, alpha_lo};
               const auto mr = micro_from(micro, "evaluate_market");
               if (n_threads < 1) throw py::value_error("evaluate_market: n_threads must be at least 1");
               pcm_kernel::MarketEvaluation r;
@@ -173,11 +175,11 @@ void bind_solve(py::module_ & m) {
           },
           py::arg("delta"), py::arg("market"), py::arg("theta"), py::arg("phi"), py::arg("sigma_p"),
           py::arg("micro") = py::none(), py::kw_only(), py::arg("derivatives") = true,
-          py::arg("price_derivatives") = false, py::arg("n_threads") = 1,
+          py::arg("price_derivatives") = false, py::arg("n_threads") = 1, py::arg("alpha_lo") = 0.0,
           "evaluate_market(delta, market, theta, phi, sigma_p, micro=None, *, derivatives=True, "
-          "price_derivatives=False, n_threads=1) -> dict\n\n"
+          "price_derivatives=False, n_threads=1, alpha_lo=0.0) -> dict\n\n"
           "Shares, partial derivatives and micro parts at a fixed delta, without inversion: the draw loop "
           "solve_market runs at its solution. Returns s, ds_ddelta, ds_dtheta, ds_dp, micro, micro_d_delta, "
           "micro_d_theta (unrequested arrays have shape (0, 0) or (0,)). Releases the GIL; bad input raises "
-          "ValueError.");
+          "ValueError. alpha_lo is the lower bound on alpha_i = c_i a_i (a_i truncated below at alpha_lo / c_i, LEARNINGS 29); 0 is the untruncated model.");
 }

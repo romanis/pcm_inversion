@@ -105,3 +105,47 @@ def test_solve_market_releases_the_gil() -> None:
     print(f"serial {serial:.3f}s, two threads {parallel:.3f}s, ratio {parallel / serial:.2f}")
     assert serial > 0.2, "markets too small to time"
     assert parallel < 0.7 * serial
+
+
+def _all_outputs(mk: object, delta: np.ndarray, theta: np.ndarray, phi: np.ndarray, sp: float,
+                 **kw: float) -> dict[str, np.ndarray]:
+    """Every kernel binding at one point; ``kw`` is passed to each (``alpha_lo``)."""
+    out: dict[str, np.ndarray] = {}
+    ev = pcm_kernel.evaluate_market(delta, mk, theta, phi, sp, derivatives=True, price_derivatives=True, **kw)
+    out.update({f"ev.{k}": np.asarray(ev[k]) for k in ("s", "ds_ddelta", "ds_dtheta", "ds_dp")})
+    cs = pcm_kernel.consumer_surplus(delta, mk, theta, phi, sp, 1, **kw)
+    out["cs"] = np.asarray(cs["per_draw"])
+    s = data_shares(mk, delta, theta, phi, sp)
+    sol = pcm_kernel.solve_market(s, mk, theta * 1.01, phi, sp, delta, np.r_[theta, phi, sp], None, **kw)
+    out.update({f"solve.{k}": np.asarray(sol[k]) for k in ("delta", "ds_dtheta", "ddelta_dtheta")})
+    P = len(theta) + len(phi) + 1
+    ms = pcm_kernel.max_step(delta, np.linspace(-1, 1, len(delta)), mk, theta, phi, sp, np.ones(P), 2.0, 1, **kw)
+    out.update({f"ms.{k}": np.asarray(ms[k]) for k in ("tau_draw", "kind_draw", "mass_profile", "buyer_mass")})
+    out["sig"] = np.asarray(pcm_kernel.frontier_signature(delta, mk, theta, phi, sp, 1, **kw)).astype(float)
+    return out
+
+
+def test_alpha_lo_zero_is_the_untruncated_model() -> None:
+    """alpha_lo = 0 (default or explicit) runs the code that existed before the bound, bit for bit; a bound
+    of 1e-300 goes through the truncated formulas and agrees to 1e-12 (LEARNINGS 29)."""
+    mk, delta, theta, phi, sp = make_market(3)
+    base = _all_outputs(mk, delta, theta, phi, sp)
+    zero = _all_outputs(mk, delta, theta, phi, sp, alpha_lo=0.0)
+    tiny = _all_outputs(mk, delta, theta, phi, sp, alpha_lo=1e-300)
+    for k in base:
+        assert np.array_equal(base[k], zero[k], equal_nan=True), k
+        if k != "sig":
+            assert np.allclose(base[k], tiny[k], rtol=0, atol=1e-12 * max(1.0, np.abs(base[k]).max())), k
+    assert np.array_equal(base["sig"], tiny["sig"])
+
+
+def test_alpha_lo_bounds_surplus_and_changes_shares() -> None:
+    mk, delta, theta, phi, sp = make_market(4)
+    s0 = pcm_kernel.evaluate_market(delta, mk, theta, phi, sp, derivatives=False)["s"]
+    s1 = pcm_kernel.evaluate_market(delta, mk, theta, phi, sp, derivatives=False, alpha_lo=1.0)["s"]
+    assert s1.sum() < s0.sum()
+    cs0 = pcm_kernel.consumer_surplus(delta, mk, theta, phi, sp, 1)["total"]
+    cs1 = pcm_kernel.consumer_surplus(delta, mk, theta, phi, sp, 1, alpha_lo=1.0)["total"]
+    assert 0 < cs1 < cs0
+    with pytest.raises(ValueError):
+        pcm_kernel.evaluate_market(delta, mk, theta, phi, sp, alpha_lo=-1.0)

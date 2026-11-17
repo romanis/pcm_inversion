@@ -41,9 +41,9 @@ pcm_demand::Market market_from(const py::handle & obj) {
 void bind_welfare(py::module_ & m) {
     m.def("consumer_surplus",
           [](const Eigen::ArrayXd & delta, const py::object & market, const Eigen::ArrayXd & theta,
-             const Eigen::ArrayXd & phi, double sigma_p, int n_threads) {
+             const Eigen::ArrayXd & phi, double sigma_p, int n_threads, double alpha_lo) {
               const pcm_demand::Market mk = market_from(market);
-              const pcm_demand::Params prm{theta, phi, sigma_p};
+              const pcm_demand::Params prm{theta, phi, sigma_p, alpha_lo};
               pcm_welfare::Surplus r;
               {
                   py::gil_scoped_release release;
@@ -55,10 +55,10 @@ void bind_welfare(py::module_ & m) {
               return d;
           },
           py::arg("delta"), py::arg("market"), py::arg("theta"), py::arg("phi"), py::arg("sigma_p"),
-          py::arg("n_threads") = 1,
-          "consumer_surplus(delta, market, theta, phi, sigma_p, n_threads=1) -> dict\n\n"
+          py::arg("n_threads") = 1, py::kw_only(), py::arg("alpha_lo") = 0.0,
+          "consumer_surplus(delta, market, theta, phi, sigma_p, n_threads=1, *, alpha_lo=0.0) -> dict\n\n"
           "Consumer surplus by the frontier formula, in price units per household (DESIGN 3.4). Returns "
           "total (sum_i w_i CS_i) and per_draw (CS_i, unweighted). market is a pcm_demand Market or any "
           "mapping or object with x, p, weights, taste_basis, taste_col, scale_basis. Releases the GIL; "
-          "invalid input raises ValueError.");
+          "invalid input raises ValueError. alpha_lo is the lower bound on alpha_i = c_i a_i (a_i truncated below at alpha_lo / c_i, LEARNINGS 29); 0 is the untruncated model. Per-draw CS is then at most max_j q_j / a_lo - p_j.");
 }

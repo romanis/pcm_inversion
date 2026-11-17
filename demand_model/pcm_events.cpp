@@ -36,6 +36,16 @@ void check_market(const ArrayXd & delta, const pcm_demand::Market & mk, const pc
         if (!(j == 0 ? mk.p[0] > 0 : mk.p[j] > mk.p[j - 1])) fail("prices must be positive and strictly increasing");
     if (!delta.allFinite() || !prm.theta.allFinite() || !mk.taste_basis.allFinite() || !mk.weights.allFinite())
         fail("delta, theta, taste_basis and weights must be finite");
+    if (!(prm.alpha_lo >= 0.0) || !std::isfinite(prm.alpha_lo)) fail("alpha_lo must be finite and non-negative");
+}
+
+// The utility the frontier is built on: y = delta + x . t, sheared to y - alpha_lo p under a bound. Draw i
+// buys a vertex with entry slope e (in y / c units) only if e > a_lo = alpha_lo / c, that is if its slope in
+// y units exceeds alpha_lo, so the increasing part of the sheared hull is the set of products with a window
+// of positive mass, whatever c_i and sigma_p (F5 still holds).
+void shear(const pcm_demand::Params & prm, const pcm_demand::Market & mk, ArrayXd & y)
+{
+    if (prm.alpha_lo > 0.0) y -= prm.alpha_lo * mk.p;
 }
 
 // y = base + sum_m coef_m * taste_basis(i, m) * x.col(taste_col[m])
@@ -156,6 +166,7 @@ void all_frontiers(const ArrayXd & delta, const pcm_demand::Market & mk, const p
         H.reserve(delta.size() + 1);
         for (int i = b * BLOCK; i < std::min(R, (b + 1) * BLOCK); ++i) {
             affine_utility(delta, mk, prm.theta, i, y);
+            shear(prm, mk, y);
             frontier(y, mk.p, H);
             part[b].insert(part[b].end(), H.begin(), H.end());
             sizes[b].push_back(static_cast<int>(H.size()));
@@ -205,6 +216,7 @@ StepEvents max_step(const ArrayXd & delta, const ArrayXd & delta_dot, const pcm_
         H.reserve(N + 1);
         for (int i = b * BLOCK; i < std::min(R, (b + 1) * BLOCK); ++i) {
             affine_utility(delta, mk, prm.theta, i, y);
+            shear(prm, mk, y);
             affine_utility(delta_dot, mk, dtaste, i, v);
             frontier(y, mk.p, H);
             const FirstEvent ev = first_event(y, v, mk.p, H, tau_max);
@@ -276,6 +288,7 @@ std::vector<uint64_t> frontier_signature(const ArrayXd & delta, const pcm_demand
         H.reserve(delta.size() + 1);
         for (int i = b * BLOCK; i < std::min(R, (b + 1) * BLOCK); ++i) {
             affine_utility(delta, mk, prm.theta, i, y);
+            shear(prm, mk, y);
             frontier(y, mk.p, H);
             sig[i] = hash_frontier(H);
         }

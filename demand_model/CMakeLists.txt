@@ -25,8 +25,8 @@ add_library(pcm_kernel STATIC
 set_target_properties(pcm_kernel PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(pcm_kernel PUBLIC ${ROOT}/market_share ${ROOT}/demand_model ${Boost_INCLUDE_DIR})
 target_link_libraries(pcm_kernel PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
-foreach(t pcm_kernel_test pcm_events_test pcm_welfare_test)
+foreach(t pcm_kernel_test pcm_events_test pcm_welfare_test pcm_truncation_test)
   add_executable(${t} ${t}.cpp)
   target_link_libraries(${t} gtest_main pcm_kernel)
-  gtest_discover_tests(${t} TEST_PREFIX "${t}.")   # names match ctest -R "pcm_(kernel|events|welfare)"
+  gtest_discover_tests(${t} TEST_PREFIX "${t}.")   # names match ctest -R "pcm_(kernel|events|welfare|truncation)"
 endforeach()

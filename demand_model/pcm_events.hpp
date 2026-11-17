@@ -14,7 +14,10 @@
  * {(0, 0)} U {(p_j, y_ij)}, y_ij = delta_j + x_j . t_i, excluding the origin. Collinear points are
  * not vertices, which matches index_positive_shares (pcm_market_share.cpp): a product is on F_i
  * exactly when it has positive conditional share. Membership does not depend on c_i or sigma_p
- * (DESIGN F5), so the scale and sigma_p components of a direction never cause an event.
+ * (DESIGN F5), so the scale and sigma_p components of a direction never cause an event. With a bound
+ * alpha_lo > 0 (pcm_demand::Params) the hull is that of (p_j, y_ij - alpha_lo p_j): a vertex has a window of
+ * positive mass exactly when its entry slope in y units exceeds alpha_lo, whatever c_i, so F5 still holds and
+ * F_i is the set of products with positive conditional share under the bound.
  *
  * Every function processes draws in fixed blocks of 64 and reduces in draw order, so results are
  * bit-identical for every thread count. n_threads <= 0 uses the OpenMP default team size. The
