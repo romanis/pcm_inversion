@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 import numpy as np
@@ -84,6 +84,11 @@ class OptimizerOptions:
       Gauss-Newton direction (scaled to unit max-norm) and along each free coordinate, without Jacobians. If no
       probe lowers q by more than ``probe_gain_factor`` (10) x the floor the stage ends CONVERGED_NOISE; else it
       continues from the best probe (at most ``max_probe_restarts`` times, then the next probe ends it).
+
+    Outer solver: ``outer`` is ``"nested"`` (this module, the default) or ``"mpec"`` (``mpec.minimize_mpec``, IPOPT on
+    (theta, delta) for demand-only problems, LEARNINGS 31) with ``mpec_hessian`` ``"gn"`` or ``"lbfgs"`` and at most
+    ``mpec_max_restarts`` lift-and-restart rounds. These three fields are left out of the repr, so the nested
+    options print, and hash in profile configurations, as before.
     """
 
     Delta_0: float = 0.3  # initial box radius, natural units
@@ -121,6 +126,9 @@ class OptimizerOptions:
     probe_steps: tuple[float, ...] = (0.01, 0.03, 0.1)
     probe_gain_factor: float = 10.0
     max_probe_restarts: int = 5
+    outer: str = field(default="nested", repr=False)
+    mpec_hessian: str = field(default="gn", repr=False)
+    mpec_max_restarts: int = field(default=3, repr=False)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -912,9 +920,15 @@ def minimize(problem: Problem, weighting: Any, options: OptimizerOptions | None 
     ``problem.covariance``, calls ``set_weighting(W2)`` and runs ``<stage>.step2`` from theta_hat_1. The
     returned result is the last stage that ran; its history holds both stages (``record.stage``).
     CUE minimises ``n g' S(theta)^{-1} g`` with the exact gradient from ``cue_terms`` and the
-    Gauss-Newton Hessian ``2 n G' S^{-1} G``.
+    Gauss-Newton Hessian ``2 n G' S^{-1} G``. ``options.outer == "mpec"`` hands the call to ``mpec.minimize_mpec``.
     """
     options = options or OptimizerOptions()
+    if options.outer == "mpec":
+        from .mpec import minimize_mpec
+
+        return minimize_mpec(problem, weighting, options, checkpoint)
+    if options.outer != "nested":
+        raise ValueError(f"outer must be 'nested' or 'mpec', got {options.outer!r}")
     mode, W = resolve_weighting(weighting)
     arr = _layout_arrays(problem)
     theta0 = arr["start"] if options.theta0 is None else np.asarray(options.theta0, dtype=float)

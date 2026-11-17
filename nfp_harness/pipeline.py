@@ -121,6 +121,7 @@ class RunConfig:
     threads: int | None = None
     workers: int = 4
     gate_nu: int = 4
+    outer: str = "nested"   # OptimizerOptions.outer of every stage: "nested" or "mpec" (demand-only problems)
 
 
 def run_key_options(nu: int, seed: int, extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -186,7 +187,17 @@ class Pipeline:
     def problem(self, moments: str = "all", nu: int | None = None, seed: int | None = None) -> Any:
         key = (moments, nu or self.cfg.nu, self.cfg.seed if seed is None else seed)
         if key not in self._problems:
-            self._problems[key] = self.spec.build_problem(key[1], key[2], self.cfg.threads, moments)
+            problem = self.spec.build_problem(key[1], key[2], self.cfg.threads, moments)
+            if self.cfg.outer == "mpec":
+                from .mpec import refusal
+
+                reason = refusal(problem)
+                if reason:
+                    close = getattr(getattr(problem, "model", None), "close", None)
+                    if close is not None:
+                        close()
+                    raise StageRefused(f"--outer mpec with moments {moments!r}: {reason}")
+            self._problems[key] = problem
         return self._problems[key]
 
     def close(self) -> None:
@@ -441,8 +452,10 @@ class Pipeline:
                                    if getattr(self.spec, "fallback_stage", None) else ""))
 
     def _options(self, **kw: Any) -> OptimizerOptions:
-        """OptimizerOptions for a stage: the spec's ``optimizer_options`` overrides (e.g. trust radii), then ``kw``."""
-        return OptimizerOptions(**{**dict(getattr(self.spec, "optimizer_options", None) or {}), **kw})
+        """OptimizerOptions for a stage: the spec's ``optimizer_options`` overrides (e.g. trust radii), then ``kw``;
+        ``outer`` from ``RunConfig.outer``."""
+        return OptimizerOptions(**{**dict(getattr(self.spec, "optimizer_options", None) or {}), "outer": self.cfg.outer,
+                                   **kw})
 
     def _limit(self) -> int | None:
         """Trial-step limit of step1 and step2: ``spec.max_iterations`` if set (smoke tests), else none."""
@@ -822,7 +835,7 @@ def main(spec: Any, argv: Sequence[str] | None = None, default_nu: int = 16,
         return 0
 
     cfg = RunConfig(base=cfg_base, nu=args.nu, seed=args.seed, threads=args.threads, workers=args.workers,
-                    gate_nu=args.gate_nu)
+                    gate_nu=args.gate_nu, outer=str(getattr(args, "outer", None) or "nested"))
     path = run_dir_path(cfg_base, spec, cfg.nu, cfg.seed)
     st = runtime.status(path)
     if st.get("alive") and int(st.get("pid", -1)) != os.getpid():

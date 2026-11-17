@@ -39,6 +39,8 @@ fixed-W aggregate block (IVMoments) instead of the Sargan form; ``--robustness s
 alias (Sargan is the default) so commands and run directories written with it keep their run key;
 ``--robustness alpha_lo_01`` and ``alpha_lo_04`` set the bound alpha_lo to 0.1 (a factor two of non-income
 heterogeneity in the marginal utility of money) and 0.4 (the first percentile of the CEX alpha).
+``--outer mpec`` (own run directory) runs the optional demand-only MPEC outer of ``nfp_harness.mpec`` with the
+``.envs/mpec`` python; a stage whose problem has the supply block or a margin row refuses it (LEARNINGS 31).
 
 Run (results under petrin_replication/results/harness/, untracked):
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage prefit --nu 4
@@ -226,6 +228,7 @@ class PetrinSpec:
         self.band_nash_all = False
         self.margin: float | None = None
         self.start_gate: str | None = None
+        self.outer = "nested"
         self.products, self.agents, self.price_range, self.n_merged_twins = load_data()
         p = self.products
         self.sigma_starts = per_sd_spreads(p)
@@ -308,6 +311,10 @@ class PetrinSpec:
         parser.add_argument("--start-gate", default=None,
                             help="gate directory or profile.csv whose minimum (lambda = 1, lowest q_fixed) starts "
                                  "step1 and margin_band; default the gate of the --gate-nu run")
+        parser.add_argument("--outer", choices=("nested", "mpec"), default="nested",
+                            help="outer solver: nested (default) or mpec (IPOPT on theta and delta, demand-only "
+                                 "moments; refused for any stage whose problem has the supply block or a margin row; "
+                                 "needs the .envs/mpec python, see nfp_harness/mpec.py)")
 
     def configure(self, args: Any) -> None:
         self.set_robustness(getattr(args, "robustness", None))
@@ -315,6 +322,7 @@ class PetrinSpec:
         self.band_nash_all = bool(getattr(args, "band_nash_all", False))
         sg = getattr(args, "start_gate", None)
         self.start_gate = str(pathlib.Path(sg).resolve()) if sg else None
+        self.outer = str(getattr(args, "outer", None) or "nested")
 
     def set_margin(self, margin: float | None) -> None:
         """Set the calibrated markup level m* (None: no margin row) and the report's normalisation line."""
@@ -334,11 +342,13 @@ class PetrinSpec:
     def run_key(self) -> dict[str, Any]:
         """Result-changing options beyond nu and seed: the robustness switches (none: the main run), the bound
         alpha_lo (always, so runs of the bounded model never share a directory with the unbounded ones) and the
-        margin calibration."""
+        margin calibration, and the MPEC outer (only when chosen, so nested runs keep their directories)."""
         out: dict[str, Any] = {"robustness": list(self.robustness)} if self.robustness else {}
         out["alpha_lo"] = self.alpha_lo
         if self.margin is not None:
             out["margin"] = self.margin
+        if self.outer != "nested":
+            out["outer"] = self.outer
         return out
 
     # ------------------------------------------------------------------ parameters and moments
