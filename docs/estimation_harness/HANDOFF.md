@@ -287,3 +287,109 @@ My first designs (one taste dimension on a characteristic tied to price) left ma
 
 The `chorus` MCP server failed to start in this session; nothing needed it. Scratch tuning scripts are in `$KIROCREW_SCRATCH/wp7` and are untracked.
 
+
+## WP9a
+
+- **Concentrated sigma_p profile on the 2-market data:** q_fixed is 0.051, 1.5e-11, 0.035 at sigma_p 0.8, 1.0, 1.25, so INTERIOR_MINIMUM at the truth. The point at 1.25 ended STALLED rather than CONVERGED. The class is shown in the table.
+- **Planted fixed-W scale-artifact toy** (delta = exp(-sigma_p) times a base vector): q_fixed falls by a factor of e at each 0.5 step, giving MONOTONE_DECREASING with every step falling. q_cue is FLAT. The gate fails with "Profile check failed: q is still monotone in sigma_p."
+- **Killed run resumes:** a child process (0.3 s per evaluation) was killed with SIGKILL after at least 3 points were saved. The rerun printed `RESUMED n SOLVES 8-n`, so only the remaining points were computed, and its result equals the uninterrupted run bit for bit.
+- **Petrin at nu_per_agent = 1 (DESIGN WP9a):** a 2 x 2 grid (lambda in {0.5, 1}, sigma_p in {1.0, 1.5}) with Z = [X1, demand_instruments], no micro moments, ran on 4 workers with 48 threads each in 96 s and wrote `profile.csv`.
+- **Full suite:**
+  - In the shared tree it gives 2 failed, 130 passed. Both failures are in `test_pcm_post.py`, which holds WP8's uncommitted, in-progress work, not mine.
+  - On a clean `git archive HEAD` copy plus my two files, `/home/istomin/anaconda3/bin/python -m pytest -q nfp_harness/tests` gives **118 passed, 1 skipped** (the WP8 placeholder).
+  - ruff and mypy are clean on `profile.py`.
+
+**One Petrin result for the owner.** In that 2 x 2 grid, with the full instrument set but no micro moments, q_fixed fell from 168.8 to 52.3 (lambda 0.5) and from 287.0 to 123.6 (lambda 1) as sigma_p went from 1.0 to 1.5. Over the same moves q_cue went from 212.9 to 212.8 and from 196.7 to 185.3. Two points per slice is not a verdict. It is the LEARNINGS 1 pattern, now with Z = [X1, Z_excl].
+
+**API WP9 calls for the sigma_p ray gate (DESIGN 6.4), once with and once without micro moments:**
+
+```python
+from nfp_harness.profile import ray_profile, NotMonotoneDecreasing
+
+SIG_REF = {"sigma_const": 2.0, "sigma_hpwt": 2.0, "sigma_space": 2.0, "sigma_air": 1.0, "sigma_mpd": 1.0,
+           "sigma_fwd": 2.0, "sigma_mi": 2.0, "sigma_sw": 2.0, "sigma_su": 2.0, "sigma_pv": 2.0}
+SPS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]
+gate = NotMonotoneDecreasing("sigma_p", by=("lambda",), column="q_fixed", rise=3.84,
+    fail_message="Profile check failed: q is still monotone in sigma_p with micro moments. LEARNINGS 14 "
+                 "predicted otherwise; the plan needs the owner before any long estimation.")
+for tag, problem, factory in (("micro", prob_micro, factory_micro), ("no_micro", prob_agg, factory_agg)):
+    W1 = problem.initial_weighting(theta_prefit)       # blockdiag((Z'Z/n)^-1, (n V_micro)^-1); aggregate block only without micro
+    res = ray_profile(problem, theta_prefit, SIG_REF, [0.5, 1.0, 2.0], {"sigma_p": SPS}, origin=0.0,
+                      weighting=W1, run_dir=rd.path / f"profile_sigma_ray_{tag}", tag=tag,
+                      workers=4, problem_factory=factory,   # factory(worker, threads) -> NFPGMMProblem
+                      economics=econ,                       # optional: (problem, ev) -> {"median_own_el": ...}
+                      pass_rule=gate)
+    passed, message = res.verdict                           # also written to profile.txt; table: res.table()
+    verdicts = res.classify("sigma_p", "q_fixed", by=("lambda",))   # {(lambda,): ShapeVerdict}; also "q_cue", "q_fixed:micro"
+```
+
+- **sigma_p bound:** the profile problem's layout must allow sigma_p up to 3.5. The estimation bound of 3.0 would make the 3.5 point OUT_OF_DOMAIN. Use `layout.replace(sigma_p={"upper": 3.5})` when building that problem.
+- **Parallel points:** `PCMModel` has no `spare_capacity()` hook, so points run one at a time with the model's own market threads unless `workers` and `problem_factory` are passed. Each worker gets `os.cpu_count() // workers` threads; 4 workers on this host means 48 threads each.
+- **Concentrated profiles:** add `concentrate=True` (with `hold=` for parameters to keep fixed and `cold=False` to warm-start along the grid).
+- **Resume:** rerunning the identical call resumes from the saved points. A changed configuration raises `ProfileMismatchError` unless `new_run=True`.
+
+The `chorus` MCP server failed to start; nothing here needed it.
+## WP8
+
+One limitation matters for WP9: when products are removed and prices are re-solved to a new Nash equilibrium, the price solver often fails to converge on PCM markets. It reports `not_converged` instead of hiding it, but WP9 should expect it on the 1984 counterfactual.
+
+**Files** (committed with `git add` on only these three):
+- `/local/home/istomin/pcm_inversion/nfp_harness/models/pcm_post.py`
+- `/local/home/istomin/pcm_inversion/nfp_harness/diagnostics/economics.py`
+- `/local/home/istomin/pcm_inversion/nfp_harness/tests/test_pcm_post.py`
+
+`docs/estimation_harness/HANDOFF.md` has uncommitted edits that are not mine. I left them alone.
+
+**Acceptance outputs** (synthetic PCM: 2 markets, 256 draws each, 3 firms, one body-type-like dummy):
+```
+elasticity vs finite differences, worst relative error 2.93e-10
+Nash FOC residual at computed costs 2.78e-17
+market 1984: CS change from dropping a dominated product 0.00e+00
+market 1985: CS change from dropping a dominated product 0.00e+00
+kappa 0.37 and 3.7: CS 2.377662734484 -> 2.377662734484 (relative change 0.0e+00);
+  CS change from removal: fixed prices -0.5275495478, Nash -1.0794665052, both identical under kappa
+Nash re-solve: converged after 13 iterations, FOC residual 4.9e-16
+old nu=16 fixture: own elasticity max relative error 2.8e-16, margin 1.4e-15, nonzero cross counts equal
+FLAG: nonzero_cross_median = 4 is outside the declared plausible range [100, inf].   (planted)
+test_pcm_post.py: 14 passed
+full suite: /home/istomin/anaconda3/bin/python -m pytest -q nfp_harness/tests -> 132 passed in 195 s
+```
+- **DESIGN WP8 fixture test:** I rebuilt the old body-sigma nu=16 markets with the new kernel. They match the old `pcm_product_level_body_nu16.csv` (from the old postestimation script).
+- **Singular Nash Jacobian:** it comes back as `NASH_JACOBIAN_SINGULAR`, both from `nash_markups` and when a counterfactual hits a zero-share product. Nothing raises.
+- **Checks:** ruff is clean, mypy is clean on my two modules, and there are no em dashes.
+
+**Deviations**
+- **Nash solver.** DESIGN's damped fixed point `p <- p + 0.5 r(p)`, with `r(p) = c + markup(p) - p`, cannot converge when d markup/dp has a real eigenvalue above 1. In one synthetic market that eigenvalue was 12.1, so `1 + 0.5 (12.1 - 1) = 6.5` and every iteration amplifies the error.
+  - The default is now `method="newton"`. It takes Newton steps with a parallel finite-difference Jacobian. When no backtracked step lowers max |r|, it takes one damped fixed-point step instead. This is needed because ds/dp jumps wherever a draw's frontier changes.
+  - DESIGN's iteration stays available as `method="fixed_point"`.
+  - On 12 synthetic cases the Newton method converged in 6 and the fixed point in 4.
+  - At a finite number of draws an exact price equilibrium may not exist, so `not_converged` can be the correct answer.
+- **Alpha quintiles.** CS by alpha quintile groups draws by c_i, each draw's median alpha. The lognormal part a_i is integrated analytically inside each draw's CS, so it cannot be split across quintiles.
+
+**API for WP9**
+```python
+from nfp_harness.models import pcm_post as pp
+from nfp_harness.diagnostics.economics import economics_block, economics_values
+# model = PCMModel(...); theta = result.theta; delta = result.evaluation.aux["delta"]   (n,) row order
+
+post = pp.postestimation(model, theta, delta, firm_ids="firm_ids",
+                         groups={"mi": "mi", "sw": "sw", "su": "su", "pv": "pv"}, group_other="car")
+# post["products"]: (n,) arrays for product_level.csv (own_elasticity, nonzero_cross(_ratio), outside_diversion,
+#   diversion_within_group / _leaving_group / _to_<g>, markup, cost, margin, shares, prices, group, market_ids)
+# post["markets"], post["group_matrix"], post["nash_singular"]
+
+cf = pp.drop_products_counterfactual(model, theta, delta, 1984, products["mi"].to_numpy() == 1,
+                                     resolve_prices=True, tol=1e-7, max_iterations=500, tabulate=("fs",))
+# cf["observed"|"fixed_prices"|"nash"]["cs"] in $1000 per household; cf["nash"]["status"] in
+#   converged / not_converged / NASH_JACOBIAN_SINGULAR / nonpositive_price
+# gain_musd = households_1984 * (cf["observed"]["cs"] - cf["nash"]["cs"]) / 1000
+# cf["tables"]["alpha_quintile"], cf["tables"]["fs"]: cs_by_group rows (cs_<scenario>, cs_total_<scenario>, mass)
+
+pp.compare_blp(pcm_summary, {"BLP micro": json_micro, "BLP no micro": json_nomicro}, note="...")
+```
+- **Spec fields `economics_block(problem, result, spec)` reads:** `firm_column`, `groups`, `group_other`, `price_range` and `plausible`.
+- **Keys for `plausible`:** `own_elasticity_median`, `share_own_elasticity_below_-50`, `nonzero_cross_median`, `diversion_leaving_group_median`, `margin_median`, `inside_share_elasticity_median`, `sd_xi_over_sd_delta`, and `spread_buyer_dollars` (one range for all spreads, or a mapping by parameter name). A bound may be the string `"price_range"`.
+- **Inputs WP9 passes on:** pass `cross_group_diversion = block.values["cross_group_diversion"]` to `run_diagnostics` options, so the segmented-corner detector sees it.
+
+The `chorus` MCP server failed to start; nothing needed it. Scratch scripts are in `$KIROCREW_SCRATCH/wp8` and are untracked.
+
