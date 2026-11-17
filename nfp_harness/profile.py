@@ -71,6 +71,7 @@ __all__ = [
     "ProfileResult",
     "ProfileMismatchError",
     "NotMonotoneDecreasing",
+    "RisesAtBothEnds",
     "classify_profile",
     "profile",
     "ray_profile",
@@ -405,34 +406,75 @@ class NotMonotoneDecreasing:
     exceeds the minimum by at least ``rise`` (3.84, the 5% chi-square(1) value).
 
     Calling the rule on a ``ProfileResult`` returns ``(passed, message)``; ``message`` lists each
-    slice's shape, and on failure starts with ``fail_message``.
+    slice's shape, and on failure starts with ``fail_message``. ``only`` ({axis: value}) restricts the rule
+    to the slices with those values of the ``by`` axes (e.g. ``{"lambda": 1.0}``).
     """
 
+    rule_name = "NotMonotoneDecreasing"
+
     def __init__(self, along: str, column: str = "q_fixed", by: Sequence[str] | None = None, rise: float = 3.84,
-                 fail_message: str = "Profile check failed: q is still monotone in {along}.", **classify_kw: Any
-                 ) -> None:
+                 fail_message: str = "Profile check failed: q is still monotone in {along}.",
+                 only: Mapping[str, float] | None = None, **classify_kw: Any) -> None:
         self.along, self.column, self.by, self.rise = along, column, by, float(rise)
         self.fail_message = fail_message
+        self.only = dict(only or {})
         self.classify_kw = classify_kw
 
     def verdicts(self, result: ProfileResult) -> dict[tuple[float, ...], ShapeVerdict]:
-        return result.classify(self.along, self.column, self.by, **self.classify_kw)
+        out = result.classify(self.along, self.column, self.by, **self.classify_kw)
+        if not self.only:
+            return out
+        by = [a for a in result.axis_names if a != self.along] if self.by is None else list(self.by)
+        unknown = [a for a in self.only if a not in by]
+        if unknown:
+            raise KeyError(f"{self.rule_name}: 'only' names axes {unknown} that are not slicing axes {by}")
+        return {key: v for key, v in out.items()
+                if all(math.isclose(key[by.index(a)], float(x)) for a, x in self.only.items())}
+
+    def slice_ok(self, v: ShapeVerdict) -> bool:
+        return v.shape is ProfileShape.INTERIOR_MINIMUM or (math.isfinite(v.rise_right) and v.rise_right >= self.rise)
+
+    def head(self, passed: bool) -> str:
+        where = "" if not self.only else " (slices " + ", ".join(f"{a} = {x:g}" for a, x in self.only.items()) + ")"
+        return (f"{self.column} is not monotone decreasing in {self.along} in any slice{where} (rule: interior "
+                f"minimum, or q at the right end at least {self.rise:g} above the minimum)." if passed
+                else self.fail_message.format(along=self.along, column=self.column))
 
     def __call__(self, result: ProfileResult) -> tuple[bool, str]:
         verdicts = self.verdicts(result)
-        lines, passed = [], True
+        lines, passed = [], bool(verdicts) or not self.only
         for v in verdicts.values():
-            ok = v.shape is ProfileShape.INTERIOR_MINIMUM or (math.isfinite(v.rise_right) and v.rise_right >= self.rise)
+            ok = self.slice_ok(v)
             passed &= ok
             lines.append(("ok: " if ok else "fails: ") + v.message)
-        head = (f"{self.column} is not monotone decreasing in {self.along} in any slice (rule: interior minimum, or "
-                f"q at the right end at least {self.rise:g} above the minimum)." if passed
-                else self.fail_message.format(along=self.along, column=self.column))
-        return passed, head + "\n" + "\n".join(lines)
+        if not verdicts and self.only:
+            lines.append(f"fails: no slice of {self.column} matches {self.only}.")
+        return passed, self.head(passed) + "\n" + "\n".join(lines)
 
     def describe(self) -> dict[str, Any]:
-        return {"rule": "NotMonotoneDecreasing", "along": self.along, "column": self.column,
-                "by": None if self.by is None else list(self.by), "rise": self.rise}
+        return {"rule": self.rule_name, "along": self.along, "column": self.column,
+                "by": None if self.by is None else list(self.by), "rise": self.rise, "only": self.only}
+
+
+class RisesAtBothEnds(NotMonotoneDecreasing):
+    """Pass rule: in every selected slice, q at both ends of the grid exceeds its minimum by at least ``rise``
+    (an interior minimum that the data resolve, e.g. the supply block's profile in sigma_p)."""
+
+    rule_name = "RisesAtBothEnds"
+
+    def __init__(self, along: str, column: str = "q_fixed", by: Sequence[str] | None = None, rise: float = 3.84,
+                 fail_message: str = "Profile check failed: {column} does not rise at both ends in {along}.",
+                 only: Mapping[str, float] | None = None, **classify_kw: Any) -> None:
+        super().__init__(along, column, by, rise, fail_message, only, **classify_kw)
+
+    def slice_ok(self, v: ShapeVerdict) -> bool:
+        return bool(math.isfinite(v.rise_left) and math.isfinite(v.rise_right) and v.rise_left >= self.rise
+                    and v.rise_right >= self.rise)
+
+    def head(self, passed: bool) -> str:
+        where = "" if not self.only else " (slices " + ", ".join(f"{a} = {x:g}" for a, x in self.only.items()) + ")"
+        return (f"{self.column} rises by at least {self.rise:g} from its minimum to both ends of {self.along}{where}."
+                if passed else self.fail_message.format(along=self.along, column=self.column))
 
 
 # ------------------------------------------------------------------------------------------------

@@ -36,6 +36,7 @@ from nfp_harness.params import ParameterLayout  # noqa: E402
 from nfp_harness.problem import NFPGMMProblem  # noqa: E402
 from nfp_harness.profile import (  # noqa: E402
     NotMonotoneDecreasing,
+    RisesAtBothEnds,
     ParamAxis,
     ProfileMismatchError,
     ProfileShape,
@@ -268,6 +269,22 @@ def test_two_dimensional_grid_and_pass_rule() -> None:
     assert verdicts[(-0.5,)].shape is ProfileShape.INTERIOR_MINIMUM and verdicts[(-0.5,)].x_min == 1.0
     assert res.verdict is not None and res.verdict[0]
     assert "q_fixed (t1 = -0.5) along t0 has an INTERIOR_MINIMUM at t0 = 1" in res.table()
+
+
+def test_slice_rules_rises_at_both_ends_and_any_of() -> None:
+    prob = linear_toy()
+    res = grid_profile(prob, THETA_STAR, {"t1": [-1.0, -0.5, 0.0], "t0": [0.0, 1.0, 2.0, 3.0]}, modes=("fixed",))
+    v = res.classify("t0", by=("t1",))[(-0.5,)]
+    assert v.shape is ProfileShape.INTERIOR_MINIMUM
+    both = RisesAtBothEnds("t0", by=("t1",), rise=min(v.rise_left, v.rise_right), only={"t1": -0.5})
+    passed, msg = both(res)
+    assert passed and "t1 = -0.5" in msg and len(both.verdicts(res)) == 1
+    too_high = RisesAtBothEnds("t0", by=("t1",), rise=max(v.rise_left, v.rise_right) + 1.0, only={"t1": -0.5})
+    assert not too_high(res)[0]
+    assert NotMonotoneDecreasing("t0", by=("t1",), rise=0.0, only={"t1": -0.5})(res)[0]
+    assert not NotMonotoneDecreasing("t0", by=("t1",), rise=0.0, only={"t1": 7.0})(res)[0]   # no such slice
+    with pytest.raises(KeyError):
+        NotMonotoneDecreasing("t0", by=("t1",), only={"t0": 1.0}).verdicts(res)
 
 
 def test_planted_scale_artifact_is_monotone_decreasing(tmp_path: pathlib.Path) -> None:

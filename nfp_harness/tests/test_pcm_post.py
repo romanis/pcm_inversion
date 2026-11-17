@@ -297,6 +297,29 @@ def test_buyer_alpha_reproduces_the_inside_share(model: Any, syn: dict[str, Any]
     assert sb2["spreads"]["sigma_x1"] == pytest.approx(sb["spreads"]["sigma_x1"], rel=1e-10)
 
 
+def test_relative_quality_dispersion_by_hand(model: Any, syn: dict[str, Any]) -> None:
+    rq = pp.relative_quality_dispersion(model, THETA, syn["delta"], exclude=("x2",))
+    mab = rq["mean_alpha_buyers"]
+    t = 0
+    km = model.kernel_market(t)
+    x, basis, w = np.asarray(km.x), np.asarray(km.taste_basis), np.asarray(km.weights)
+    # taste columns: sigma_x1 (nu0), sigma_x2 (nu1, excluded), sigma_g1 (nu2), pi_x1_demo (demo)
+    T = np.zeros((w.size, x.shape[1]))
+    T[:, CHARS.index("x1")] = THETA[0] * basis[:, 0] + THETA[3] * basis[:, 3]
+    T[:, CHARS.index("g1")] = THETA[2] * basis[:, 2]
+    U = T @ x.T
+    J = x.shape[0]
+    j = 3
+    d = U[:, j] - U[:, j + 1]
+    w = w / w.sum()
+    sd = math.sqrt(w @ (d - w @ d) ** 2)
+    assert rq["per_product"][model.markets[t].rows[j]] == pytest.approx(sd / mab, rel=1e-10)
+    last = U[:, J - 1] - U[:, J - 2]
+    assert rq["per_product"][model.markets[t].rows[J - 1]] == pytest.approx(math.sqrt(w @ (last - w @ last) ** 2) / mab,
+                                                                            rel=1e-10)
+    assert np.isfinite(rq["median"])
+
+
 def test_economics_block_flags_and_report(model: Any, syn: dict[str, Any]) -> None:
     n = model.n_products
     xi = np.random.default_rng(0).normal(0, 0.3, n)

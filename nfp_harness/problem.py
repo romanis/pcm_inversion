@@ -379,7 +379,11 @@ class NFPGMMProblem:
         if self.supply is not None:
             Zs = self.supply.Z
             W[self.supply_rows, self.supply_rows] = weight_from_covariance(Zs.T @ Zs / self.n)
-        if self.micro:
+        if self.micro and all(getattr(m, "fixed_covariance", None) is not None for m in self.micro):
+            for m in self.micro:   # a fixed V_micro needs no evaluation at theta0
+                rows = self.blocks[m.name]
+                W[rows, rows] = weight_from_covariance(self.n * m.fixed_covariance)  # type: ignore[attr-defined]
+        elif self.micro:
             ev = self.evaluate(theta0, need_jacobian=False)
             if not ev.ok:
                 raise RuntimeError(f"cannot form W1: evaluation at theta0 failed ({ev.status.value})")

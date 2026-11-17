@@ -7,15 +7,20 @@
     delta_jt = X1_jt beta + xi_jt,  X1 = [1, hpwt, space, air, mpd, fwd, mi, sw, su, pv, pgnp, trend, trend2]
     Z     = [X1, demand_instruments0..21]  (35 columns; LEARNINGS 16)
 
-Moments: the 35 aggregate IV moments and Petrin's 10 CEX micro moments (pyblp's Petrin data), with the
-micro block of W1 and S fixed at Petrin's sample covariances (PETRIN_COVARIANCES_LOCATION): 45 moments for
-13 linear and 14 nonlinear parameters. Normalisations: median alpha = 1 in the low-income group (mu = 0,
+Moments ("all"): the 35 aggregate IV moments, Petrin's 10 CEX micro moments (pyblp's Petrin data), with the
+micro block of W1 and S fixed at Petrin's sample covariances (PETRIN_COVARIANCES_LOCATION), and Petrin's
+log-cost supply side, 28 moments (round-2 analysis, LEARNINGS 21): Nash markups from the PCM's own ds/dp with
+the ownership of firm_ids, log mc = w gamma + omega on w = [1, log hpwt, log wt, log mpg, air, fwd, trend, jp,
+eu, jp x trend, eu x trend, log q], Z_s = [w, supply_instruments0..15]; an evaluation with any mc <= 0 fails.
+73 moments for 13 + 12 linear and 14 nonlinear parameters. "demand" drops the supply block. Taste spreads
+start at $3k on const, $2k on fam and $1k per sd on the other five; sigma_p starts at 1.5 in [0.1, 4]. Normalisations: median alpha = 1 in the low-income group (mu = 0,
 LEARNINGS 11); sigma_fam capped at $25k; taste spreads non-negative; u_i0 = 0 in every year with pgnp and
 trends in X1. Data: the 17 same-firm exact twins (identical price and characteristics) are merged into one
 row with summed shares, then the remaining price ties are spread to a $10 gap. Consumers: the 1,000 CEX
 agents per market crossed with scrambled Sobol standard normal taste draws, 2^ceil(log2(1000 nu)) draws per
 market. Exact PCM shares, no smoothing (LEARNINGS 15). Specification: LEARNINGS 19. Stages and their
-files: nfp_harness.pipeline (DESIGN 6.4); the gate is a sigma_p profile concentrated in (phi_mid, phi_high).
+files: nfp_harness.pipeline (DESIGN 6.4); the gate is a sigma_p profile concentrated in (phi_mid, phi_high),
+read on q_fixed and on its supply block.
 
 Robustness switches (each changes the run directory): ``--robustness body_sigma`` frees taste spreads on
 mi, sw, su, pv (cap $25k); ``--robustness income_winsor`` adds phi_y log(ybar / clip(income, 1, 150)) to
@@ -58,7 +63,7 @@ from nfp_harness.moments import (IVMoments, SarganIVMoments, MicroDataset, Micro
                                  SupplyMoments)
 from nfp_harness.params import ParameterLayout, ParameterSpec  # noqa: E402
 from nfp_harness.problem import NFPGMMProblem  # noqa: E402
-from nfp_harness.profile import NotMonotoneDecreasing  # noqa: E402
+from nfp_harness.profile import NotMonotoneDecreasing, RisesAtBothEnds  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
 RESULTS = HERE / "results" / "harness"
@@ -74,9 +79,18 @@ COST_BASIS = ("1", "log(hpwt)", "log(wt)", "log(mpg)", "air", "fwd", "trend", "j
               "log(q)")
 N_SUPPLY_INSTRUMENTS = 16
 NASH_RCOND_MIN = 1e-12
-SIG_REF = {"sigma_const": 2.0, "sigma_hpwt": 2.0, "sigma_space": 2.0, "sigma_air": 1.0, "sigma_mpd": 1.0,
-           "sigma_fwd": 2.0, "sigma_fam": 2.0}
-SIGMA_STARTS = {"const": 3.0, "hpwt": 2.0, "space": 1.0, "air": 0.5, "mpd": 1.0, "fwd": 1.0, "fam": 2.0}
+# Reference taste spreads in $1000 per sd of each characteristic at alpha = 1 (round-2 analysis, change 1):
+# $3k on const, $2k on fam, $1k per sd on the five continuous or binary characteristics, so sigma_c =
+# 1 / sd(c) for those (hpwt 10.2, space 6.7, air 2.05, mpd 1.50, fwd 2.00 on the merged products). The
+# ray gate (lambda x SIG_REF) and the starts use the same direction.
+SIG_FIXED_DOLLARS = {"const": 3.0, "fam": 2.0}
+PER_SD_COLUMNS = ("hpwt", "space", "air", "mpd", "fwd")
+PER_SD_DOLLARS = 1.0
+SIGMA_P = {"start": 1.5, "lower": 0.1, "upper": 4.0, "unit": 0.25}
+GATE_LAMBDAS = (0.5, 1.0, 2.0)
+GATE_SIGMA_P = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
+GATE_SLICE = {"lambda": 1.0}
+HAULERS = ("mi", "sw", "su", "pv")
 PI_STARTS = {"mi": 0.75, "sw": 0.28, "su": 0.20, "pv": 0.41}   # pyblp BLP-micro pi / 0.65 (SPEC 3.2)
 FAM_CAP = 25.0       # $1000: 2 (1 - Phi(66.1 / 25)) = 0.8% of consumers value fam beyond the price range
 BODY_SIGMA_CAP = 25.0
@@ -102,6 +116,15 @@ def merge_twins(products: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     for c in ("shares", "q"):
         out[c] = g[c].transform("sum")
     return out[first].reset_index(drop=True), int((~first).sum())
+
+
+def per_sd_spreads(products: pd.DataFrame) -> dict[str, float]:
+    """Taste spreads (by characteristic) of the reference direction: SIG_FIXED_DOLLARS on const and fam,
+    PER_SD_DOLLARS / sd(c) on PER_SD_COLUMNS (pooled sd over the merged products)."""
+    out = dict(SIG_FIXED_DOLLARS)
+    for c in PER_SD_COLUMNS:
+        out[c] = PER_SD_DOLLARS / float(np.std(products[c].to_numpy(float)))
+    return {c: out[c] for c in TASTE}
 
 
 def load_data() -> tuple[pd.DataFrame, pd.DataFrame, float, int]:
@@ -141,12 +164,15 @@ class PetrinSpec:
     prefit_max_iterations = 10
     extensive_free = ("phi_mid", "phi_high", "sigma_p", "sigma_const")
     gate_concentrate_iterations = 20
-    gate_required = "micro"
 
     def __init__(self, robustness: tuple[str, ...] = ()) -> None:
         self.robustness: tuple[str, ...] = tuple(sorted(set(robustness)))
         self.products, self.agents, self.price_range, self.n_merged_twins = load_data()
         p = self.products
+        self.sigma_starts = per_sd_spreads(p)
+        self.sig_ref = {f"sigma_{c}": v for c, v in self.sigma_starts.items()}
+        inside = p.shares.to_numpy(float)
+        self.hauler_inside_share = float(inside[p.body.isin(HAULERS).to_numpy()].sum() / inside.sum())
         self.X1 = np.column_stack([np.ones(len(p))] + [p[c].to_numpy(float) for c in X1_COLS[1:]])
         self.Z = np.column_stack([self.X1] + [p[f"demand_instruments{k}"].to_numpy(float) for k in range(22)])
         self.cost_basis = cost_basis(p)
@@ -168,12 +194,13 @@ class PetrinSpec:
             "are not used (owner decision 3)",
         ]
         self.set_robustness(self.robustness)
-        self.plausible = {   # SPEC section 4
-            "own_elasticity_median": (-8.0, -3.0), "share_own_elasticity_below_-20": (None, 0.05),
-            "nonzero_cross_median": (10.0, None), "diversion_leaving_group_median:mi": (0.15, None),
-            "margin_median": (0.15, 0.40), "inside_share_elasticity_median": (-2.0, -0.5),
+        self.plausible = {   # ranges for the exact PCM (round-2 analysis, change 7); BLP's ranges do not apply
+            "own_elasticity_median": (-15.0, -5.0), "share_own_elasticity_below_-20": (None, 0.25),
+            "margin_median": (0.07, 0.25), "inside_share_elasticity_median": (-1.5, -0.4),
+            "minivan_diversion_haulers_share_of_inside": (0.15, None),
+            "car_to_hauler_diversion_over_hauler_inside_share": (0.05, None),
+            "relative_quality_dispersion_buyer_dollars_median": (1.0, 6.0),
             "sd_xi_over_sd_delta": (None, 1.0), "xi_kurtosis": (None, 10.0),
-            "quality_dispersion_buyer_dollars_median": (1.5, 6.0),
             "spread_buyer_dollars": {"sigma_fam": (None, FAM_CAP), "sigma_const": (None, 15.0)},
         }
 
@@ -211,7 +238,7 @@ class PetrinSpec:
         r, p = self.price_range, self.products
         specs = []
         for k, c in enumerate(TASTE):
-            name, start = f"sigma_{c}", SIGMA_STARTS[c]
+            name, start = f"sigma_{c}", self.sigma_starts[c]
             if c == "const":
                 specs.append(ParameterSpec(name, "taste", c, f"nu{k}", start, 0.0, r, unit=1.0,
                                            note="upper = pooled price range, domain guard"))
@@ -236,7 +263,9 @@ class PetrinSpec:
         specs.append(ParameterSpec("phi_y", "scale", None, "log_ybar_inc_w", 1.0 if winsor else 0.0, -1.0, 3.0,
                                    free=False, note="log alpha on log(ybar / clip(income, 1, 150)); fixed, 1 under "
                                                     "income_winsor, else 0"))
-        specs.append(ParameterSpec("sigma_p", "sigma_p", None, None, 1.0, 0.1, 2.5, unit=0.1, note="sd of log alpha"))
+        specs.append(ParameterSpec("sigma_p", "sigma_p", None, None, SIGMA_P["start"], SIGMA_P["lower"], SIGMA_P["upper"],
+                                   unit=SIGMA_P["unit"], note="sd of log alpha; upper 4 so a minimum near 2 to 3 is "
+                                                              "not clipped"))
         return ParameterLayout(specs)
 
     def micro_moment(self, which: str) -> RatioMicroMoment:
@@ -353,33 +382,48 @@ class PetrinSpec:
 
     # ------------------------------------------------------------------ gate (DESIGN 6.4)
 
+    gate_lambdas: tuple[float, ...] = GATE_LAMBDAS
+    gate_sigma_p: tuple[float, ...] = GATE_SIGMA_P
+    gate_name = "sigma_ray"
+
     def gate_profiles(self) -> list[tuple[str, str, dict[str, Any]]]:
-        """One sigma ray profile with all moments evaluated (DESIGN 6.4), concentrated in (phi_mid, phi_high):
-        at every grid point the two income shifts are re-solved with everything else held, so the income purchase
-        rates do not drift with sigma_p (LEARNINGS 19). Read twice: the micro verdict on
-        q_fixed, and the no-micro verdict on its aggregate block, which with block-diagonal W1 is the
-        aggregate-only objective with Z = [X1, Z_excl] at the same inversions (owner decision 1)."""
-        fail = ("Profile check failed: q is still monotone in sigma_p{what}. LEARNINGS 14 predicted otherwise with "
-                "micro moments; the plan needs the owner before any long estimation.")
-        econ = ["sd_xi", "median_own_elasticity", "nonzero_cross_median", "diversion_leaving_body_median",
-                "inside_share_mean", "inside_share_semi_elasticity", "phi_mid", "phi_high"]
+        """The sigma ray profile on all moments (aggregate, micro, supply), concentrated in (phi_mid, phi_high):
+        at every grid point the two income shifts are re-solved with everything else held, so the income
+        purchase rates do not drift with sigma_p (LEARNINGS 19). Two verdicts on the lambda = 1 slice (round-2
+        analysis, change 5): ``q_fixed`` must not be monotone decreasing in sigma_p, and its supply block
+        ``q_fixed:supply`` must rise by at least 3.84 from its minimum to both ends of the grid. step1 needs one of
+        them (``gate_required``); with both failed, the pipeline runs the ``sigma_p_band`` fallback (change 8)."""
+        econ = ["sd_xi", "median_own_elasticity", "own_elasticity_times_sigma_p", "margin_median",
+                "share_mc_nonpositive", "nash_rcond_min", "nonzero_cross_median",
+                "minivan_diversion_haulers_share_of_inside", "car_to_hauler_diversion_over_hauler_inside_share",
+                "relative_quality_dispersion_buyer_dollars_median", "inside_share_mean", "inside_share_semi_elasticity",
+                "phi_mid", "phi_high"]
+        q_cols = ["q_fixed", "q_cue", "q_fixed:aggregate", "q_fixed:micro", "q_fixed:supply", "q_cue:aggregate"]
         rules = {
-            "no_micro": {"rule": NotMonotoneDecreasing("sigma_p", by=("lambda",), column="q_fixed:aggregate",
-                                                       rise=3.84, fail_message=fail.format(what=" without micro moments")),
-                         "columns": ["q_fixed:aggregate", "q_cue:aggregate"] + econ},
-            "micro": {"rule": NotMonotoneDecreasing("sigma_p", by=("lambda",), column="q_fixed", rise=3.84,
-                                                    fail_message=fail.format(what=" with micro moments")),
-                      "columns": ["q_fixed", "q_cue", "q_fixed:aggregate", "q_fixed:micro"] + econ
-                      + ["E[1{j>0}|mid_i]", "E[1{j>0}|high_i]"]},
+            "q_fixed": {"rule": NotMonotoneDecreasing(
+                "sigma_p", by=("lambda",), column="q_fixed", rise=3.84, only=GATE_SLICE,
+                fail_message="Profile check failed: q_fixed (aggregate + micro + supply) is still monotone "
+                             "decreasing in sigma_p on the lambda = 1 slice."),
+                "columns": q_cols + econ + ["E[1{j>0}|mid_i]", "E[1{j>0}|high_i]"]},
+            "supply": {"rule": RisesAtBothEnds(
+                "sigma_p", by=("lambda",), column="q_fixed:supply", rise=3.84, only=GATE_SLICE,
+                fail_message="Profile check failed: the supply block does not rise by 3.84 at both ends of sigma_p "
+                             "on the lambda = 1 slice, so it does not pin sigma_p."),
+                "columns": ["q_fixed:supply", "q_fixed"] + econ},
         }
-        kw = {"direction": SIG_REF, "lambdas": [0.5, 1.0, 2.0],
-              "grid": {"sigma_p": [0.5, 0.75, 1.0, 1.5, 2.0, 2.5]}, "origin": 0.0,
+        kw = {"direction": self.sig_ref, "lambdas": list(self.gate_lambdas),
+              "grid": {"sigma_p": list(self.gate_sigma_p)}, "origin": 0.0,
               "concentrate": ("phi_mid", "phi_high"), "economics": self.gate_economics, "rules": rules}
-        return [("sigma_ray", "all", kw)]
+        return [(self.gate_name, "all", kw)]
+
+    gate_required = ("q_fixed", "supply")   # any of them; both failed means the sigma_p_band fallback
 
     def gate_economics(self, problem: Any, ev: Any) -> dict[str, float]:
-        """Per profile point: the aggregate-only CUE objective, elasticities, diversion, inside shares, the
-        inside-share elasticity to a uniform 1% price rise (mean over markets) and the re-solved phi."""
+        """Per profile point: the aggregate-only CUE objective, elasticities and the law monitor
+        -median own elasticity x sigma_p (about 25 to 55 in the exact PCM on this product set, LEARNINGS 21),
+        Nash margins, the supply guard's mc and rcond readings, diversion to family haulers, the relative
+        quality dispersion, inside shares, the inside-share elasticity to a uniform 1% price rise (mean over
+        markets) and the re-solved phi."""
         sol, fit = ev.aux["solution"], ev.aux["linear_fit"]
         g_a = ev.g[problem.agg_rows]
         S_a = problem.agg.covariance_block(sol, fit)
@@ -387,13 +431,25 @@ class PetrinSpec:
         post = pp.postestimation(problem.model, ev.theta, ev.aux["delta"], firm_ids=self.firm_column,
                                  groups=self.groups, group_other=self.group_other)
         pr = post["products"]
-        out.update({"median_own_elasticity": float(np.nanmedian(pr["own_elasticity"])),
+        names = problem.layout.names
+        sigma_p = float(np.asarray(ev.theta)[names.index("sigma_p")])
+        own = float(np.nanmedian(pr["own_elasticity"]))
+        sup = ev.aux.get("supply") or {}
+        out.update({"median_own_elasticity": own, "own_elasticity_times_sigma_p": -own * sigma_p,
+                    "margin_median": float(np.nanmedian(pr["margin"])),
+                    "share_mc_nonpositive": float(sup.get("share_mc_nonpositive", np.mean(~(pr["cost"] > 0)))),
+                    "nash_rcond_min": float(sup.get("nash_rcond_min", min(m["rcond"] for m in post["markets"]))),
                     "nonzero_cross_median": float(np.nanmedian(pr["nonzero_cross"])),
-                    "diversion_leaving_body_median": float(np.nanmedian(pr["diversion_leaving_group"])),
+                    "relative_quality_dispersion_buyer_dollars_median":
+                        pp.relative_quality_dispersion(problem.model, ev.theta, ev.aux["delta"])["median"],
                     "inside_share_mean": float(np.mean([m["inside_share"] for m in post["markets"]])),
                     "inside_share_semi_elasticity": float(np.mean([m["inside_share_elasticity"]
                                                                    for m in post["markets"]]))})
-        names = problem.layout.names
+        gd = {str(g): {**{str(h): float(post["group_matrix"][a, b]) for b, h in enumerate(post["group_names"])},
+                       "outside": float(post["group_matrix"][a, -1])} for a, g in enumerate(post["group_names"])}
+        out.update({k: v for k, v in self.diversion_stats(gd).items()
+                    if k in ("minivan_diversion_haulers_share_of_inside",
+                             "car_to_hauler_diversion_over_hauler_inside_share")})
         for n in ("phi_mid", "phi_high"):
             out[n] = float(np.asarray(ev.theta)[names.index(n)])
         pred = ev.aux.get("micro_predicted", {}).get("micro")
@@ -403,6 +459,27 @@ class PetrinSpec:
                 if "1{j>0}" in lab:
                     out[lab.replace(" ", "")] = float(v)
         return out
+
+    def diversion_stats(self, group_diversion: dict[str, dict[str, float]]) -> dict[str, float]:
+        """The minivan row (``minivan_diversion``) and ``car_to_hauler_diversion_over_hauler_inside_share``: the
+        share of a car's inside diversion that goes to mi, sw, su and pv, divided by those body types' share of
+        inside sales (pooled shares). IIA-like substitution gives about 1 (BLP micro 0.73, no micro 0.74, demand micro
+        0.70, from their summaries); the exact PCM's local
+        substitution about 0.05 to 0.15 (round-2 analysis, change 6)."""
+        out = minivan_diversion(group_diversion)
+        car = group_diversion.get(self.group_other)
+        if car:
+            inside = sum(float(v) for k, v in car.items() if k != "outside")
+            to_h = sum(float(car.get(b, 0.0)) for b in HAULERS)
+            out["car_to_hauler_diversion_over_hauler_inside_share"] = (
+                to_h / inside / self.hauler_inside_share if inside > 0 else float("nan"))
+        return out
+
+    def extra_economics(self, post: dict[str, Any], values: dict[str, Any]) -> dict[str, float]:
+        """Spec statistics for the economics block (``diagnostics.economics``): the diversion ratios above."""
+        gd = values.get("group_diversion") or {}
+        return {k: v for k, v in self.diversion_stats(gd).items()
+                if k in ("minivan_diversion_haulers_share_of_inside", "car_to_hauler_diversion_over_hauler_inside_share")}
 
     # ------------------------------------------------------------------ postestimation (DESIGN 6.5)
 
@@ -468,10 +545,15 @@ class PetrinSpec:
         qd = pp.quality_dispersion(model, theta, delta)
         summary["quality_dispersion_buyer_dollars_median"] = qd["median"]
         prod["quality_dispersion_buyer_dollars"] = qd["per_product"]
+        rq = pp.relative_quality_dispersion(model, theta, delta)
+        summary["relative_quality_dispersion_buyer_dollars_median"] = rq["median"]
+        prod["relative_quality_dispersion_buyer_dollars"] = rq["per_product"]
         prod.to_csv(out / "product_level.csv", index=False)
         summary["inside_share_semi_elasticity"] = float(np.mean([m["inside_share_elasticity"]
                                                                  for m in post["markets"]]))
-        summary.update(minivan_diversion(summary["group_diversion"]))
+        summary.update(self.diversion_stats(summary["group_diversion"]))
+        summary["own_elasticity_times_sigma_p"] = -summary["own_elasticity_median"] * float(
+            theta[problem.layout.names.index("sigma_p")])
         summary["cs_tables_1984"] = extra["tables"]
         for name, rows in extra["tables"].items():
             pd.DataFrame(rows).to_csv(out / f"cs_1984_by_{name}.csv", index=False)
@@ -491,7 +573,7 @@ class PetrinSpec:
             gd.append(f"  PCM {src:>4}: " + "  ".join(f"{k} {v:.3f}" for k, v in dst.items()))
         for v in blp.values():
             if v.get("group_diversion"):
-                v.update(minivan_diversion(v["group_diversion"]))
+                v.update(self.diversion_stats(v["group_diversion"]))
         for label, v in blp.items():
             for src, dst in (v.get("group_diversion") or {}).items():
                 gd.append(f"  {label} {src:>4}: " + "  ".join(f"{k} {x:.3f}" for k, x in dst.items()))

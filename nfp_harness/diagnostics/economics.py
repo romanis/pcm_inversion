@@ -30,7 +30,10 @@ PLAUSIBLE_STATS = (
     "sd_xi_over_sd_delta",
     "xi_kurtosis",
     "quality_dispersion_buyer_dollars_median",
+    "relative_quality_dispersion_buyer_dollars_median",
 )
+# A spec may add statistics of its own (``spec.extra_economics(post, values) -> {name: value}``, e.g. diversion
+# between named groups); a ``plausible`` range on such a name is checked like the ones above.
 
 
 def _get(spec: Any, key: str, default: Any = None) -> Any:
@@ -171,6 +174,10 @@ def economics_values(model: Any, theta: np.ndarray, delta: np.ndarray, spec: Any
     values["mean_alpha_buyers"] = sb["mean_alpha_buyers"]
     values["spread_buyer_dollars"] = sb["spreads"]
     values["quality_dispersion_buyer_dollars"] = summary(pcm_post.quality_dispersion(model, theta, delta)["per_product"])
+    values["relative_quality_dispersion_buyer_dollars"] = summary(
+        pcm_post.relative_quality_dispersion(model, theta, delta)["per_product"])
+    extra = getattr(spec, "extra_economics", None) if spec is not None and not isinstance(spec, Mapping) else None
+    values["extra"] = dict(extra(post, values)) if callable(extra) else {}
     if xi is not None and np.size(xi) == np.size(delta):
         sd_d = float(np.std(delta))
         values["sd_xi_over_sd_delta"] = float(np.std(xi)) / sd_d if sd_d > 0 else None
@@ -217,7 +224,11 @@ def economics_block(problem: Problem, result: OptimizeResult, spec: Any) -> Diag
         "share_own_elasticity_below_-20": values["share_own_elasticity_below_-20"],
         "xi_kurtosis": values["xi_kurtosis"],
         "quality_dispersion_buyer_dollars_median": values["quality_dispersion_buyer_dollars"]["median"],
+        "relative_quality_dispersion_buyer_dollars_median":
+            values["relative_quality_dispersion_buyer_dollars"]["median"],
     }
+    for nm, v in (values.get("extra") or {}).items():
+        stats[nm] = None if v is None else float(v)
     for g, v in (values.get("diversion_leaving_group_by_group") or {}).items():
         stats[f"diversion_leaving_group_median:{g}"] = v
     for nm, v in values["spread_buyer_dollars"].items():

@@ -38,6 +38,7 @@ __all__ = [
     "inside_share", "inside_share_elasticity", "group_labels", "firm_labels", "market_position",
     "market_post", "postestimation", "consumer_surplus", "draw_price_scale", "alpha_quintiles",
     "demographic_labels", "cs_by_group", "spread_in_buyer_dollars", "drop_products_counterfactual",
+    "quality_dispersion", "relative_quality_dispersion",
     "compare_blp",
 ]
 
@@ -566,6 +567,44 @@ def quality_dispersion(model: Any, theta: np.ndarray, delta: np.ndarray) -> dict
         w = f["weights"] / f["weights"].sum()
         mu = w @ U
         sd = np.sqrt(np.maximum(w @ (U - mu[None, :]) ** 2, 0.0))
+        out[np.asarray(m.rows)] = sd / mab
+    fin = out[np.isfinite(out)]
+    return {"per_product": out, "median": float(np.median(fin)) if fin.size else float("nan"),
+            "mean_alpha_buyers": mab}
+
+
+def relative_quality_dispersion(model: Any, theta: np.ndarray, delta: np.ndarray,
+                                exclude: Sequence[str] = ("const",)) -> dict[str, Any]:
+    """relative_quality_dispersion(model, theta, delta, exclude=("const",)) -> per-product dispersion across
+    consumers of the quality difference to the next-priced product.
+
+    For product j in market t (price order) and k the next more expensive product (the next cheaper one for
+    the most expensive): the weighted sd over draws of ``(x_j - x_k) . t_i`` with the taste loadings on the
+    ``exclude`` characteristics left out, divided by ``mean_alpha_buyers`` (buyer dollars, price units). A
+    taste on a column every product shares (``const``) shifts all inside goods together and does not move a
+    consumer between two of them, so it is excluded. Returns ``per_product`` ((n,) row order, NaN in a market
+    with one product), ``median`` and ``mean_alpha_buyers``.
+    """
+    mab = spread_in_buyer_dollars(model, theta, delta)["mean_alpha_buyers"]
+    th, _, _ = model.kernel_params(theta)
+    chars = list(getattr(getattr(model, "spec", None), "characteristics", ()))
+    skip = {chars.index(c) for c in exclude if c in chars}
+    out = np.full(int(model.n_products), np.nan)
+    for t, m in enumerate(model.markets):
+        f = _fields(model.kernel_market(t))
+        J = f["x"].shape[0]
+        if J < 2:
+            continue
+        T = np.zeros((f["weights"].size, f["x"].shape[1]))
+        for k, col in enumerate(f["taste_col"]):
+            if col not in skip:
+                T[:, col] += th[k] * f["taste_basis"][:, k]
+        U = T @ f["x"].T
+        nxt = np.r_[np.arange(1, J), J - 2]
+        dU = U - U[:, nxt]
+        w = f["weights"] / f["weights"].sum()
+        mu = w @ dU
+        sd = np.sqrt(np.maximum(w @ (dU - mu[None, :]) ** 2, 0.0))
         out[np.asarray(m.rows)] = sd / mab
     fin = out[np.isfinite(out)]
     return {"per_product": out, "median": float(np.median(fin)) if fin.size else float("nan"),

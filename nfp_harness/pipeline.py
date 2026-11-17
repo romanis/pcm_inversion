@@ -38,7 +38,7 @@ layout_changes=None) -> NFPGMMProblem`` with ``moments`` in {"all", "demand", "p
 ``prefit_free``, ``prefit_max_iterations``; ``gate_profiles() -> [(name, moments, kwargs)]`` with
 ``ray_profile`` keyword arguments (direction, lambdas, grid, origin, economics) plus ``layout_changes``
 and ``rules`` ({tag: {"rule": callable(ProfileResult) -> (passed, message), "columns": [...]}});
-``gate_required`` (the tag step1 needs); ``named_directions(theta, units) -> {name: vector}``;
+``gate_required`` (the tag step1 needs, or a tuple of tags of which one must pass); ``named_directions(theta, units) -> {name: vector}``;
 ``post(pipeline, problem, result, out_dir) -> dict``; ``headlines(problem, result) -> {name: float}``;
 optionally ``optimizer_options`` (OptimizerOptions overrides for every stage), ``max_iterations``,
 ``extensive_free``, ``gate_concentrate_iterations``, ``run_key() -> dict`` (result-changing options that
@@ -329,9 +329,12 @@ class Pipeline:
         if v.get("spec_hash") != self.spec_hash:
             raise StageRefused(f"the gate in {gate_dir.parent} was run with another spec (hash {v.get('spec_hash')}); "
                                f"rerun it with the current spec.")
-        if not v["verdict"].get(required):
-            raise StageRefused(f"the {required} gate failed ({gate_dir.parent / 'report.txt'}); the long estimation "
-                               f"does not start (DESIGN 6.4).")
+        tags = (required,) if isinstance(required, str) else tuple(required)
+        if not any(v["verdict"].get(t) for t in tags):
+            raise StageRefused(f"the {' and '.join(tags)} gate failed ({gate_dir.parent / 'report.txt'}); the long "
+                               f"estimation does not start (DESIGN 6.4)." + (
+                                   f" Fallback: run --stage {self.spec.fallback_stage}."
+                                   if getattr(self.spec, "fallback_stage", None) else ""))
 
     def _options(self, **kw: Any) -> OptimizerOptions:
         """OptimizerOptions for a stage: the spec's ``optimizer_options`` overrides (e.g. trust radii), then ``kw``."""
