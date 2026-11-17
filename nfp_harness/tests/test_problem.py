@@ -408,3 +408,30 @@ def test_full_jacobian_layout() -> None:
     np.testing.assert_allclose(J[:5, :3], -d["Z"].T @ d["X1"] / problem.n)
     np.testing.assert_allclose(J[5:, :3], 0.0)
     np.testing.assert_array_equal(J[:, 3:], ev.G)
+
+
+def test_sargan_moments_jacobian_and_scale_invariance() -> None:
+    """SarganIVMoments: G matches central FD, and the block's q is unchanged when xi is rescaled."""
+    from nfp_harness.moments import SarganIVMoments
+
+    d = make_data(0)
+    model = LogitRCModel(d["products"], d["agents"], d["market_ids"], d["shares"])
+    linear = LinearIV(d["X1"], d["Z"], names=["const", "x", "mi"])
+    problem = NFPGMMProblem(model, [SarganIVMoments(d["Z"], d["clusters"]), make_micro()], linear, make_layout())
+    theta = np.array([0.6, 0.2, 0.5])
+    ev = problem.evaluate(theta)
+    assert ev.ok and ev.G is not None
+    fd = central_fd(lambda th: problem.evaluate(th, need_jacobian=False).g, theta, h=1e-5)
+    err = np.max(np.abs(ev.G - fd)) / max(1.0, np.max(np.abs(ev.G)))
+    assert err < 1e-7
+    xi = np.random.default_rng(1).normal(size=d["Z"].shape[0])
+    Z = d["Z"]
+    W = np.linalg.inv(Z.T @ Z / len(xi))
+
+    class _L:
+        def __init__(self, x: np.ndarray) -> None:
+            self.xi, self.M = x, None
+
+    m = SarganIVMoments(Z)
+    q = [len(xi) * (g := m.evaluate(None, _L(c * xi), False).value) @ W @ g for c in (1.0, 37.0, 1e-3)]
+    np.testing.assert_allclose(q, q[0], rtol=1e-12)

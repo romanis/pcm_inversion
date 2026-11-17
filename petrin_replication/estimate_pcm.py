@@ -54,7 +54,7 @@ from nfp_harness.data import break_price_ties  # noqa: E402
 from nfp_harness.linear import LinearIV  # noqa: E402
 from nfp_harness.models import pcm_post as pp  # noqa: E402
 from nfp_harness.models.pcm import PCMModel, PCMSpec  # noqa: E402
-from nfp_harness.moments import IVMoments, MicroDataset, MicroPart, RatioMicroMoment  # noqa: E402
+from nfp_harness.moments import IVMoments, SarganIVMoments, MicroDataset, MicroPart, RatioMicroMoment  # noqa: E402
 from nfp_harness.params import ParameterLayout, ParameterSpec  # noqa: E402
 from nfp_harness.problem import NFPGMMProblem  # noqa: E402
 from nfp_harness.profile import NotMonotoneDecreasing  # noqa: E402
@@ -75,7 +75,7 @@ FAM_CAP = 25.0       # $1000: 2 (1 - Phi(66.1 / 25)) = 0.8% of consumers value f
 BODY_SIGMA_CAP = 25.0
 INCOME_CLIP = (1.0, 150.0)
 TWIN_KEYS = ("market_ids", "firm_ids", "prices", "hpwt", "space", "air", "mpd", "fwd", "mi", "sw", "su", "pv")
-ROBUSTNESS = ("body_sigma", "income_winsor")
+ROBUSTNESS = ("body_sigma", "income_winsor", "sargan")
 MICRO_COVARIANCE_SOURCE = "pyblp.data.PETRIN_COVARIANCES_LOCATION, fixed"
 BLP_SUMMARIES = {"BLP micro": "blp_micro_summary.json", "BLP no micro": "blp_nomicro_summary.json",
                  "BLP demand micro": "blp_demand_micro_summary.json"}
@@ -298,7 +298,8 @@ class PetrinSpec:
             layout = layout.replace(layout_changes)
         model = PCMModel(self.pcm_spec(), {"products": self.products, "agents": self.agents}, layout, nu, seed,
                          total_threads=threads)
-        ms: list[Any] = [IVMoments(self.Z, self.clusters)]
+        iv = SarganIVMoments if "sargan" in self.robustness else IVMoments   # LEARNINGS 19 fallback
+        ms: list[Any] = [iv(self.Z, self.clusters)]
         if moments in ("all", "prefit"):
             ms.append(self.micro_moment("all" if moments == "all" else "income"))
         return NFPGMMProblem(model, ms, LinearIV(self.X1, self.Z, names=X1_COLS), layout, max_step=self.use_max_step)

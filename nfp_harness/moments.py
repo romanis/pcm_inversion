@@ -36,7 +36,7 @@ from .types import (
 )
 from .weighting import cluster_sums, clustered_covariance
 
-__all__ = ["Moment", "IVMoments", "MicroDataset", "MicroPart", "RatioMicroMoment", "MICRO_OUTPUTS",
+__all__ = ["Moment", "IVMoments", "SarganIVMoments", "MicroDataset", "MicroPart", "RatioMicroMoment", "MICRO_OUTPUTS",
            "product_part"]
 
 #: A micro part, a pair (agent weight h, product weight v with outside value v0); see ``types.MicroPartRequest``.
@@ -111,6 +111,43 @@ class IVMoments:
             return V, None
         dV = cluster_sums(self.Z[:, :, None] * dxi[:, None, :], self.clustering_ids)
         return V, dV
+
+
+class SarganIVMoments(IVMoments):
+    """Scale-free aggregate IV moments ``g = Z' xi / (n s)`` with ``s = sqrt(xi' xi / n)``.
+
+    With ``W = (Z'Z/n)^{-1}`` the block's contribution ``n g' W g = xi' P_Z xi / (xi' xi / n)`` is n times
+    the R-squared of xi on Z (the Sargan form). It is invariant to the scale of xi, which closes the
+    fixed-W route of shrinking xi (LEARNINGS 1). Unlike CUE it divides by the global variance, not product
+    by product, so one huge xi_j drives the block toward n h_jj rather than zero (LEARNINGS 13, 19).
+
+    ``d_delta = (Z'M/n)/s - g (xi'M/n) / s^2`` with g the scaled value. The covariance block is the
+    clustered S of IVMoments divided by s^2. Not for CUE.
+    """
+
+    def evaluate(self, sol: InnerSolution, linear: LinearFit, need_jacobian: bool) -> MomentBlock:
+        """evaluate(sol, linear, need_jacobian) -> MomentBlock of the scaled moments and their delta Jacobian."""
+        xi = linear.xi
+        s = float(np.sqrt(xi @ xi / self.n))
+        if not s > 0:
+            raise ValueError("SarganIVMoments: xi is identically zero")
+        value = self.Z.T @ xi / (self.n * s)
+        d_delta = None
+        if need_jacobian:
+            ZtM = self._d_delta(linear)
+            assert linear.M is not None
+            xtM = xi @ linear.M / self.n
+            d_delta = ZtM / s - np.outer(value, xtM) / s ** 2
+        return MomentBlock(name=self.name, value=value, d_delta=d_delta, d_theta=None, data=None)
+
+    def covariance_block(self, sol: InnerSolution, linear: LinearFit) -> np.ndarray:
+        """covariance_block(sol, linear) -> clustered S_aggregate / s^2."""
+        xi = linear.xi
+        s2 = float(xi @ xi / self.n)
+        return clustered_covariance(self.Z, xi, self.clustering_ids) / s2
+
+    def cluster_terms(self, xi: np.ndarray, dxi: np.ndarray | None) -> tuple[np.ndarray, np.ndarray | None]:
+        raise NotImplementedError("SarganIVMoments is not used with CUE")
 
 
 class MicroDataset:
