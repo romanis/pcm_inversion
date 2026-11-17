@@ -145,6 +145,11 @@ class RatioMicroMoment:
     ``dataset.observations``; product parts are requested only when ``covariance_block`` is called
     (``covariance_requests``).
 
+    ``covariance`` (k, k), when given, is a fixed V_micro used by ``covariance_block`` at every theta
+    instead of the model-implied one (e.g. Petrin's CEX sample covariances, pyblp's
+    ``PETRIN_COVARIANCES_LOCATION``), so W1's and S's micro blocks do not depend on theta and no product
+    parts are requested.
+
     ``bind(markets, n_products)`` must be called before ``evaluate``; ``NFPGMMProblem`` does it.
     One ``RatioMicroMoment`` per dataset: covariances across moment objects are taken as zero.
     """
@@ -155,8 +160,8 @@ class RatioMicroMoment:
 
     def __init__(self, name: str, dataset: MicroDataset, numerators: Sequence[MicroPart],
                  denominators: Sequence[MicroPart], values: np.ndarray,
-                 labels: Sequence[str] | None = None) -> None:
-        """RatioMicroMoment(name, dataset, numerators, denominators, values, labels=None)."""
+                 labels: Sequence[str] | None = None, covariance: np.ndarray | None = None) -> None:
+        """RatioMicroMoment(name, dataset, numerators, denominators, values, labels=None, covariance=None)."""
         values = np.asarray(values, dtype=float).ravel()
         if not len(numerators) == len(denominators) == values.size:
             raise ValueError(f"{name}: {len(numerators)} numerators, {len(denominators)} denominators and "
@@ -167,6 +172,16 @@ class RatioMicroMoment:
         self.denominators = tuple(denominators)
         self.values = values
         self.k = values.size
+        self.fixed_covariance: np.ndarray | None = None
+        if covariance is not None:
+            V = np.asarray(covariance, dtype=float)
+            if V.shape != (self.k, self.k):
+                raise ValueError(f"{name}: covariance has shape {V.shape}, expected {(self.k, self.k)}")
+            if not np.all(np.isfinite(V)):
+                raise ValueError(f"{name}: covariance has non-finite entries")
+            if np.max(np.abs(V - V.T)) > 1e-8 * max(float(np.max(np.abs(V))), 1e-300):
+                raise ValueError(f"{name}: covariance is not symmetric")
+            self.fixed_covariance = 0.5 * (V + V.T)
         self.labels = tuple(labels) if labels is not None else tuple(
             f"{a.name}/{b.name}" for a, b in zip(self.numerators, self.denominators))
         parts: dict[str, MicroPart] = {}
@@ -204,7 +219,9 @@ class RatioMicroMoment:
         return tuple(product_part(a, b) for i, a in enumerate(self.parts) for b in self.parts[i:])
 
     def covariance_requests(self) -> KernelRequests:
-        """requests() plus the product parts needed by ``covariance_block``."""
+        """requests() plus the product parts needed by ``covariance_block`` (none with a fixed covariance)."""
+        if self.fixed_covariance is not None:
+            return self.requests()
         return KernelRequests(micro_parts=self.parts + self.covariance_parts())
 
     # ------------------------------------------------------------------ parts
@@ -303,7 +320,10 @@ class RatioMicroMoment:
         return sigma
 
     def covariance_block(self, sol: InnerSolution, linear: LinearFit) -> np.ndarray:
-        """covariance_block(sol, linear) -> V_micro, (k_b, k_b); the stacked S uses n * V_micro."""
+        """covariance_block(sol, linear) -> V_micro, (k_b, k_b); the stacked S uses n * V_micro.
+        The fixed covariance when one was given."""
+        if self.fixed_covariance is not None:
+            return self.fixed_covariance.copy()
         v, _, _ = self.part_values(sol, self.parts, False)
         grad = self.ratio_gradient(v)
         V = grad @ self.part_covariance(sol) @ grad.T

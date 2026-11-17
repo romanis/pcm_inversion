@@ -3,14 +3,19 @@ integration check (DESIGN 4.7, 5, 6.4). Model-agnostic: the paper's spec supplie
 paper-specific postestimation.
 
 Stages, each checkpointed in the run directory ``<base>/<spec.name>_<run_key[:10]>/`` (run key = hash of
-nu and seed) and each ending with a diagnostics report in ``reports/<stage>/report.{json,txt}`` (the
+nu, seed and the spec's ``run_key()`` options, e.g. robustness switches) and each ending with a diagnostics report in ``reports/<stage>/report.{json,txt}`` (the
 latest one is also copied to the run directory root):
 
 - ``prefit``: the spec's ``prefit_free`` parameters alone, all others fixed, on the spec's prefit
   moments with W1, at most ``prefit_max_iterations`` trial steps (DESIGN 6.2).
 - ``gate``: the spec's ray profiles (``spec.gate_profiles()``) from the prefit point, cold inversions on
-  parallel workers, with the pass rule. Writes ``gate/report.{json,txt}`` and ``gate/verdict.json``.
-- ``step1``: fixed W1 = ``initial_weighting(theta_prefit)`` from the prefit point. Refused unless the gate
+  parallel workers, with the pass rule. Writes ``gate/report.{json,txt}`` and ``gate/verdict.json``. A
+  profile whose ``concentrate`` is a tuple of parameter names re-optimises only those at every point (the
+  others held), with the spec's optimizer options and at most ``spec.gate_concentrate_iterations`` (20)
+  trial steps per point.
+- ``extensive``: only if the spec has ``extensive_free``: those parameters alone from the prefit point with
+  W1 on all moments (refused unless the gate passed, as step1). step1 then starts from its endpoint.
+- ``step1``: fixed W1 = ``initial_weighting(theta_prefit)`` from the extensive (else prefit) point. Refused unless the gate
   tagged ``spec.gate_required`` passed in the run with ``--gate-nu`` draws per agent (same seed).
 - ``step2``: W2 = S(theta_hat_1)^{-1} from theta_hat_1. Refused unless step 1 converged and its report
   shows none of TwoStep's blocking degeneracies (DESIGN 4.5).
@@ -19,7 +24,7 @@ latest one is also copied to the run directory root):
 - ``stability``: at most 20 optimizer iterations from the estimate with ``2 nu`` draws per agent and new
   seeds, then the report with the integration block (DESIGN 5.7) and ``spec.headlines`` compared.
 
-``--stage all`` runs step1, step2, post and stability in order; a refused stage is reported and the
+``--stage all`` runs extensive, step1, step2, post and stability in order; a refused stage is reported and the
 chain continues with what it can do (post and stability fall back to the step-1 estimate). Resume by
 rerunning the identical command: finished stages are skipped, the stage in progress resumes from its
 last accepted step (``optimizer.minimize``), a profile from its last finished point. A second process
@@ -35,7 +40,9 @@ layout_changes=None) -> NFPGMMProblem`` with ``moments`` in {"all", "prefit", "a
 and ``rules`` ({tag: {"rule": callable(ProfileResult) -> (passed, message), "columns": [...]}});
 ``gate_required`` (the tag step1 needs); ``named_directions(theta, units) -> {name: vector}``;
 ``post(pipeline, problem, result, out_dir) -> dict``; ``headlines(problem, result) -> {name: float}``;
-optionally ``optimizer_options`` (OptimizerOptions overrides for every stage) and ``max_iterations``.
+optionally ``optimizer_options`` (OptimizerOptions overrides for every stage), ``max_iterations``,
+``extensive_free``, ``gate_concentrate_iterations``, ``run_key() -> dict`` (result-changing options that
+name the run directory), ``add_arguments(parser)`` and ``configure(args)`` (spec-specific CLI options).
 """
 
 from __future__ import annotations
@@ -62,12 +69,12 @@ from .profile import ray_profile
 from .types import OptimizeResult
 from .weighting import Fixed, TwoStep, weight_from_covariance
 
-__all__ = ["Pipeline", "RunConfig", "StageRefused", "STAGES", "CHAIN", "main", "run_key_options"]
+__all__ = ["Pipeline", "RunConfig", "StageRefused", "STAGES", "CHAIN", "main", "run_dir_path", "run_key_options"]
 
 log = logging.getLogger("nfp_harness.pipeline")
 
-STAGES = ("prefit", "gate", "step1", "step2", "post", "stability")
-CHAIN = ("step1", "step2", "post", "stability")
+STAGES = ("prefit", "gate", "extensive", "step1", "step2", "post", "stability")
+CHAIN = ("extensive", "step1", "step2", "post", "stability")
 STABILITY_SEED_OFFSET = 100_000
 STABILITY_ITERATIONS = 20
 
@@ -86,9 +93,24 @@ class RunConfig:
     gate_nu: int = 4
 
 
-def run_key_options(nu: int, seed: int) -> dict[str, int]:
-    """The CLI options that change results and so name the run directory."""
-    return {"nu": int(nu), "seed": int(seed)}
+def run_key_options(nu: int, seed: int, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The CLI options that change results and so name the run directory: nu, seed and the spec's
+    ``run_key()`` options (left out when empty, so specs without them keep their directory names)."""
+    out: dict[str, Any] = {"nu": int(nu), "seed": int(seed)}
+    if extra:
+        out.update(extra)
+    return out
+
+
+def spec_run_key(spec: Any) -> dict[str, Any]:
+    """The spec's result-changing options beyond nu and seed (``spec.run_key()``), {} without the hook."""
+    fn = getattr(spec, "run_key", None)
+    return dict(fn()) if callable(fn) else {}
+
+
+def run_dir_path(base: pathlib.Path, spec: Any, nu: int, seed: int) -> pathlib.Path:
+    """``<base>/<spec.name>_<run key[:10]>``."""
+    return base / f"{spec.name}_{hash_options(run_key_options(nu, seed, spec_run_key(spec)))[:10]}"
 
 
 def _block_diagonal_like(W: np.ndarray, blocks: dict[str, slice]) -> np.ndarray:
@@ -118,8 +140,8 @@ class Pipeline:
         self.spec = spec
         self.cfg = cfg
         self.spec_hash = hash_options(spec.hash_payload())
-        self.rd = RunDirectory(cfg.base, spec.name, self.spec_hash, hash_options(run_key_options(cfg.nu, cfg.seed)),
-                               new_run=new_run, options={"nu": cfg.nu, "seed": cfg.seed})
+        key = run_key_options(cfg.nu, cfg.seed, spec_run_key(spec))
+        self.rd = RunDirectory(cfg.base, spec.name, self.spec_hash, hash_options(key), new_run=new_run, options=key)
         self.path = self.rd.path
         self._problems: dict[tuple[Any, ...], Any] = {}
 
@@ -236,6 +258,15 @@ class Pipeline:
                 return self.spec.build_problem(self.cfg.nu, self.cfg.seed, threads, moments, changes)
 
             problem = factory(0, self.cfg.threads or os.cpu_count() or 1)
+            conc = kw.get("concentrate")
+            if isinstance(conc, (tuple, list)):
+                unknown = [c for c in conc if c not in problem.layout.names]
+                if unknown:
+                    raise ValueError(f"profile {name}: concentrate names unknown parameters {unknown}")
+                kw["concentrate"] = True
+                kw["hold"] = [n for n in problem.layout.names if n not in conc]
+                kw.setdefault("optimizer_options", self._options(
+                    max_iterations=int(getattr(self.spec, "gate_concentrate_iterations", 20)), record_cue=False))
             try:
                 self._warm(problem, "prefit")  # W1 needs one evaluation at the prefit point; the points start cold
                 W1 = problem.initial_weighting(theta)
@@ -277,8 +308,7 @@ class Pipeline:
 
     def _check_gate(self) -> None:
         required = self.spec.gate_required
-        gate_dir = (self.cfg.base / f"{self.spec.name}_{hash_options(run_key_options(self.cfg.gate_nu, self.cfg.seed))[:10]}"
-                    / "gate" / "verdict.json")
+        gate_dir = run_dir_path(self.cfg.base, self.spec, self.cfg.gate_nu, self.cfg.seed) / "gate" / "verdict.json"
         if not gate_dir.exists():
             raise StageRefused(f"step1 needs a passed gate: no {gate_dir}. Run `run --stage gate --nu "
                                f"{self.cfg.gate_nu}` first.")
@@ -302,13 +332,42 @@ class Pipeline:
     def _w1(self, problem: Any, theta: np.ndarray) -> np.ndarray:
         return self._saved_weight("W1", lambda: problem.initial_weighting(theta))
 
+    def extensive(self) -> np.ndarray:
+        """Theta at the end of the extensive-margin stage: ``spec.extensive_free`` alone from the prefit
+        point with W1 on all moments (SPEC 3.5a). The prefit theta when the spec has no such stage."""
+        free_names = tuple(getattr(self.spec, "extensive_free", None) or ())
+        if not free_names:
+            return self.prefit()
+        if self.rd.stage_done("extensive"):
+            return np.asarray(self._stage_state("extensive")["theta"], dtype=float)
+        self._check_gate()
+        theta_w = self.prefit()
+        problem = self.problem("all")
+        layout = problem.layout
+        unknown = [n for n in free_names if n not in layout.names]
+        if unknown:
+            raise ValueError(f"extensive_free names unknown parameters {unknown}")
+        self._warm(problem, "prefit")
+        W1 = self._w1(problem, theta_w)
+        problem.layout = layout.replace({n: {"free": n in free_names} for n in layout.names})
+        try:
+            res = minimize(problem, Fixed(W1), self._options(stage="extensive", theta0=theta_w,
+                                                               max_iterations=self._limit()), checkpoint=self.rd)
+            if not self.rd.stage_done("report.extensive"):
+                self.report(problem, res, "extensive")
+                self.rd.save_stage("report.extensive", {"done": True})
+        finally:
+            problem.layout = layout
+        return np.asarray(res.theta, dtype=float)
+
     def step1(self) -> OptimizeResult:
         self._check_gate()
-        theta0 = self.prefit()
+        theta_w = self.prefit()
+        theta0 = self.extensive()
         problem = self.problem("all")
         if not self.rd.stage_done("step1"):
-            self._warm(problem, "prefit")
-        W1 = self._w1(problem, theta0)
+            self._warm(problem, "extensive" if self.rd.stage_done("extensive") else "prefit")
+        W1 = self._w1(problem, theta_w)
         res = minimize(problem, Fixed(W1), self._options(stage="step1", theta0=theta0, max_iterations=self._limit()),
                        checkpoint=self.rd)
         if not self.rd.stage_done("report.step1"):
@@ -407,7 +466,7 @@ class Pipeline:
             except StageRefused as exc:
                 log.warning("stage %s refused: %s", s, exc)
                 status = 3
-                if s in ("step1",) or stage != "all":
+                if s in ("extensive", "step1") or stage != "all":
                     break
         return status
 
@@ -417,7 +476,7 @@ class Pipeline:
 # ------------------------------------------------------------------------------------------------
 
 
-def _parser(default_nu: int, default_base: pathlib.Path) -> argparse.ArgumentParser:
+def _parser(default_nu: int, default_base: pathlib.Path, spec: Any = None) -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Staged NFP-GMM estimation (nfp_harness.pipeline).")
     sub = ap.add_subparsers(dest="command", required=True)
     for name in ("run", "status"):
@@ -432,6 +491,9 @@ def _parser(default_nu: int, default_base: pathlib.Path) -> argparse.ArgumentPar
             p.add_argument("--workers", type=int, default=4, help="parallel profile points in the gate")
             p.add_argument("--detach", action="store_true", help="re-execute in a new session, output to log.txt")
             p.add_argument("--new-run", action="store_true", help="archive the run directory and start over")
+        add = getattr(spec, "add_arguments", None)
+        if callable(add):
+            add(p)
     return ap
 
 
@@ -439,16 +501,19 @@ def main(spec: Any, argv: Sequence[str] | None = None, default_nu: int = 16,
          default_base: str | pathlib.Path = "results") -> int:
     """main(spec, argv=None) -> exit status. ``run --stage <s> [--nu N] [--detach] [--new-run]`` and ``status``."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    args = _parser(default_nu, pathlib.Path(default_base)).parse_args(argv)
+    args = _parser(default_nu, pathlib.Path(default_base), spec).parse_args(argv)
+    configure = getattr(spec, "configure", None)
+    if callable(configure):
+        configure(args)
     cfg_base = args.results.resolve()
     if args.command == "status":
-        path = cfg_base / f"{spec.name}_{hash_options(run_key_options(args.nu, args.seed))[:10]}"
+        path = run_dir_path(cfg_base, spec, args.nu, args.seed)
         print(json.dumps(runtime.status(path), indent=1, default=str))
         return 0
 
     cfg = RunConfig(base=cfg_base, nu=args.nu, seed=args.seed, threads=args.threads, workers=args.workers,
                     gate_nu=args.gate_nu)
-    path = cfg_base / f"{spec.name}_{hash_options(run_key_options(cfg.nu, cfg.seed))[:10]}"
+    path = run_dir_path(cfg_base, spec, cfg.nu, cfg.seed)
     st = runtime.status(path)
     if st.get("alive") and int(st.get("pid", -1)) != os.getpid():
         print(f"run directory {path} is in use by live pid {st['pid']} (stage {st.get('stage')}); not starting a "

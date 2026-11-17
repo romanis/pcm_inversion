@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 
 from nfp_harness.linear import Absorb, LinearIV
-from nfp_harness.moments import MICRO_OUTPUTS, IVMoments, MicroDataset, MicroPart, product_part
-from nfp_harness.tests.test_problem import THETA_TRUE, LogitRCModel, central_fd, make_data, make_micro
+from nfp_harness.problem import NFPGMMProblem
+from nfp_harness.moments import MICRO_OUTPUTS, IVMoments, MicroDataset, MicroPart, RatioMicroMoment, product_part
+from nfp_harness.tests.test_problem import THETA_TRUE, LogitRCModel, central_fd, make_data, make_layout, make_micro
 from nfp_harness.types import EvalStatus, InnerSolution, KernelRequests
 
 
@@ -194,3 +195,31 @@ def test_missing_kernel_outputs_are_named() -> None:
     sol = InnerSolution(delta=d["delta_true"], D=None, status=EvalStatus.OK, per_market=[], outputs={})
     with pytest.raises(KeyError, match="E\\[age mi\\]"):
         mom.evaluate(sol, None, False)  # type: ignore[arg-type]
+
+
+def test_fixed_micro_covariance_is_used_in_W1_and_S() -> None:
+    """A fixed covariance replaces the model-implied V_micro in W1 and S and requests no product parts."""
+    base = make_micro()
+    V = np.array([[2e-3, 1e-4, 0.0], [1e-4, 5e-3, 0.0], [0.0, 0.0, 1e-3]])
+    fixed = RatioMicroMoment("micro", base.dataset, base.numerators, base.denominators, base.values,
+                             base.labels, covariance=V)
+    assert [p.name for p in fixed.covariance_requests().micro_parts] == [p.name for p in fixed.requests().micro_parts]
+    d = make_data()
+    model = LogitRCModel(d["products"], d["agents"], d["market_ids"], d["shares"])
+    problem = NFPGMMProblem(model, [IVMoments(d["Z"], d["clusters"]), fixed],
+                            LinearIV(d["X1"], d["Z"], names=["const", "x", "mi"]), make_layout())
+    theta = THETA_TRUE
+    W1 = problem.initial_weighting(theta)
+    rows = problem.blocks["micro"]
+    np.testing.assert_allclose(W1[rows, rows], np.linalg.inv(problem.n * V), rtol=1e-10)
+    ev = problem.evaluate(theta, need_jacobian=False)
+    S = problem.covariance(ev)
+    np.testing.assert_allclose(S[rows, rows], problem.n * V, rtol=1e-12)
+    # theta-independent: the same block at another theta
+    ev2 = problem.evaluate(theta * 1.1, need_jacobian=False)
+    np.testing.assert_allclose(problem.covariance(ev2)[rows, rows], problem.n * V, rtol=1e-12)
+    with pytest.raises(ValueError, match="shape"):
+        RatioMicroMoment("micro", base.dataset, base.numerators, base.denominators, base.values, covariance=V[:2, :2])
+    with pytest.raises(ValueError, match="symmetric"):
+        RatioMicroMoment("micro", base.dataset, base.numerators, base.denominators, base.values,
+                         covariance=V + np.triu(np.ones((3, 3)), 1))

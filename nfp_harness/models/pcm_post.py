@@ -524,6 +524,54 @@ def spread_in_buyer_dollars(model: Any, theta: np.ndarray, delta: np.ndarray) ->
     return {"mean_alpha_buyers": mab, "inside_share": den / max(len(model.markets), 1), "spreads": spreads}
 
 
+def _taste_utility(model: Any, theta: np.ndarray, t: int) -> tuple[np.ndarray, dict[str, Any]]:
+    """(R, J_t) taste part ``x_j . t_i`` of market t in price order, and the kernel fields."""
+    th, _, _ = model.kernel_params(theta)
+    f = _fields(model.kernel_market(t))
+    T = np.zeros((f["weights"].size, f["x"].shape[1]))
+    for k, col in enumerate(f["taste_col"]):
+        T[:, col] += th[k] * f["taste_basis"][:, k]
+    return T @ f["x"].T, f
+
+
+def purchase_probability(model: Any, theta: np.ndarray, delta: np.ndarray, t: int) -> np.ndarray:
+    """purchase_probability(model, theta, delta, t) -> (R,) P(draw i buys a car) in market t, exact.
+
+    Draw i buys when ``c_i a < A_i = max_j y_ij / p_j`` with ``y_ij = delta_j + x_j . t_i`` and
+    a ~ LogNormal(0, sigma_p), so ``P_i = Phi(ln(A_i / c_i) / sigma_p)`` (0 when A_i <= 0). The weighted
+    sum over draws is the inside share.
+    """
+    _, _, sp = model.kernel_params(theta)
+    U, f = _taste_utility(model, theta, t)
+    y = np.asarray(delta, dtype=float)[np.asarray(model.markets[t].rows)][None, :] + U
+    A = np.max(y / f["p"][None, :], axis=1)
+    c = draw_price_scale(model, theta, t)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lb = np.where(A > 0, np.log(np.where(A > 0, A, 1.0) / c), -np.inf)
+    return norm.cdf(lb / sp)
+
+
+def quality_dispersion(model: Any, theta: np.ndarray, delta: np.ndarray) -> dict[str, Any]:
+    """quality_dispersion(model, theta, delta) -> per-product dispersion of quality across consumers.
+
+    For product j in market t: the weighted sd over draws of ``x_j . t_i`` (utils of the alpha = 1
+    consumer), divided by ``mean_alpha_buyers`` of ``spread_in_buyer_dollars`` to put it in buyer dollars
+    (price units). This is the PCM counterpart of the per-product dispersion the logit error supplies in
+    BLP (SPEC 1.1). Returns ``per_product`` ((n,) row order), ``median`` and ``mean_alpha_buyers``.
+    """
+    mab = spread_in_buyer_dollars(model, theta, delta)["mean_alpha_buyers"]
+    out = np.full(int(model.n_products), np.nan)
+    for t, m in enumerate(model.markets):
+        U, f = _taste_utility(model, theta, t)
+        w = f["weights"] / f["weights"].sum()
+        mu = w @ U
+        sd = np.sqrt(np.maximum(w @ (U - mu[None, :]) ** 2, 0.0))
+        out[np.asarray(m.rows)] = sd / mab
+    fin = out[np.isfinite(out)]
+    return {"per_product": out, "median": float(np.median(fin)) if fin.size else float("nan"),
+            "mean_alpha_buyers": mab}
+
+
 # --------------------------------------------------------------------------------------------
 # Product-removal counterfactual
 # --------------------------------------------------------------------------------------------

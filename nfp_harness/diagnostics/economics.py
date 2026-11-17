@@ -17,15 +17,19 @@ OWN_ELASTICITY_EXTREME = -50.0
 #: Statistic names ``spec.plausible`` may declare ranges for. ``spread_buyer_dollars`` takes one range for
 #: every taste spread, or a mapping parameter name -> range; ``spread_buyer_dollars:<name>`` targets one.
 #: A bound may be the string ``"price_range"`` (max p - min p pooled, or ``spec.price_range``).
+#: ``diversion_leaving_group_median:<group>`` is the median over the products of one group.
 PLAUSIBLE_STATS = (
     "own_elasticity_median",
     "share_own_elasticity_below_-50",
+    "share_own_elasticity_below_-20",
     "nonzero_cross_median",
     "diversion_leaving_group_median",
     "margin_median",
     "inside_share_elasticity_median",
     "spread_buyer_dollars",
     "sd_xi_over_sd_delta",
+    "xi_kurtosis",
+    "quality_dispersion_buyer_dollars_median",
 )
 
 
@@ -126,6 +130,8 @@ def economics_values(model: Any, theta: np.ndarray, delta: np.ndarray, spec: Any
         "own_elasticity": summary(own),
         "share_own_elasticity_below_-50": float(np.mean(own[np.isfinite(own)] < OWN_ELASTICITY_EXTREME))
         if np.isfinite(own).any() else None,
+        "share_own_elasticity_below_-20": float(np.mean(own[np.isfinite(own)] < -20.0))
+        if np.isfinite(own).any() else None,
         "nonzero_cross": summary(nz),
         "nonzero_cross_ratio": summary(pr["nonzero_cross_ratio"]),
         "outside_diversion": summary(pr["outside_diversion"]),
@@ -139,6 +145,9 @@ def economics_values(model: Any, theta: np.ndarray, delta: np.ndarray, spec: Any
     if post["group_names"]:
         values["diversion_leaving_group"] = summary(pr["diversion_leaving_group"])
         values["cross_group_diversion"] = values["diversion_leaving_group"]["median"]
+        lab = np.asarray(pr["group"]).astype(str)
+        values["diversion_leaving_group_by_group"] = {
+            g: summary(pr["diversion_leaving_group"][lab == g])["median"] for g in post["group_names"]}
         gm = post["group_matrix"]
         values["group_diversion"] = {
             g: {**{h: float(gm[a, b]) for b, h in enumerate(post["group_names"])}, "outside": float(gm[a, -1])}
@@ -161,11 +170,16 @@ def economics_values(model: Any, theta: np.ndarray, delta: np.ndarray, spec: Any
     sb = pcm_post.spread_in_buyer_dollars(model, theta, delta)
     values["mean_alpha_buyers"] = sb["mean_alpha_buyers"]
     values["spread_buyer_dollars"] = sb["spreads"]
+    values["quality_dispersion_buyer_dollars"] = summary(pcm_post.quality_dispersion(model, theta, delta)["per_product"])
     if xi is not None and np.size(xi) == np.size(delta):
         sd_d = float(np.std(delta))
         values["sd_xi_over_sd_delta"] = float(np.std(xi)) / sd_d if sd_d > 0 else None
+        x = np.asarray(xi, dtype=float) - float(np.mean(xi))
+        v2 = float(np.mean(x ** 2))
+        values["xi_kurtosis"] = float(np.mean(x ** 4)) / v2 ** 2 if v2 > 0 else None
     else:
         values["sd_xi_over_sd_delta"] = None
+        values["xi_kurtosis"] = None
     return values, msgs, post
 
 
@@ -200,7 +214,12 @@ def economics_block(problem: Problem, result: OptimizeResult, spec: Any) -> Diag
         "margin_median": values["margin"]["median"],
         "inside_share_elasticity_median": values["inside_share_elasticity"]["median"],
         "sd_xi_over_sd_delta": values["sd_xi_over_sd_delta"],
+        "share_own_elasticity_below_-20": values["share_own_elasticity_below_-20"],
+        "xi_kurtosis": values["xi_kurtosis"],
+        "quality_dispersion_buyer_dollars_median": values["quality_dispersion_buyer_dollars"]["median"],
     }
+    for g, v in (values.get("diversion_leaving_group_by_group") or {}).items():
+        stats[f"diversion_leaving_group_median:{g}"] = v
     for nm, v in values["spread_buyer_dollars"].items():
         stats[f"spread_buyer_dollars:{nm}"] = v
     flags, notes, checked = plausible_flags(stats, dict(_get(spec, "plausible", {}) or {}), values["price_range"])
