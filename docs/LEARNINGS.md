@@ -1002,4 +1002,4 @@ the kink spacing and every trial is rejected whatever the direction. Fixes: rese
 step on a restart, floor Delta at the secant step, make the probe a compass-search fallback, recompute the
 More scales after a restart.
 
-Full analysis kept locally at $KIROCREW_SCRATCH/fable_r5/ROUND5.md.
+Full analysis kept locally (untracked) at docs/estimation_harness/ROUND5.md.
