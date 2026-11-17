@@ -18,7 +18,9 @@ is wrong (LEARNINGS 17) and is not used.
 Nash costs come from the multi-product Bertrand first-order condition
 ``s_j + sum_k Omega_jk (p_k - c_k) ds_k/dp_j = 0``, so ``markup = -(Omega * ds_dp')^{-1} s``. When
 the ownership-weighted Jacobian has reciprocal condition number below ``rcond_min`` the result has
-status ``NASH_JACOBIAN_SINGULAR`` and NaN markups; nothing raises.
+status ``NASH_JACOBIAN_SINGULAR`` and NaN markups; nothing raises. Counterfactual prices are not re-solved
+from the FOC: ``best_response_box`` gives a bounded Nash approximation by best responses in a price box
+(LEARNINGS 29).
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ __all__ = [
     "inside_share", "inside_share_elasticity", "group_labels", "firm_labels", "market_position",
     "market_post", "postestimation", "consumer_surplus", "draw_price_scale", "alpha_quintiles",
     "demographic_labels", "cs_by_group", "spread_in_buyer_dollars", "drop_products_counterfactual",
-    "quality_dispersion", "relative_quality_dispersion",
+    "quality_dispersion", "relative_quality_dispersion", "best_response_box",
     "compare_blp",
 ]
 
@@ -652,14 +654,140 @@ def _sorted_prices(p: np.ndarray, min_gap: float) -> tuple[np.ndarray, np.ndarra
     return order, ps
 
 
+_GOLDEN = (math.sqrt(5.0) - 1.0) / 2.0
+
+
+def best_response_box(shares: Any, p0: np.ndarray, costs: np.ndarray, firms: np.ndarray, *, box: float = 0.10,
+                      max_sweeps: int = 20, golden_tol: float = 1e-3, price_tol: float = 1e-5,
+                      deviation: float = 0.02, surplus: Any = None) -> dict[str, Any]:
+    """best_response_box(shares, p0, costs, firms, box=0.10, max_sweeps=20, golden_tol=1e-3, price_tol=1e-5,
+    deviation=0.02, surplus=None) -> dict: a bounded Nash approximation by best-response dynamics
+    (SPEC_ANALYSIS v4 section 3, LEARNINGS 29).
+
+    ``shares(p) -> (J,) or None`` gives the shares at prices ``p`` (in the order of ``p0``); None or any zero share
+    is a rejected trial (profit -inf), never a terminal status. Every price stays in its box
+    ``[(1 - box) p0_j, (1 + box) p0_j]``. One sweep is Gauss-Seidel over firms, and within a firm over its
+    products: each price maximises the firm's profit ``sum_{k in f} (p_k - c_k) s_k(p)`` over its box by
+    golden-section search (bracket ``golden_tol`` x the box width, both box ends also tried), and is moved only
+    if that raises the profit. No first-order condition and no matrix inverse are used: shares are continuous in
+    prices, but ds/dp jumps where a draw's frontier changes, and the best-response map can have slopes above one.
+
+    Stops ``converged`` when a sweep moves no price by more than ``price_tol`` p0_j, ``cycle`` when a sweep returns
+    to within that tolerance of an earlier sweep's prices (not the previous one), else ``not_converged`` after
+    ``max_sweeps``. Returns ``status``, ``prices``, ``shares``, ``sweeps``, ``evaluations``, ``max_change`` per
+    sweep, ``box_binding`` (products within 1e-3 of a box end, as a count and positions), ``deviation`` (for each
+    product, the firm's profit at p_j (1 +- ``deviation``) with the rest fixed, outside the box too: ``max_gain``
+    relative to the firm's profit, ``max_gain_product``, ``profitable`` count, and ``max_gain_off_box`` over the
+    products not at a box end) and, with ``surplus(p) -> float``, ``cs_range``
+    (min, max) of the surplus over the cycle, or over the last 5 sweeps when not converged.
+    """
+    p0 = np.asarray(p0, dtype=float)
+    c = np.asarray(costs, dtype=float)
+    firms = np.asarray(firms).ravel()
+    J = p0.size
+    lo, hi = (1.0 - box) * p0, (1.0 + box) * p0
+    nev = 0
+
+    def profit(f_idx: np.ndarray, pv: np.ndarray) -> float:
+        nonlocal nev
+        nev += 1
+        s = shares(pv)
+        if s is None:
+            return -math.inf
+        s = np.asarray(s, dtype=float)
+        if s.shape != (J,) or not np.all(np.isfinite(s)) or np.any(s <= 0):
+            return -math.inf
+        return float(np.sum((pv[f_idx] - c[f_idx]) * s[f_idx]))
+
+    def best_price(f_idx: np.ndarray, j: int, p: np.ndarray) -> float:
+        pv = p.copy()
+
+        def phi(x: float) -> float:
+            pv[j] = x
+            return profit(f_idx, pv)
+
+        cur_x, cur = p[j], phi(p[j])
+        best_x, best = cur_x, cur
+        a, b = lo[j], hi[j]
+        x1, x2 = b - _GOLDEN * (b - a), a + _GOLDEN * (b - a)
+        f1, f2 = phi(x1), phi(x2)
+        while b - a > golden_tol * (hi[j] - lo[j]):
+            if f1 >= f2:
+                b, x2, f2 = x2, x1, f1
+                x1 = b - _GOLDEN * (b - a)
+                f1 = phi(x1)
+            else:
+                a, x1, f1 = x1, x2, f2
+                x2 = a + _GOLDEN * (b - a)
+                f2 = phi(x2)
+        for x, fx in ((x1, f1), (x2, f2), (lo[j], phi(lo[j])), (hi[j], phi(hi[j]))):
+            if fx > best:
+                best_x, best = x, fx
+        return best_x if best > cur else cur_x
+
+    owners = {f: np.flatnonzero(firms == f) for f in dict.fromkeys(firms.tolist())}
+    p = p0.copy()
+    hist = [p.copy()]
+    changes: list[float] = []
+    status = "not_converged"
+    cycle_from = None
+    for sweep in range(1, max_sweeps + 1):
+        prev = p.copy()
+        for f_idx in owners.values():
+            for j in f_idx:
+                p[j] = best_price(f_idx, int(j), p)
+        change = float(np.max(np.abs(p - prev) / p0)) if J else 0.0
+        changes.append(change)
+        hist.append(p.copy())
+        if change <= price_tol:
+            status = "converged"
+            break
+        for k in range(len(hist) - 2):
+            if float(np.max(np.abs(p - hist[k]) / p0)) <= price_tol:
+                status, cycle_from = "cycle", k
+                break
+        if status == "cycle":
+            break
+    out: dict[str, Any] = {"status": status, "prices": p.copy(), "sweeps": len(changes), "max_change": changes,
+                           "box": box}
+    s_fin = shares(p)
+    nev += 1
+    out["shares"] = None if s_fin is None else np.asarray(s_fin, dtype=float)
+    at_end = (np.abs(p - lo) <= 1e-3 * (hi - lo)) | (np.abs(p - hi) <= 1e-3 * (hi - lo))
+    out["box_binding"] = {"count": int(at_end.sum()), "positions": np.flatnonzero(at_end).tolist()}
+    # deviation check: each product's price moved by +-deviation with the rest fixed
+    gains = np.full(J, -math.inf)
+    for f_idx in owners.values():
+        base = profit(f_idx, p)
+        for j in f_idx:
+            for sgn in (1.0, -1.0):
+                pv = p.copy()
+                pv[j] = p[j] * (1.0 + sgn * deviation)
+                g = profit(f_idx, pv)
+                if np.isfinite(g) and np.isfinite(base):
+                    gains[j] = max(gains[j], (g - base) / max(abs(base), 1e-300))
+    fin = np.isfinite(gains)
+    k = int(np.argmax(np.where(fin, gains, -math.inf))) if fin.any() else -1
+    inner = fin & ~at_end
+    out["deviation"] = {"step": deviation, "max_gain": float(gains[k]) if k >= 0 else float("nan"),
+                        "max_gain_product": k, "profitable": int(np.sum(gains[fin] > 0)),
+                        "max_gain_off_box": float(np.max(gains[inner])) if inner.any() else float("nan")}
+    if surplus is not None and status != "converged":
+        pts = hist[cycle_from + 1:] if status == "cycle" and cycle_from is not None else hist[-5:]
+        vals = [float(surplus(x)) for x in pts]
+        out["cs_range"] = (min(vals), max(vals))
+    out["evaluations"] = nev
+    return out
+
+
 def drop_products_counterfactual(model: Any, theta: np.ndarray, delta: np.ndarray, market: Any, drop: Any, *,
                                  firm_ids: Any = "firm_ids", costs: np.ndarray | None = None,
-                                 resolve_prices: bool = False, method: str = "newton", damping: float = 0.5,
-                                 tol: float = 1e-7,
-                                 max_iterations: int = 500, min_gap: float = 0.01, rcond_min: float = 1e-12,
-                                 tabulate: Sequence[Any] = (), n_threads: int | None = None) -> dict[str, Any]:
+                                 resolve_prices: bool = False, box: float = 0.10, max_sweeps: int = 20,
+                                 golden_tol: float = 1e-3, deviation: float = 0.02, min_gap: float = 0.01,
+                                 rcond_min: float = 1e-12, tabulate: Sequence[Any] = (),
+                                 n_threads: int | None = None) -> dict[str, Any]:
     """drop_products_counterfactual(model, theta, delta, market, drop, firm_ids="firm_ids", costs=None,
-    resolve_prices=False, method="newton", damping=0.5, tol=1e-7, max_iterations=500, min_gap=0.01,
+    resolve_prices=False, box=0.10, max_sweeps=20, golden_tol=1e-3, deviation=0.02, min_gap=0.01,
     rcond_min=1e-12, tabulate=(), n_threads=None) -> dict.
 
     Removes the products ``drop`` from the market with id ``market`` at fixed theta, with delta (so
@@ -668,25 +796,18 @@ def drop_products_counterfactual(model: Any, theta: np.ndarray, delta: np.ndarra
 
     Always reported, prices held at their observed values: ``observed`` and ``fixed_prices``, each with
     ``rows`` (row order of the products present), ``prices``, ``shares``, ``inside_share``, ``cs`` (sum
-    w_i CS_i, price units per household) and ``per_draw``; ``cs_change_fixed = cs_fixed - cs_observed``.
+    w_i CS_i, price units per household) and ``per_draw``; ``cs_change_fixed = cs_fixed - cs_observed``. The
+    fixed-price change is the headline counterfactual (LEARNINGS 29).
 
-    With ``resolve_prices``: costs are ``costs[rows]`` if given ((n,) row order) else the Nash costs at the
-    observed prices with ``firm_ids``. Prices solve ``r(p) = c + markup(p) - p = 0``, re-sorted and with ties
-    spread to ``min_gap`` at every evaluation, until ``max |r| < tol`` or ``max_iterations``.
-    ``method="fixed_point"`` is DESIGN 6.5's damped iteration ``p <- p + damping r(p)``. It is locally
-    unstable whenever d markup / dp has a real eigenvalue above 1 (then ``1 + damping (lambda - 1) > 1`` for
-    every damping), which PCM markets with close price neighbours produce. ``method="newton"`` (default) takes
-    Newton steps on r with a forward-difference Jacobian (J extra evaluations per step, run in parallel),
-    keeps prices positive and backtracks (down to 1/16 of the step) until max |r| falls; when no backtracked
-    step lowers max |r| (ds/dp, so r, jumps where a draw's frontier changes) it takes one damped fixed-point
-    step instead. ``fixed_point_steps`` counts those. At finite draws a pure-strategy solution need not
-    exist; ``not_converged`` is then the honest outcome.
-    ``nash`` holds ``status`` (``converged``, ``not_converged``, ``NASH_JACOBIAN_SINGULAR`` at the observed
-    or at an iterated point, ``nonpositive_price``, or for Newton ``jacobian_failed``, ``jacobian_singular``,
-    ``no_descent``), ``method``, ``iterations``, ``step`` (max |r|), ``foc_residual`` (max
-    |s + (Omega ds_dp')(p - c)| at the last evaluated prices), ``costs_observed`` and the same fields as
-    ``fixed_prices``; ``cs_change_nash = cs_nash - cs_observed``. A run that stops early keeps its last
-    prices, and its status says why.
+    With ``resolve_prices``, the "bounded Nash" approximation: costs are ``costs[rows]`` if given ((n,) row
+    order) else the Nash costs at the observed prices with ``firm_ids``; then ``best_response_box`` over the
+    remaining products, each price in a +-``box`` box around its observed value, prices re-sorted with ties
+    spread to ``min_gap`` at every evaluation. The Newton re-solve is gone: its trial steps priced products off
+    every frontier, and with zero shares Omega * ds/dp is singular (LEARNINGS 29). ``nash`` holds ``status``
+    (``converged``, ``cycle``, ``not_converged``, or ``NASH_JACOBIAN_SINGULAR`` when the observed costs cannot be
+    computed), ``method`` = ``"bounded_nash"``, the ``best_response_box`` fields (``sweeps``, ``evaluations``,
+    ``box_binding``, ``deviation``, ``cs_range``), ``costs_observed`` and the ``fixed_prices`` fields at the final
+    prices; ``cs_change_nash = cs_nash - cs_observed``.
 
     ``tables`` holds ``cs_by_group`` rows by ``alpha_quintile`` and by each entry of ``tabulate`` (an agent
     column name, or a (column, bins) pair), with columns for every computed scenario. A households
@@ -733,7 +854,7 @@ def drop_products_counterfactual(model: Any, theta: np.ndarray, delta: np.ndarra
         if firms is None:
             raise ValueError("resolve_prices needs firm ids (an (n,) array or a product column)")
         fk = np.asarray(firms)[rows]
-        nash: dict[str, Any] = {"status": "", "iterations": 0, "step": float("nan"), "foc_residual": float("nan")}
+        nash: dict[str, Any] = {"status": "", "method": "bounded_nash"}
         if costs is None:
             assert J0 is not None
             nm = nash_markups(obs["shares"], J0, fk, rcond_min)
@@ -744,87 +865,29 @@ def drop_products_counterfactual(model: Any, theta: np.ndarray, delta: np.ndarra
         else:
             c_all = np.asarray(costs, dtype=float)[rows]
         nash["costs_observed"] = c_all
-        ck, fkk = c_all[keep], fk[keep]
-        p = p0[keep].copy()
-        res: dict[str, Any] = {}
-        it = 0
-        nash["method"] = method
-        nash["fixed_point_steps"] = 0
+        if not nash["status"]:
+            def sorted_market(pk: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                order, ps = _sorted_prices(pk, min_gap)
+                return order, ps, keep[order]
 
-        def F(pk: np.ndarray, n_thr: int = nt) -> tuple[np.ndarray | None, str, float, np.ndarray]:
-            """c + markup(p) - p in kept order, its status, the FOC residual and the spread prices."""
-            order, ps = _sorted_prices(pk, min_gap)
-            pk = np.empty_like(ps)
-            pk[order] = ps
-            if ps.size and ps[0] <= 0:
-                return None, "nonpositive_price", float("nan"), pk
-            idx = keep[order]
-            s, J = _eval(_market_like(f, idx, ps), d_t[idx], th, ph, sp, n_thr, alpha_lo=al)
-            assert J is not None
-            nm = nash_markups(s, J, fkk[order], rcond_min)
-            if nm["status"] != NASH_OK:
-                return None, NASH_SINGULAR, float("nan"), pk
-            r = np.empty_like(ps)
-            r[order] = ck[order] + nm["markup"] - ps
-            foc = float(np.max(np.abs(foc_residual(s, J, fkk[order], ps, ck[order])))) if ps.size else 0.0
-            return r, "", foc, pk
+            def shares_at(pk: np.ndarray) -> np.ndarray | None:
+                order, ps, idx = sorted_market(pk)
+                if ps.size and ps[0] <= 0:
+                    return None
+                s, _ = _eval(_market_like(f, idx, ps), d_t[idx], th, ph, sp, nt, price_derivatives=False,
+                             alpha_lo=al)
+                out_s = np.empty_like(s)
+                out_s[order] = s
+                return out_s
 
-        if method not in ("newton", "fixed_point"):
-            raise ValueError(f"method must be 'newton' or 'fixed_point', got {method!r}")
-        while not nash["status"]:
-            r, st, foc, p = F(p)
-            if r is None:
-                nash["status"] = st
-                break
-            nash["step"] = float(np.max(np.abs(r))) if r.size else 0.0
-            nash["foc_residual"] = foc
-            if nash["step"] < tol:
-                nash["status"] = "converged"
-                break
-            if it >= max_iterations:
-                nash["status"] = "not_converged"
-                break
-            it += 1
-            if method == "fixed_point":
-                nash["fixed_point_steps"] += 1
-                p = p + damping * r
-                continue
-            # Newton on r(p) = 0 with a forward-difference Jacobian (columns in parallel) and backtracking
-            h = 1e-6 * np.maximum(1.0, np.abs(p))
-            workers = max(1, min(p.size, nt))
-            per = max(1, nt // workers)
+            def surplus_at(pk: np.ndarray) -> float:
+                order, ps, idx = sorted_market(pk)
+                return float(_cs(_market_like(f, idx, ps), d_t[idx], th, ph, sp, nt, al)["total"])
 
-            def jac_col(k: int) -> np.ndarray | None:
-                rk = F(p + h[k] * np.eye(p.size)[k], per)[0]
-                return None if rk is None else (rk - r) / h[k]
-
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                cols = list(pool.map(jac_col, range(p.size)))
-            if any(c is None for c in cols):
-                nash["fixed_point_steps"] += 1
-                p = p + damping * r
-                continue
-            JF = np.column_stack([c for c in cols if c is not None])
-            try:
-                dp = -np.linalg.solve(JF, r)
-            except np.linalg.LinAlgError:
-                dp = np.zeros_like(r)
-            neg = dp < 0
-            lam = min(1.0, float(np.min(0.9 * p[neg] / -dp[neg]))) if neg.any() else 1.0
-            best = None
-            while lam >= 1.0 / 16:
-                r2, _, _, p2 = F(p + lam * dp)
-                if r2 is not None and np.max(np.abs(r2)) < (1.0 - 1e-4 * lam) * nash["step"]:
-                    best = p2
-                    break
-                lam /= 2
-            if best is None:  # r(p) jumps where a draw's frontier changes: fall back to a damped step
-                nash["fixed_point_steps"] += 1
-                best = p + damping * r
-            p = best
-        nash["iterations"] = it
-        order, ps = _sorted_prices(p, min_gap)
-        if ps.size == 0 or ps[0] > 0:
+            br = best_response_box(shares_at, p0[keep], c_all[keep], fk[keep], box=box, max_sweeps=max_sweeps,
+                                   golden_tol=golden_tol, deviation=deviation, surplus=surplus_at)
+            nash.update({k: v for k, v in br.items() if k not in ("prices", "shares")})
+            order, ps = _sorted_prices(br["prices"], min_gap)
             res, _ = scenario(keep[order], ps)
             nash.update(res)
             out["cs_change_nash"] = res["cs"] - obs["cs"]
@@ -844,7 +907,8 @@ def drop_products_counterfactual(model: Any, theta: np.ndarray, delta: np.ndarra
 # Comparison with the BLP summaries (DESIGN 6.5 item 5)
 # --------------------------------------------------------------------------------------------
 
-_BLP_ROWS = (("minivan_cs_gain_1984_musd", "minivan CS gain 1984 ($M)"),
+_BLP_ROWS = (("minivan_cs_gain_1984_fixed_prices_musd", "minivan CS gain 1984, fixed prices ($M)"),
+             ("minivan_cs_gain_1984_musd", "minivan CS gain 1984, Nash ($M; PCM: bounded Nash)"),
              ("own_elasticity_median", "own-price elasticity, median"),
              ("own_elasticity_mean", "own-price elasticity, mean"),
              ("margin_median", "margin (p - c)/p, median"),

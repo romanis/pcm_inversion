@@ -240,13 +240,13 @@ def test_removing_a_dominated_product_leaves_cs_unchanged() -> None:
 
 def test_cs_is_invariant_to_a_joint_rescaling_of_utility(model: Any, syn: dict[str, Any]) -> None:
     drop = np.asarray(syn["data"]["products"]["g1"]) == 1
-    base = pp.drop_products_counterfactual(model, THETA, syn["delta"], 1984, drop, resolve_prices=True, tol=1e-11)
+    base = pp.drop_products_counterfactual(model, THETA, syn["delta"], 1984, drop, resolve_prices=True)
     post0 = pp.postestimation(model, THETA, syn["delta"])["products"]
     for kappa in (0.37, 3.7):
         th, d = kappa_point(THETA, syn["delta"], kappa)
         cs0 = pp.consumer_surplus(model, THETA, syn["delta"], 1984)
         cs1 = pp.consumer_surplus(model, th, d, 1984)
-        cf = pp.drop_products_counterfactual(model, th, d, 1984, drop, resolve_prices=True, tol=1e-11)
+        cf = pp.drop_products_counterfactual(model, th, d, 1984, drop, resolve_prices=True)
         post1 = pp.postestimation(model, th, d)["products"]
         rel = abs(cs1["total"] - cs0["total"]) / abs(cs0["total"])
         print(f"kappa {kappa}: CS {cs0['total']:.12f} -> {cs1['total']:.12f} (relative change {rel:.1e}); "
@@ -255,21 +255,28 @@ def test_cs_is_invariant_to_a_joint_rescaling_of_utility(model: Any, syn: dict[s
         assert rel < 1e-12
         np.testing.assert_allclose(cs1["per_draw"], cs0["per_draw"], rtol=1e-11, atol=1e-13)
         assert cf["cs_change_fixed"] == pytest.approx(base["cs_change_fixed"], rel=1e-10, abs=1e-13)
-        assert cf["cs_change_nash"] == pytest.approx(base["cs_change_nash"], rel=1e-8)
+        assert cf["cs_change_nash"] == pytest.approx(base["cs_change_nash"], rel=1e-6)
         np.testing.assert_allclose(post1["own_elasticity"], post0["own_elasticity"], rtol=1e-9)
         np.testing.assert_allclose(post1["markup"], post0["markup"], rtol=1e-9)
 
 
-def test_nash_resolve_after_removal(model: Any, syn: dict[str, Any]) -> None:
+def test_bounded_nash_after_removal(model: Any, syn: dict[str, Any]) -> None:
     pr = syn["data"]["products"]
     drop = np.asarray(pr["g1"]) == 1
-    cf = pp.drop_products_counterfactual(model, THETA, syn["delta"], 1984, drop, resolve_prices=True, tol=1e-11,
-                                         max_iterations=2000, tabulate=("demo", ("inc", [0.0])))
+    cf = pp.drop_products_counterfactual(model, THETA, syn["delta"], 1984, drop, resolve_prices=True,
+                                         tabulate=("demo", ("inc", [0.0])))
     nash = cf["nash"]
-    print(f"Nash re-solve: {nash['status']} after {nash['iterations']} iterations, step {nash['step']:.1e}, "
-          f"FOC residual {nash['foc_residual']:.1e}; CS observed {cf['observed']['cs']:.6f}, fixed prices "
-          f"{cf['fixed_prices']['cs']:.6f}, Nash {nash['cs']:.6f}")
-    assert nash["status"] == "converged" and nash["foc_residual"] < 1e-8
+    print(f"bounded Nash: {nash['status']} after {nash['sweeps']} sweeps, {nash['evaluations']} evaluations, "
+          f"{nash['box_binding']['count']} at a box end, largest +-2% deviation gain {nash['deviation']['max_gain']:.2e}; "
+          f"CS observed {cf['observed']['cs']:.6f}, fixed prices {cf['fixed_prices']['cs']:.6f}, bounded Nash "
+          f"{nash['cs']:.6f}")
+    assert nash["method"] == "bounded_nash" and nash["status"] in ("converged", "cycle")
+    # off the box ends no +-2% deviation pays; at a binding box end it may (the box is the bound)
+    assert nash["sweeps"] <= 20 and nash["deviation"]["max_gain_off_box"] < 1e-3
+    p_obs = cf["observed"]["prices"]
+    kept = np.isin(cf["observed"]["rows"], cf["nash"]["rows"])
+    assert np.all(np.abs(np.sort(nash["prices"]) / np.sort(p_obs[kept]) - 1.0) <= 0.10 + 1e-3)
+    assert np.all(nash["shares"] > 0)
     # removing options never raises any draw's surplus at fixed prices
     assert np.all(cf["fixed_prices"]["per_draw"] <= cf["observed"]["per_draw"] + 1e-12)
     assert cf["cs_change_fixed"] < 0
@@ -431,3 +438,43 @@ def test_old_estimate_elasticities_and_margins_match_fixture() -> None:
     print(f"old nu=16 fixture: own elasticity max relative error {e_own:.1e}, margin {e_mar:.1e}")
     assert e_own < 1e-8 and e_mar < 1e-8
     np.testing.assert_array_equal(ncross, ref.n_cross_nonzero)
+
+
+def _logit(a: np.ndarray, b: float):
+    def shares(p: np.ndarray) -> np.ndarray:
+        e = np.exp(a - b * p)
+        return e / (1.0 + e.sum())
+    return shares
+
+
+def test_best_response_box_finds_the_logit_nash_equilibrium() -> None:
+    """Single- and multi-product logit firms: the markup of firm f solves p - c = 1 / (b (1 - S_f)); best
+    responses in a box around a point 5% off the equilibrium reach it to the golden-section tolerance."""
+    a, b, c = np.array([1.0, 1.5, 0.8, 1.2]), 0.9, np.array([1.0, 1.2, 0.9, 1.1])
+    S = _logit(a, b)
+    for firms in (np.array([0, 1, 2, 3]), np.array([0, 0, 1, 1])):
+        p = c + 1.0
+        for _ in range(500):   # the equilibrium by its fixed point (a contraction for logit)
+            s = S(p)
+            Sf = np.array([s[firms == f].sum() for f in firms])
+            p = c + 1.0 / (b * (1.0 - Sf))
+        br = pp.best_response_box(S, 1.05 * p, c, firms, box=0.10, golden_tol=1e-4, price_tol=1e-7, max_sweeps=60)
+        assert br["status"] == "converged", br["max_change"]
+        np.testing.assert_allclose(br["prices"], p, rtol=2e-4)
+        assert br["box_binding"]["count"] == 0 and br["deviation"]["max_gain"] <= 0.0
+
+
+def test_best_response_box_rejects_zero_shares_and_reports_the_box() -> None:
+    """Profit rises in p_0 (constant shares) until product 0 loses every buyer above 1.05 p0: the zero-share trials
+    are rejected, so p_0 stops just below the cliff; product 1's profit rises to the box end."""
+    p0 = np.array([10.0, 20.0])
+
+    def shares(p: np.ndarray) -> np.ndarray:
+        return np.array([0.0 if p[0] > 10.5 else 0.1, 0.2])
+
+    br = pp.best_response_box(shares, p0, np.array([5.0, 5.0]), np.array([0, 1]), box=0.10,
+                              surplus=lambda p: -float(p.sum()))
+    assert br["status"] == "converged"
+    assert 10.49 <= br["prices"][0] <= 10.5 and br["prices"][1] == pytest.approx(22.0)
+    assert br["box_binding"]["count"] == 1 and br["box_binding"]["positions"] == [1]
+    assert np.all(br["shares"] > 0) and "cs_range" not in br

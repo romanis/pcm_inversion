@@ -96,6 +96,11 @@ COST_BASIS = ("1", "log(hpwt)", "log(wt)", "log(mpg)", "air", "fwd", "trend", "j
               "log(q)")
 N_SUPPLY_INSTRUMENTS = 16
 NASH_RCOND_MIN = 1e-12
+# Bounded Nash (LEARNINGS 29): best responses in a +-10% price box, at most 20 Gauss-Seidel sweeps over firms,
+# deviation check at +-2%
+NASH_BOX = 0.10
+NASH_SWEEPS = 20
+NASH_DEVIATION = 0.02
 # Reference taste spreads in $1000 per sd of each characteristic at alpha = 1 (round-2 analysis, change 1):
 # $3k on const, $2k on fam, $1k per sd on the five continuous or binary characteristics, so sigma_c =
 # 1 / sd(c) for those (hpwt 10.2, space 6.7, air 2.05, mpd 1.50, fwd 2.00 on the merged products). The
@@ -641,6 +646,20 @@ class PetrinSpec:
             r["label"] = ""
         head["label"] = (f"headline (calibration: median margin {float(head['margin_median']):.3f} nearest "
                          f"{BAND_MARGIN_TARGET:g}, sigma_p = {float(head['sigma_p']):g})")
+        # the bounded Nash counterfactual at the headline point (every point with --band-nash-all)
+        layout = problem.layout
+        for r in (ok if self.band_nash_all else [head]):
+            try:
+                res, _ = pipe.band_result(problem, float(r["sigma_p"]))
+                if res.evaluation is None or not res.evaluation.ok:
+                    r["bounded_nash_status_1984"] = "estimate not re-evaluated"
+                    continue
+                theta = np.asarray(res.theta, dtype=float)
+                cf, _ = self.counterfactual(problem.model, theta, np.asarray(res.evaluation.aux["delta"]),
+                                            resolve_prices=True)
+                r.update({k: v for k, v in cf.items() if "bounded_nash" in k or k == "nash_note_1984"})
+            finally:
+                problem.layout = layout
         return rows
 
     def margin_band_row(self, pipe: Any, problem: Any, result: Any, value: float) -> dict[str, Any]:
@@ -760,11 +779,13 @@ class PetrinSpec:
 
     def counterfactual(self, model: Any, theta: np.ndarray, delta: np.ndarray, resolve_prices: bool
                        ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """1984 without minivans (Petrin's headline): CS change at fixed prices and, if asked, with prices
-        re-solved to a Nash equilibrium at the FOC costs. Gains in $M = households (thousands) x CS ($1000)."""
+        """1984 without minivans (Petrin's headline): CS change at fixed prices (the headline, LEARNINGS 29) and,
+        if asked, the bounded Nash approximation: best responses of every firm in a +-10% price box at the FOC
+        costs (``pcm_post.best_response_box``). Gains in $M = households (thousands) x CS ($1000)."""
         mi = self.products.mi.to_numpy() == 1
         cf = pp.drop_products_counterfactual(model, theta, delta, YEAR, mi, firm_ids=self.firm_column,
-                                             resolve_prices=resolve_prices, tol=1e-7, max_iterations=500)
+                                             resolve_prices=resolve_prices, box=NASH_BOX, max_sweeps=NASH_SWEEPS,
+                                             deviation=NASH_DEVIATION)
         hh = float(self.products.households[self.products.market_ids == YEAR].iloc[0])
         out: dict[str, Any] = {
             "minivan_cs_gain_1984_fixed_prices_musd": hh * (cf["observed"]["cs"] - cf["fixed_prices"]["cs"]),
@@ -775,18 +796,33 @@ class PetrinSpec:
         per = {"observed": cf["observed"]["per_draw"], "fixed_prices": cf["fixed_prices"]["per_draw"]}
         nash = cf["nash"]
         if nash is not None:
-            out.update(nash_status_1984=nash["status"], nash_iterations_1984=nash["iterations"],
-                       nash_fixed_point_steps_1984=nash["fixed_point_steps"], nash_max_residual_1984=nash["step"],
-                       nash_foc_residual_1984=nash["foc_residual"])
+            out["bounded_nash_status_1984"] = nash["status"]
             if nash.get("per_draw") is not None:
-                out["minivan_cs_gain_1984_musd"] = hh * (cf["observed"]["cs"] - nash["cs"])
-                out["inside_share_1984_nash"] = nash["inside_share"]
+                gain = hh * (cf["observed"]["cs"] - nash["cs"])
+                dev = nash["deviation"]
+                out.update(minivan_cs_gain_1984_bounded_nash_musd=gain, minivan_cs_gain_1984_musd=gain,
+                           inside_share_1984_bounded_nash=nash["inside_share"],
+                           bounded_nash_sweeps_1984=nash["sweeps"], bounded_nash_evaluations_1984=nash["evaluations"],
+                           bounded_nash_box_binding_1984=nash["box_binding"]["count"],
+                           bounded_nash_max_deviation_gain_1984=dev["max_gain"],
+                           bounded_nash_profitable_deviations_1984=dev["profitable"],
+                           bounded_nash_max_deviation_gain_off_box_1984=dev["max_gain_off_box"])
+                if "cs_range" in nash:
+                    lo, hi = nash["cs_range"]
+                    out["minivan_cs_gain_1984_bounded_nash_range_musd"] = [hh * (cf["observed"]["cs"] - hi),
+                                                                           hh * (cf["observed"]["cs"] - lo)]
                 per["nash"] = nash["per_draw"]
-            out["nash_note_1984"] = (
-                "Nash prices converged; the Nash gain is at an equilibrium." if nash["status"] == "converged" else
-                f"Nash re-solve ended '{nash['status']}' after {nash['iterations']} iterations (max |r| "
-                f"{nash['step']:.3g}); the 'Nash' gain is at the last iterate, not at an equilibrium. At finite draws "
-                f"an exact PCM price equilibrium need not exist (WP8).")
+                out["nash_note_1984"] = (
+                    f"Bounded Nash: best responses of each firm within +-{100 * NASH_BOX:g}% of observed prices at the "
+                    f"FOC costs, ended '{nash['status']}' after {nash['sweeps']} sweeps; {nash['box_binding']['count']} "
+                    f"prices at a box end; largest profitable unilateral deviation of +-{100 * NASH_DEVIATION:g}% "
+                    f"raises a firm's profit by {100 * dev['max_gain']:.3g}%"
+                    + (f"; CS gain over the cycle {out['minivan_cs_gain_1984_bounded_nash_range_musd'][0]:,.0f} to "
+                       f"{out['minivan_cs_gain_1984_bounded_nash_range_musd'][1]:,.0f} $M"
+                       if "cs_range" in nash else "") + ". It is an approximation, not an equilibrium (LEARNINGS 29).")
+            else:
+                out["nash_note_1984"] = (f"Bounded Nash not run: {nash['status']} at the observed prices, so there are "
+                                         f"no FOC costs.")
         t = pp.market_position(model, YEAR)
         w = np.asarray(model.kernel_market(t).weights)
         tables = {}
@@ -833,10 +869,11 @@ class PetrinSpec:
             f = HERE / "results" / fname
             if f.exists():
                 blp[label] = json.loads(f.read_text())
-        note = ("BLP micro and BLP no micro estimate a log-cost supply side jointly; BLP demand micro and the PCM use "
-                "demand moments only (aggregate + micro) and recover costs from the Nash FOC. "
+        note = ("BLP micro and BLP no micro estimate a log-cost supply side jointly; BLP demand micro uses demand "
+                "moments only. The PCM uses aggregate + micro + supply moments and recovers costs from the Nash FOC. "
                 f"PCM estimate: stage {result.stage}, {result.convergence.value}, {pipe.cfg.nu} draws per agent. "
-                f"PCM Nash status 1984: {summary.get('nash_status_1984')}. {summary.get('nash_note_1984', '')}")
+                "The headline counterfactual is the fixed-price CS gain; the PCM 'Nash' row is the bounded Nash "
+                f"approximation, status {summary.get('bounded_nash_status_1984')}. {summary.get('nash_note_1984', '')}")
         rows = {k: v for k, v in comparison.scalar_items(summary).items() if k != "nash_note_1984"}
         table = pp.compare_blp(rows, {k: comparison.scalar_items(v) for k, v in blp.items()}, note=note)
         gd = ["", "Diversion by body type (share-weighted mean, rows: from, columns: to):"]
