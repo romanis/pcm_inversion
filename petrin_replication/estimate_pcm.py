@@ -268,6 +268,7 @@ class PetrinSpec:
                 "kernel_chars": KERNEL_CHARS, "x1": X1_COLS,
                 "merge": {"rule": "same TWIN_KEYS: keep first row, sum shares and q", "keys": TWIN_KEYS},
                 "instruments": "petrin", "z": "X1 + demand_instruments0..21",
+                "phi_by_income_moments": "income rows x 1e4 in prefit and gate concentration",
                 "layout": [dataclasses.asdict(s) for s in self.layout().specs],
                 "micro": {"values": self.values, "observations": 29125, "covariance": MICRO_COVARIANCE_SOURCE},
                 "caps": {"sigma_fam": FAM_CAP, "body_sigma": BODY_SIGMA_CAP, "income_clip": INCOME_CLIP},
@@ -276,6 +277,19 @@ class PetrinSpec:
                 "optimizer": self.optimizer_options,
                 "prefit": {"free": self.prefit_free, "max_iterations": self.prefit_max_iterations},
                 "extensive_free": self.extensive_free, "gate_concentrate_iterations": self.gate_concentrate_iterations}
+
+    def concentrate_weighting(self, problem: NFPGMMProblem, W: np.ndarray) -> np.ndarray:
+        """W for the prefit and the gate's concentrated (phi_mid, phi_high): the two income purchase-rate
+        rows (the last two micro rows) up-weighted by 1e4, so phi solves those two moments, which identify
+        it exactly, with the rest of q only breaking ties (SPEC 3 steps 3-4, LEARNINGS 19). Reported q
+        values keep W1."""
+        W = np.array(W, dtype=float)
+        rows = problem.blocks.get("micro")
+        if rows is None:
+            return W
+        idx = np.arange(rows.start, rows.stop)[-2:]
+        W[np.ix_(idx, idx)] *= 1e4
+        return W
 
     def build_problem(self, nu: int, seed: int, threads: int | None, moments: str,
                       layout_changes: dict[str, Any] | None = None) -> NFPGMMProblem:

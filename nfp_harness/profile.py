@@ -551,6 +551,7 @@ class _Setup:
     cold: bool
     economics: Callable[[Any, Evaluation], Mapping[str, float]] | None
     optimizer_options: Any
+    W_concentrate: np.ndarray | None = None
 
 
 def _point_theta(s: _Setup, grid_index: tuple[int, ...], start: np.ndarray) -> np.ndarray:
@@ -604,7 +605,7 @@ def _evaluate_point(problem: Any, s: _Setup, index: int, grid_index: tuple[int, 
 
         layout = problem.layout.replace({n: {"free": False} for n in s.fixed_names})
         view = _FixedView(problem, layout)
-        weighting: Any = "cue" if s.objective == "cue" else s.W
+        weighting: Any = "cue" if s.objective == "cue" else (s.W if s.W_concentrate is None else s.W_concentrate)
         base_opts = s.optimizer_options or OptimizerOptions(max_iterations=200, record_cue=False)
         opts = dataclasses.replace(base_opts, stage=f"profile.{index}", theta0=theta)
         res = minimize(view, weighting, opts, checkpoint=None)
@@ -741,7 +742,8 @@ def profile(problem: Problem, theta0: np.ndarray | None, axes: Sequence[Axis], *
             economics: Callable[[Any, Evaluation], Mapping[str, float]] | None = None,
             run_dir: str | pathlib.Path | None = None, new_run: bool = False, workers: int | None = None,
             problem_factory: Callable[[int, int], Problem] | None = None, optimizer_options: Any = None,
-            pass_rule: Callable[[ProfileResult], tuple[bool, str]] | None = None, tag: str = "") -> ProfileResult:
+            pass_rule: Callable[[ProfileResult], tuple[bool, str]] | None = None, tag: str = "",
+            concentrate_weighting: np.ndarray | None = None) -> ProfileResult:
     """profile(problem, theta0, axes, ...) -> ProfileResult over the product grid of ``axes``.
 
     ``theta0`` (default the layout's starts) gives every parameter no axis touches. ``weighting`` is the
@@ -752,7 +754,9 @@ def profile(problem: Problem, theta0: np.ndarray | None, axes: Sequence[Axis], *
     ``concentrate=True`` re-optimises every free parameter that no axis touches and that is not in
     ``hold``, minimising ``q_<objective>`` with ``optimizer.minimize`` (``optimizer_options``, default
     ``OptimizerOptions(max_iterations=200, record_cue=False)``); the point's ``convergence`` is the
-    optimizer's class and its theta the optimum.
+    optimizer's class and its theta the optimum. ``concentrate_weighting`` (fixed objective only) is the W
+    the concentrated parameters minimise, when it differs from the reported ``q_fixed`` weighting, e.g.
+    a W that up-weights the moments that exactly identify the concentrated parameters.
 
     ``cold=True`` evaluates every point from the problem state at the start of the profile (via
     ``state_dict`` / ``load_state_dict``), so points do not depend on each other and may run in
@@ -798,7 +802,8 @@ def profile(problem: Problem, theta0: np.ndarray | None, axes: Sequence[Axis], *
     fixed_names = touched + [h for h in hold if h not in touched]
     s = _Setup(names=names, index=index, theta0=theta0, axes=axes, fixed_names=fixed_names, W=W, modes=modes,
                concentrate=concentrate, objective=objective, cold=cold, economics=economics,
-               optimizer_options=optimizer_options)
+               optimizer_options=optimizer_options,
+               W_concentrate=None if concentrate_weighting is None else np.array(concentrate_weighting, dtype=float))
 
     shape = tuple(len(a.values) for a in axes)
     grid = list(itertools.product(*[range(k) for k in shape]))

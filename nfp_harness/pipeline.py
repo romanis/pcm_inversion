@@ -228,7 +228,9 @@ class Pipeline:
         try:
             theta0 = prefit_layout.starts()
             W1 = self._saved_weight("prefit_W1", lambda: problem.initial_weighting(theta0))
-            res = minimize(problem, Fixed(W1), self._options(stage="prefit", theta0=theta0,
+            hook = getattr(self.spec, "concentrate_weighting", None)
+            W_pre = W1 if hook is None else hook(problem, W1)
+            res = minimize(problem, Fixed(W_pre), self._options(stage="prefit", theta0=theta0,
                                                                max_iterations=self.spec.prefit_max_iterations),
                            checkpoint=self.rd)
             self.report(problem, res, "prefit")
@@ -270,6 +272,9 @@ class Pipeline:
             try:
                 self._warm(problem, "prefit")  # W1 needs one evaluation at the prefit point; the points start cold
                 W1 = problem.initial_weighting(theta)
+                hook = getattr(self.spec, "concentrate_weighting", None)
+                if kw.get("concentrate") and hook is not None:
+                    kw["concentrate_weighting"] = hook(problem, W1)
                 res = ray_profile(problem, theta, kw.pop("direction"), kw.pop("lambdas"), kw.pop("grid", None),
                                   weighting=W1, run_dir=out / f"profile_{name}", tag=name, workers=self.cfg.workers,
                                   problem_factory=factory, **kw)
