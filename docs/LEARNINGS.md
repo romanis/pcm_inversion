@@ -801,3 +801,31 @@ elasticity about -25 / sigma_p): the sigma_p_band stage fixes sigma_p at each of
 3.0 and estimates everything else on Sargan + micro + supply with no margin row. At the gate, the
 median margin is 0.16 at sigma_p 2, 0.21 at 2.5 and 0.27 at 3, so 2.75 is close to Petrin's BLP
 median margin of 0.24, and the band reports the margin each sigma_p implies.
+
+## 28. sigma_p band at 16,384 draws: elasticities and margins reach BLP's level at sigma_p 2.5, but consumer surplus explodes with sigma_p (2026-11-17)
+
+Run petrin_pcm_8cdfbfe173, stage sigma_p_band, Sargan + micro + supply, sigma_p fixed, all other
+nonlinear parameters free, step 1 only (no point converged, so step 2 never ran).
+
+| sigma_p | class | q | own elasticity | margin | minivan diversion to haulers | 1984 minivan CS gain, fixed / Nash ($M) |
+|---|---|---|---|---|---|---|
+| 1.5 | FLAT_PROGRESS | 108.3 | -16.6 | 0.11 | 0.50 | 1,309 / 984 |
+| 2.0 | FLAT_PROGRESS | 115.5 | -14.3 | 0.14 | 0.56 | 2,312 / 4,133 |
+| 2.5 | FLAT_PROGRESS | 138.5 | -7.7 | 0.24 | 0.45 | 9,854 / 8,895 |
+| 2.75 | FLAT_PROGRESS | 154.2 | -6.5 | 0.29 | 0.45 | 17,166 / 25,903 |
+| 3.0 | FLAT_PROGRESS | 148.6 | -6.5 | 0.29 | 0.50 | 31,748 / 30,458 |
+| BLP micro | converged | | -4.5 | 0.24 | 0.14 | 381 / 426 |
+
+The Nash re-solve reported a singular Jacobian at every point, so the Nash column is unreliable.
+
+**Reading.** Substitution is the PCM's: about half of minivan diversion goes to other haulers, against
+14% in BLP. At sigma_p 2.5 the median margin equals BLP's and the own elasticity is -7.7. But the CS
+gain grows with sigma_p by a factor of 24 from 1.5 to 3.0. CS in dollars is utility over alpha, and
+under a lognormal, E[1/alpha] = exp(sigma_p^2 / 2) grows from 3.1 to 90 over this range. The surplus is
+then carried by a thin tail of nearly price-insensitive buyers whose willingness to pay is unbounded.
+The fit (q) is best at sigma_p 1.5, where the margin is 0.11, below BLP's.
+
+**Consequence.** The unbounded lognormal tail of 1/alpha makes the welfare counterfactual
+uninformative at the sigma_p the margins need. The price-sensitivity distribution needs bounded
+support (for example a truncated lognormal or a finite mixture), which the PCM kernel would have to
+integrate in closed form per alpha segment.
