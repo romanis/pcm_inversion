@@ -829,3 +829,49 @@ The fit (q) is best at sigma_p 1.5, where the margin is 0.11, below BLP's.
 uninformative at the sigma_p the margins need. The price-sensitivity distribution needs bounded
 support (for example a truncated lognormal or a finite mixture), which the PCM kernel would have to
 integrate in closed form per alpha segment.
+
+## 29. Economist review round 4: bound price sensitivity from below; fixed-price CS is the headline, Nash by bounded best responses (2026-11-17)
+
+Fourth review by the economist agent (claude-fable-5.1), with an independent Python integration of
+the 1984 counterfactual.
+
+**The CS explosion is the 1/alpha tail and nothing else.** The kernel's 1984 gain ($113.5 per
+household at sigma_p 2.5) is reproduced to four digits by an independent integration, and the band
+gains track E[1/a] = exp(sigma_p^2 / 2). At sigma_p 2.5, 6% of minivan buyers (alpha below 0.003)
+carry 79% of the gain, gain per buyer scales as 1/alpha over five decades, and the mean is $748k per
+buyer. Truncating a quantile does not fix it: cutting the lowest 10% of a still leaves $1.07B.
+
+**Bounded distribution.** alpha_i = c_i a_i with a_i lognormal truncated below at a_lo,i = alpha_lo /
+c_i; the median normalisation stays on the untruncated parent (a primitive, entry 11); the upper
+tail stays unbounded (those consumers never buy). Point masses are rejected: they make shares step
+functions of delta. Closed forms: F_T(e) = (Phi(z(e)) - Phi(z_lo)) / Z for e > a_lo, with Z = 1 -
+Phi(z_lo); f_T, dF_T / d sigma_p and a new phi term through a_lo; truncated E[1/a] for CS; the
+frontier lift uses the hull of (p, dc - a_lo p).
+
+**Choosing alpha_lo.** Under Petrin's alpha = pi / income on the 1984 CEX (income winsorised to
+[1, 150]), alpha relative to the low-group median has minimum 0.235, 1st percentile 0.415, median
+0.95. Main value alpha_lo = 0.2, robustness 0.1 and 0.4. Price-range check: at alpha_lo = 0.2 the most
+quality-loving consumer values the 1984 delta span ($21k in median-consumer dollars) at $105k, twice
+the price range; at alpha 1e-4 it would be $210M. Expected 1984 gain after re-inversion about $0.3B
+(BLP $381M).
+
+**Elasticity law under the bound.** Own elasticity becomes about -25 / (sigma_p Z) with Z the retained
+mass (0.47 to 0.80 across groups), so the margin-0.24 point moves to sigma_p of about 3 to 3.5 with no
+welfare cost. The bound also closes the phi_high route of entry 24's slide.
+
+**Nash re-solve.** The observed and fixed-price systems are well conditioned (rcond 4.6e-5). Newton
+trial steps of several $1,000 (markup-map slopes up to 7 per $1) price products off every frontier,
+giving exactly zero shares and a zero row. A damped zeta map with a 2% cap fails the same way; the
+best-response map has slopes above one, so no fixed-point scheme converges, and with finite draws and
+$10 gaps a pure-strategy equilibrium near observed prices may not exist. Headline: fixed-price CS.
+Beside it, a "bounded Nash" from Gauss-Seidel best responses, each firm searching its own prices in a
++-10% box on the continuous profit function, with a deviation check and the CS range if it cycles.
+
+**FLAT_PROGRESS was noise-converged.** Each band point descended fast for 10 to 17 iterations, then
+rejections at radii 0.03 to 0.1 collapsed the trust region and 25 to 30 accepted steps each lowered
+q by about the noise floor (0.0028), moving theta by under 0.02. The projected gradient and the
+Gauss-Newton predicted decrease are not convergence statistics on this ridge. Fix: More scaling of
+the trust region, no shrink on sub-noise rejections, CONVERGED_NOISE when the predicted decrease is
+below 10x the noise floor, and a terminal probe.
+
+Full analysis kept locally at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v4.keep.md.
