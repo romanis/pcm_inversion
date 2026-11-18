@@ -452,39 +452,81 @@ def test_recovers_true_theta(medium: dict[str, Any]) -> None:
     prob.model.close()
 
 
-def test_bound_parameter_alpha_lo(small: dict[str, Any]) -> None:
-    """A fixed role-bound parameter alpha_lo (LEARNINGS 29): at 0 the model equals the layout without it, at a
-    positive value the kernel truncates a_i below at alpha_lo / c_i; its D column is zero and it is refused when
-    free."""
+@pytest.mark.parametrize("kind", ["a", "alpha"])
+def test_bound_parameter(small: dict[str, Any], kind: str) -> None:
+    """A fixed role-bound parameter a_lo (LEARNINGS 29, 32): at 0 the model equals the layout without it, at a
+    positive value the kernel truncates a_i below at a_lo (``bound_kind`` "a", the default) or at alpha_lo / c_i
+    ("alpha"); its D column is zero and it is refused when free. A state written with the old key alpha_lo loads."""
     base = synthetic_layout()
+    spec = PCMSpec(CHARS, bound_kind=kind)
+    kw = "a_lo" if kind == "a" else "alpha_lo"
 
     def with_bound(a: float, free: bool = False) -> ParameterLayout:
-        return ParameterLayout(list(base.specs) + [ParameterSpec("alpha_lo", "bound", None, None, a, a, a, unit=0.1,
+        return ParameterLayout(list(base.specs) + [ParameterSpec("a_lo", "bound", None, None, a, a, a, unit=0.1,
                                                                  free=free)])
 
-    m0 = PCMModel(PCMSpec(CHARS), small["data"], base, small["nu"], small["seed"], total_threads=2)
+    m0 = PCMModel(spec, small["data"], base, small["nu"], small["seed"], total_threads=2)
     s0 = m0.solve(THETA_TRUE, KernelRequests(), True)
-    mz = PCMModel(PCMSpec(CHARS), small["data"], with_bound(0.0), small["nu"], small["seed"], total_threads=2)
+    mz = PCMModel(spec, small["data"], with_bound(0.0), small["nu"], small["seed"], total_threads=2)
     sz = mz.solve(np.r_[THETA_TRUE, 0.0], KernelRequests(), True)
     assert s0.status is EvalStatus.OK and sz.status is EvalStatus.OK
     np.testing.assert_array_equal(s0.delta, sz.delta)
     for a, b in zip(s0.D, sz.D):
         np.testing.assert_array_equal(a, b[:, :-1])
         assert np.all(b[:, -1] == 0.0)
-    mb = PCMModel(PCMSpec(CHARS), small["data"], with_bound(0.3), small["nu"], small["seed"], total_threads=2)
-    assert mb.alpha_lo(np.r_[THETA_TRUE, 0.3]) == 0.3 and mb.bound_columns == (5,)
-    sb = mb.solve(np.r_[THETA_TRUE, 0.3], KernelRequests(), True)
+    mb = PCMModel(spec, small["data"], with_bound(0.3), small["nu"], small["seed"], total_threads=2)
+    theta_b = np.r_[THETA_TRUE, 0.3]
+    assert mb.a_lo(theta_b) == 0.3 and mb.bound_columns == (5,) and mb.kernel_kwargs(theta_b) == {kw: 0.3}
+    sb = mb.solve(theta_b, KernelRequests(), True)
     assert sb.status is EvalStatus.OK
     assert np.max(np.abs(sb.delta - s0.delta)) > 1e-3   # the bound moves the inverted delta
-    # the kernel's own answer at the same delta: shares match the data at alpha_lo = 0.3
+    # the kernel's own answer at the same delta: shares match the data under the bound
     t = 0
     km, rows = mb.kernel_market(t), mb.markets[t].rows
-    th, ph, sp = mb.kernel_params(np.r_[THETA_TRUE, 0.3])
-    s = pcm_kernel.evaluate_market(sb.delta[rows], km, th, ph, sp, derivatives=False, alpha_lo=0.3)["s"]
+    th, ph, sp = mb.kernel_params(theta_b)
+    s = pcm_kernel.evaluate_market(sb.delta[rows], km, th, ph, sp, derivatives=False, **{kw: 0.3})["s"]
     np.testing.assert_allclose(s, np.asarray(small["data"]["products"]["shares"])[rows], atol=1e-9)
     st = mb.state_dict()
-    assert np.all(st["alpha_lo"] == 0.0)   # nothing accepted yet
+    assert np.all(st["a_lo"] == 0.0)   # nothing accepted yet
+    mb.commit(theta_b)
+    st = mb.state_dict()
+    assert np.all(st["a_lo"] == 0.3)
+    old = {k: v for k, v in st.items() if k != "a_lo"}
+    old["alpha_lo"] = st["a_lo"]
+    mb.load_state_dict(old)
+    assert mb.state_dict()["a_lo"].tolist() == st["a_lo"].tolist()
     with pytest.raises(ValueError):
-        PCMModel(PCMSpec(CHARS), small["data"], with_bound(0.3, free=True), small["nu"], small["seed"])
+        PCMModel(spec, small["data"], with_bound(0.3, free=True), small["nu"], small["seed"])
+    with pytest.raises(ValueError):
+        PCMModel(PCMSpec(CHARS, bound_kind="b"), small["data"], base, small["nu"], small["seed"])
     for m in (m0, mz, mb):
+        m.close()
+
+
+def test_a_bound_moves_with_the_price_scale(small: dict[str, Any]) -> None:
+    """Under the bound on a_i the truncation point of alpha_i is a_lo c_i, so the two kinds differ when the layout has
+    scale parameters, and the a-kind phi derivative carries no term through the bound (matches central differences of
+    the inverted delta)."""
+    base = synthetic_layout()
+    lay = ParameterLayout(list(base.specs) + [ParameterSpec("a_lo", "bound", None, None, 0.3, 0.3, 0.3, unit=0.1,
+                                                            free=False)])
+    theta = np.r_[THETA_TRUE, 0.3]
+    ma = PCMModel(PCMSpec(CHARS, bound_kind="a"), small["data"], lay, small["nu"], small["seed"], total_threads=2)
+    ml = PCMModel(PCMSpec(CHARS, bound_kind="alpha"), small["data"], lay, small["nu"], small["seed"], total_threads=2)
+    sa, sl = ma.solve(theta, KernelRequests(), True), ml.solve(theta, KernelRequests(), True)
+    assert sa.status is EvalStatus.OK and sl.status is EvalStatus.OK
+    scale = [k for k, sp in enumerate(lay.specs) if sp.role == "scale"]
+    assert scale, "the synthetic layout has a price-scale parameter"
+    assert np.max(np.abs(sa.delta - sl.delta)) > 1e-6
+    k = scale[0]
+    h = 1e-5
+    tp, tm = theta.copy(), theta.copy()
+    tp[k] += h
+    tm[k] -= h
+    dp, dm = ma.solve(tp, KernelRequests(), False).delta, ma.solve(tm, KernelRequests(), False).delta
+    fd = (dp - dm) / (2 * h)
+    D = np.concatenate([np.asarray(d)[:, k] for d in sa.D])
+    rows = np.concatenate([m.rows for m in ma.markets])
+    np.testing.assert_allclose(D, fd[rows], rtol=1e-4, atol=1e-6)
+    for m in (ma, ml):
         m.close()

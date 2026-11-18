@@ -245,7 +245,7 @@ def _petrin_module() -> Any:
 
 def _gate_theta(names: list[str], start: np.ndarray) -> np.ndarray | None:
     """theta at the nu-4 gate minimum (lambda = 1, lowest q_fixed), read-only; layout starts for parameters the gate
-    does not carry (alpha_lo). ``NFP_PETRIN_GATE`` overrides the profile.csv path."""
+    does not carry (a_lo). ``NFP_PETRIN_GATE`` overrides the profile.csv path."""
     path = pathlib.Path(os.environ.get("NFP_PETRIN_GATE", ROOT / "petrin_replication" / "results" / "harness" /
                                        "petrin_pcm_9367ef1cc1" / "gate" / "profile_sigma_ray" / "profile.csv"))
     if not path.exists():

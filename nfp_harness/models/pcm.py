@@ -6,13 +6,15 @@ characteristics model
     u_ij = delta_j + x_j . t_i - c_i a_i p_j,   u_i0 = 0,
     t_i = sum_m theta_m basis_m(i) e_{column(m)},   log c_i = phi . scale_basis_i,   a_i ~ LogNormal(0, sigma_p),
 
-with a_i truncated below at alpha_lo / c_i when the layout has a bound (LEARNINGS 29).
+with a_i truncated below when the layout has a bound: at a_lo for every draw (``PCMSpec.bound_kind = "a"``, the
+default, LEARNINGS 32), so alpha_i >= a_lo c_i, or at alpha_lo / c_i (``"alpha"``, LEARNINGS 29), so alpha_i >=
+alpha_lo.
 
 Parameters come from the ``ParameterLayout``: role ``"taste"`` (``column`` is a characteristic,
 ``basis`` an agent column for a demographic interaction, any other name for a standard normal taste
 draw, None for 1), role ``"scale"`` (``basis`` is an agent column), exactly one ``"sigma_p"`` and at most
-one ``"bound"``: the lower bound alpha_lo on alpha_i = c_i a_i, a fixed parameter (``free=False``; it is
-never estimated, its column of ``D`` and of the micro ``d_theta`` is zero). The layout order is free; the
+one ``"bound"``: the lower bound a_lo on a_i (or alpha_lo on alpha_i = c_i a_i, by ``PCMSpec.bound_kind``), a
+fixed parameter (``free=False``; it is never estimated, its column of ``D`` and of the micro ``d_theta`` is zero). The layout order is free; the
 kernel order [taste, scale, sigma_p] is mapped internally, so ``D`` and the micro ``d_theta`` are returned
 in layout order.
 
@@ -113,7 +115,8 @@ class PCMSpec:
     ``trial_cold_evals`` is the cold-stage budget of a market that has an accepted warm start (trial points
     after the first evaluation); None uses ``cold_evals``. A trial point whose warm stage and theta path
     both fail is usually one the optimizer rejects anyway, and a 40,000-evaluation cold stage there can
-    take longer than a whole accepted step.
+    take longer than a whole accepted step. ``bound_kind`` says what the layout's bound parameter bounds: ``"a"``
+    the unobserved factor a_i (kernel keyword ``a_lo``) or ``"alpha"`` alpha_i itself (kernel keyword ``alpha_lo``).
     """
 
     characteristics: tuple[str, ...]
@@ -131,6 +134,7 @@ class PCMSpec:
     track_realised_mass: bool = True
     max_step_tau: float = 2.0
     trial_cold_evals: int | None = None
+    bound_kind: str = "a"
 
     @classmethod
     def coerce(cls, spec: Any) -> PCMSpec:
@@ -174,7 +178,7 @@ class _State:
     delta: np.ndarray
     theta: np.ndarray  # stacked [taste, scale, sigma_p]
     signature: np.ndarray | None = None  # frontier signature at (delta, theta), computed on demand
-    alpha_lo: float = 0.0  # the bound the state was solved under
+    a_lo: float = 0.0  # the bound the state was solved under (of the model's bound_kind)
 
 
 @dataclass(eq=False)
@@ -248,11 +252,15 @@ class PCMModel:
         if len(sigp) != 1:
             raise ValueError(f"PCM needs exactly one sigma_p parameter, got {len(sigp)}")
         if len(bound) > 1:
-            raise ValueError(f"PCM takes at most one bound (alpha_lo) parameter, got {len(bound)}")
+            raise ValueError(f"PCM takes at most one bound (a_lo) parameter, got {len(bound)}")
         for k in bound:
             if specs[k].free or specs[k].lower < 0:
-                raise ValueError(f"{specs[k].name}: the bound alpha_lo is a fixed, non-negative parameter "
+                raise ValueError(f"{specs[k].name}: the bound a_lo is a fixed, non-negative parameter "
                                  f"(free=False, lower >= 0)")
+        if sp.bound_kind not in ("a", "alpha"):
+            raise ValueError(f"PCMSpec.bound_kind must be 'a' or 'alpha', got {sp.bound_kind!r}")
+        #: what the bound parameter bounds: "a" (a_i, kernel keyword a_lo) or "alpha" (alpha_i, keyword alpha_lo)
+        self.bound_kind = sp.bound_kind
         self._taste, self._scale, self._sigp = taste, scale, sigp[0]
         self._bound: int | None = bound[0] if bound else None
         #: layout columns the kernel does not differentiate (the bound): zero in D and the micro d_theta
@@ -367,15 +375,27 @@ class PCMModel:
         theta = np.asarray(theta, dtype=float).ravel()
         return theta[self._taste].copy(), theta[self._scale].copy(), float(theta[self._sigp])
 
-    def alpha_lo(self, theta: np.ndarray) -> float:
-        """alpha_lo(theta) -> the lower bound on alpha_i of a layout-order theta (0 without a bound parameter)."""
+    def a_lo(self, theta: np.ndarray) -> float:
+        """a_lo(theta) -> the bound parameter's value at a layout-order theta (0 without a bound parameter): the
+        lower bound on a_i under ``bound_kind`` "a", on alpha_i under "alpha"."""
         if self._bound is None:
             return 0.0
         return float(np.asarray(theta, dtype=float).ravel()[self._bound])
 
+    def bound_kwargs(self, value: float) -> dict[str, float]:
+        """The kernel keyword for a bound of ``value``: ``{"a_lo": value}`` or ``{"alpha_lo": value}``."""
+        return {"a_lo" if self.bound_kind == "a" else "alpha_lo": float(value)}
+
+    def draw_a_lo(self, theta: np.ndarray, c: np.ndarray) -> np.ndarray:
+        """(R,) truncation point of a_i for draws with price scales ``c``: a_lo, or alpha_lo / c_i."""
+        v = self.a_lo(theta)
+        c = np.asarray(c, dtype=float)
+        return np.full(c.shape, v) if self.bound_kind == "a" else v / c
+
     def kernel_kwargs(self, theta: np.ndarray) -> dict[str, float]:
-        """Keyword arguments every kernel call takes besides (theta, phi, sigma_p): ``{"alpha_lo": ...}``."""
-        return {"alpha_lo": self.alpha_lo(theta)}
+        """Keyword arguments every kernel call takes besides (theta, phi, sigma_p): ``{"a_lo": ...}`` (or
+        ``{"alpha_lo": ...}`` under ``bound_kind`` "alpha")."""
+        return self.bound_kwargs(self.a_lo(theta))
 
     def to_kernel_order(self, v: np.ndarray) -> np.ndarray:
         """Layout-order (P,) vector -> stacked kernel order [taste, scale, sigma_p] (the bound is dropped)."""
@@ -424,9 +444,9 @@ class PCMModel:
     # ---------------------------------------------------------------- solve
 
     def _solve_one(self, m: _Market, th: np.ndarray, ph: np.ndarray, sp: float, parts: tuple[MicroPartRequest, ...],
-                   need_jacobian: bool, price_derivatives: bool, n_threads: int, alpha_lo: float) -> dict[str, Any]:
+                   need_jacobian: bool, price_derivatives: bool, n_threads: int, a_lo: float) -> dict[str, Any]:
         acc = self._accepted[m.t]
-        if acc is not None and acc.alpha_lo != alpha_lo:
+        if acc is not None and acc.a_lo != a_lo:
             acc = None   # a warm start solved under another bound is not a warm start
         micro = self._micro_for(m, parts)[0] if parts else None
         s = self.spec
@@ -436,7 +456,7 @@ class PCMModel:
             None if acc is None else acc.delta, None if acc is None else acc.theta, micro,
             tol=s.tol, warm_evals=s.warm_evals, cold_evals=int(cold), path_evals=s.path_evals,
             path_seconds=s.path_seconds, n_threads=int(n_threads), derivatives=bool(need_jacobian),
-            price_derivatives=bool(price_derivatives), rcond_min=s.rcond_min, alpha_lo=float(alpha_lo))
+            price_derivatives=bool(price_derivatives), rcond_min=s.rcond_min, **self.bound_kwargs(a_lo))
 
     def solve(self, theta: np.ndarray, requests: KernelRequests, need_jacobian: bool) -> InnerSolution:
         """solve(theta, requests, need_jacobian) -> InnerSolution. Never raises for model failures."""
@@ -448,7 +468,7 @@ class PCMModel:
         if theta.shape != (self.P,):
             raise ValueError(f"theta has shape {theta.shape}, expected ({self.P},)")
         th, ph, sp = self.kernel_params(theta)
-        al = self.alpha_lo(theta)
+        al = self.a_lo(theta)
         stacked = self.to_kernel_order(theta)
         parts = tuple(requests.micro_parts)
         threads = allocate_threads(self._weights, self.total_threads)
@@ -504,7 +524,7 @@ class PCMModel:
                     })
             if requests.price_derivatives:
                 ds_dp.append(np.asarray(r["ds_dp"]))
-            self._trial[m.t] = (_State(delta=np.array(r["delta"], dtype=float), theta=stacked.copy(), alpha_lo=al)
+            self._trial[m.t] = (_State(delta=np.array(r["delta"], dtype=float), theta=stacked.copy(), a_lo=al)
                                 if st is EvalStatus.OK else None)
 
         self._weights = 0.5 * self._weights + 0.5 * cpu if self._measured else cpu
@@ -535,7 +555,7 @@ class PCMModel:
         if state.signature is None:
             th, ph, sp = self._split_stacked(state.theta)
             state.signature = np.asarray(self._k.frontier_signature(state.delta, m.kernel, th, ph, sp, n_threads,
-                                                                    alpha_lo=state.alpha_lo))
+                                                                    **self.bound_kwargs(state.a_lo)))
         return state.signature
 
     def _split_stacked(self, stacked: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
@@ -550,7 +570,7 @@ class PCMModel:
             return 0.0
         th, ph, sp = self._split_stacked(acc.theta)
         A = np.asarray(self._k.affected_mass(acc.delta, m.kernel, th, ph, sp, changed, n_threads,
-                                             alpha_lo=acc.alpha_lo))
+                                             **self.bound_kwargs(acc.a_lo)))
         return float(A.max()) if A.size else 0.0
 
     def _realised_mass(self) -> float | None:
@@ -568,8 +588,8 @@ class PCMModel:
         """
         with self._lock:
             stacked = self.to_kernel_order(np.asarray(theta, dtype=float).ravel())
-            al = self.alpha_lo(theta)
-            if any(t is None or not np.array_equal(t.theta, stacked) or t.alpha_lo != al for t in self._trial):
+            al = self.a_lo(theta)
+            if any(t is None or not np.array_equal(t.theta, stacked) or t.a_lo != al for t in self._trial):
                 return float("nan")
             mass = self._realised_mass()
             return float("nan") if mass is None else mass
@@ -630,10 +650,10 @@ class PCMModel:
         """commit(theta): promote the trial state solved at theta to the accepted state."""
         with self._lock:
             stacked = self.to_kernel_order(np.asarray(theta, dtype=float).ravel())
-            al = self.alpha_lo(theta)
+            al = self.a_lo(theta)
             promoted = 0
             for t, tri in enumerate(self._trial):
-                if tri is not None and np.array_equal(tri.theta, stacked) and tri.alpha_lo == al:
+                if tri is not None and np.array_equal(tri.theta, stacked) and tri.a_lo == al:
                     self._accepted[t] = tri
                     promoted += 1
             if promoted < self.T:
@@ -657,11 +677,12 @@ class PCMModel:
         return out
 
     def state_dict(self) -> dict[str, Any]:
-        """state_dict() -> per-market accepted delta, theta (kernel order) and alpha_lo, thread allocation weights."""
+        """state_dict() -> per-market accepted delta, theta (kernel order) and the bound a_lo it was solved under,
+        thread allocation weights."""
         with self._lock:
             return {
                 "version": 1,
-                "alpha_lo": np.array([0.0 if a is None else a.alpha_lo for a in self._accepted]),
+                "a_lo": np.array([0.0 if a is None else a.a_lo for a in self._accepted]),
                 "market_ids": [str(m.market_id) for m in self._mk],
                 "has_accepted": np.array([a is not None for a in self._accepted], dtype=bool),
                 "delta": [np.zeros(0) if a is None else a.delta.copy() for a in self._accepted],
@@ -671,13 +692,14 @@ class PCMModel:
             }
 
     def load_state_dict(self, d: dict[str, Any]) -> None:
-        """load_state_dict(d): restore what ``state_dict`` wrote. Refuses a state from other markets."""
+        """load_state_dict(d): restore what ``state_dict`` wrote (also a state written with the old key
+        ``alpha_lo`` for the bound). Refuses a state from other markets."""
         with self._lock:
             ids = [str(x) for x in d["market_ids"]]
             if ids != [str(m.market_id) for m in self._mk]:
                 raise ValueError(f"state is for markets {ids}, model has {[str(m.market_id) for m in self._mk]}")
             has = np.asarray(d["has_accepted"], dtype=bool).ravel()
-            als = np.asarray(d.get("alpha_lo", np.zeros(self.T)), dtype=float).ravel()
+            als = np.asarray(d["a_lo"] if "a_lo" in d else d.get("alpha_lo", np.zeros(self.T)), dtype=float).ravel()
             accepted: list[_State | None] = []
             for m, h, dl, th, al in zip(self._mk, has, d["delta"], d["theta"], als):
                 if not h:
@@ -687,7 +709,7 @@ class PCMModel:
                 if dl.shape != (m.J,) or th.shape != (self.P_kernel,):
                     raise ValueError(f"market {m.market_id}: stored delta {dl.shape} / theta {th.shape} do not fit "
                                      f"({m.J} products, {self.P_kernel} kernel parameters)")
-                accepted.append(_State(delta=dl.copy(), theta=th.copy(), alpha_lo=float(al)))
+                accepted.append(_State(delta=dl.copy(), theta=th.copy(), a_lo=float(al)))
             self._accepted = accepted
             self._trial = [None] * self.T
             w = np.asarray(d.get("thread_weights", self._weights), dtype=float).ravel()

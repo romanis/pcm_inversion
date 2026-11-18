@@ -40,7 +40,7 @@ __all__ = [
     "inside_share", "inside_share_elasticity", "group_labels", "firm_labels", "market_position",
     "market_post", "postestimation", "consumer_surplus", "draw_price_scale", "alpha_quintiles",
     "demographic_labels", "cs_by_group", "spread_in_buyer_dollars", "drop_products_counterfactual",
-    "quality_dispersion", "relative_quality_dispersion", "best_response_box",
+    "quality_dispersion", "relative_quality_dispersion", "best_response_box", "window_anatomy",
     "compare_blp",
 ]
 
@@ -267,25 +267,26 @@ def _threads(model: Any, n_threads: int | None) -> int:
     return int(n_threads) if n_threads else max(1, min(int(getattr(model, "total_threads", 1)), 32))
 
 
-def _alpha_lo(model: Any, theta: np.ndarray) -> float:
-    """The model's lower bound on alpha at theta (0 for a model without one)."""
-    fn = getattr(model, "alpha_lo", None)
-    return float(fn(theta)) if callable(fn) else 0.0
+def _bound(model: Any, theta: np.ndarray) -> dict[str, float]:
+    """The model's kernel keyword for its bound at theta (``{"a_lo": v}`` or ``{"alpha_lo": v}``; {} without one)."""
+    fn = getattr(model, "kernel_kwargs", None)
+    return dict(fn(theta)) if callable(fn) else {}
 
 
 def _eval(km: Any, delta: np.ndarray, th: np.ndarray, ph: np.ndarray, sp: float, n_threads: int,
-          price_derivatives: bool = True, alpha_lo: float = 0.0) -> tuple[np.ndarray, np.ndarray | None]:
+          price_derivatives: bool = True, bound: Mapping[str, float] | None = None
+          ) -> tuple[np.ndarray, np.ndarray | None]:
     r = _k().evaluate_market(np.asarray(delta, dtype=float), km, th, ph, sp, derivatives=False,
-                             price_derivatives=price_derivatives, n_threads=n_threads, alpha_lo=float(alpha_lo))
+                             price_derivatives=price_derivatives, n_threads=n_threads, **dict(bound or {}))
     return np.asarray(r["s"]), (np.asarray(r["ds_dp"]) if price_derivatives else None)
 
 
 def _cs(km: Any, delta: np.ndarray, th: np.ndarray, ph: np.ndarray, sp: float, n_threads: int,
-        alpha_lo: float = 0.0) -> dict[str, Any]:
+        bound: Mapping[str, float] | None = None) -> dict[str, Any]:
     if np.size(delta) == 0:
         w = np.asarray(km.weights)
         return {"total": 0.0, "per_draw": np.zeros(w.size)}
-    r = _k().consumer_surplus(np.asarray(delta, dtype=float), km, th, ph, sp, n_threads, alpha_lo=float(alpha_lo))
+    r = _k().consumer_surplus(np.asarray(delta, dtype=float), km, th, ph, sp, n_threads, **dict(bound or {}))
     return {"total": float(r["total"]), "per_draw": np.asarray(r["per_draw"])}
 
 
@@ -310,7 +311,7 @@ def market_post(model: Any, theta: np.ndarray, delta: np.ndarray, t: int, *, fir
     km = model.kernel_market(t)
     p = np.asarray(km.p, dtype=float)
     s, J = _eval(km, np.asarray(delta, dtype=float)[rows], th, ph, sp, _threads(model, n_threads),
-                 alpha_lo=_alpha_lo(model, theta))
+                 bound=_bound(model, theta))
     assert J is not None
     e = elasticities(s, J, p)
     D = diversion(J)
@@ -431,7 +432,7 @@ def consumer_surplus(model: Any, theta: np.ndarray, delta: np.ndarray, market: A
     th, ph, sp = model.kernel_params(theta)
     km = model.kernel_market(t)
     out = _cs(km, np.asarray(delta, dtype=float)[model.markets[t].rows], th, ph, sp, _threads(model, n_threads),
-              _alpha_lo(model, theta))
+              _bound(model, theta))
     out["weights"] = np.asarray(km.weights)
     return out
 
@@ -514,8 +515,54 @@ def _buyer_terms(lb: np.ndarray, sp: float, l_lo: np.ndarray | None) -> tuple[np
 
 
 def _log_a_lo(model: Any, theta: np.ndarray, c: np.ndarray) -> np.ndarray | None:
-    al = _alpha_lo(model, theta)
-    return np.log(al / c) if al > 0 else None
+    """(R,) log of the truncation point of a_i per draw, None without a bound."""
+    fn = getattr(model, "draw_a_lo", None)
+    a = np.asarray(fn(theta, c), dtype=float) if callable(fn) else np.zeros(np.shape(c))
+    return np.log(a) if np.all(a > 0) and a.size else None
+
+
+def window_anatomy(model: Any, theta: np.ndarray, delta: np.ndarray, markets: Sequence[Any] | None = None,
+                   n_threads: int | None = None) -> dict[str, Any]:
+    """window_anatomy(model, theta, delta, markets=None, n_threads=None) -> the inputs of the bounded elasticity
+    law (LEARNINGS 32), weighted by sales (w_i x the draw's inside share), pooled over ``markets`` (ids; None: all).
+
+    ``frontier_products_per_buying_draw``: products with a window of positive mass; ``log_alpha_range_buyers``:
+    log(e_0 / a_lo,i) with e_0 the cutoff of the draw's cheapest frontier product (inf without a bound);
+    ``window_width_log_alpha``: the sales-weighted width of a product's window in log alpha. ``by_market`` holds
+    the same three per market id. Own elasticity is about (p / hull gap) / window width.
+    """
+    th, ph, sp = model.kernel_params(theta)
+    bound = _bound(model, theta)
+    nt = _threads(model, n_threads)
+    delta = np.asarray(delta, dtype=float)
+    ids = None if markets is None else {str(x) for x in markets}
+    tot = {"wm": 0.0, "n": 0.0, "range": 0.0, "width": 0.0}
+    by_market: dict[str, dict[str, float]] = {}
+    for t, m in enumerate(model.markets):
+        if ids is not None and str(m.market_id) not in ids:
+            continue
+        km = model.kernel_market(t)
+        r = _k().frontier_anatomy(delta[np.asarray(m.rows)], km, th, ph, sp, nt, **bound)
+        w = np.asarray(km.weights, dtype=float)
+        wm = w * np.asarray(r["mass"])
+        buy = wm > 0
+        part = {"wm": float(wm.sum()), "n": float(wm @ np.asarray(r["frontier_size"], dtype=float)),
+                "range": float(wm[buy] @ np.asarray(r["log_range"])[buy]),
+                "width": float(w[buy] @ np.asarray(r["mass_log_width"])[buy])}
+        for k in tot:
+            tot[k] += part[k]
+        by_market[str(m.market_id)] = _anatomy_stats(part)
+    out: dict[str, Any] = dict(_anatomy_stats(tot))
+    out["by_market"] = by_market
+    return out
+
+
+def _anatomy_stats(a: Mapping[str, float]) -> dict[str, float]:
+    d = a["wm"]
+    nan = float("nan")
+    return {"frontier_products_per_buying_draw": a["n"] / d if d > 0 else nan,
+            "log_alpha_range_buyers": a["range"] / d if d > 0 else nan,
+            "window_width_log_alpha": a["width"] / d if d > 0 else nan}
 
 
 def spread_in_buyer_dollars(model: Any, theta: np.ndarray, delta: np.ndarray) -> dict[str, Any]:
@@ -525,7 +572,7 @@ def spread_in_buyer_dollars(model: Any, theta: np.ndarray, delta: np.ndarray) ->
     Draw i buys when ``c_i a < A_i = max_j y_ij / p_j`` with ``y_ij = delta_j + x_j . t_i``. With
     a ~ LogNormal(0, s): ``P(buy_i) = Phi(ln b_i / s)`` and ``E[a; buy_i] = exp(s^2/2) Phi((ln b_i - s^2)/s)``,
     ``b_i = A_i / c_i``. ``mean_alpha_buyers = sum_i w_i c_i E[a; buy_i] / sum_i w_i P(buy_i)`` pooled over
-    markets (truncated at a_lo,i = alpha_lo / c_i under a bound). Returns ``mean_alpha_buyers``, ``inside_share``
+    markets (truncated at a_lo,i, ``model.draw_a_lo``, under a bound). Returns ``mean_alpha_buyers``, ``inside_share``
     (the pooled ``sum w P(buy)`` divided by the
     number of markets, a check against the model shares) and ``spreads``: name -> |sigma| / mean alpha for
     every taste parameter whose basis is a standard normal draw.
@@ -571,7 +618,7 @@ def purchase_probability(model: Any, theta: np.ndarray, delta: np.ndarray, t: in
 
     Draw i buys when ``c_i a < A_i = max_j y_ij / p_j`` with ``y_ij = delta_j + x_j . t_i`` and
     a ~ LogNormal(0, sigma_p), so ``P_i = Phi(ln(A_i / c_i) / sigma_p)`` (0 when A_i <= 0), truncated at
-    alpha_lo / c_i under a bound. The weighted sum over draws is the inside share.
+    a_lo,i (``model.draw_a_lo``) under a bound. The weighted sum over draws is the inside share.
     """
     _, _, sp = model.kernel_params(theta)
     U, f = _taste_utility(model, theta, t)
@@ -815,7 +862,7 @@ def drop_products_counterfactual(model: Any, theta: np.ndarray, delta: np.ndarra
     """
     t = market_position(model, market)
     th, ph, sp = model.kernel_params(theta)
-    al = _alpha_lo(model, theta)
+    al = _bound(model, theta)
     nt = _threads(model, n_threads)
     rows = np.asarray(model.markets[t].rows)
     km = model.kernel_market(t)
@@ -837,7 +884,7 @@ def drop_products_counterfactual(model: Any, theta: np.ndarray, delta: np.ndarra
 
     def scenario(idx: np.ndarray, p: np.ndarray) -> tuple[dict[str, Any], np.ndarray | None]:
         mk = _market_like(f, idx, p)
-        s, J = _eval(mk, d_t[idx], th, ph, sp, nt, alpha_lo=al) if idx.size else (np.zeros(0), np.zeros((0, 0)))
+        s, J = _eval(mk, d_t[idx], th, ph, sp, nt, bound=al) if idx.size else (np.zeros(0), np.zeros((0, 0)))
         cs = _cs(mk, d_t[idx], th, ph, sp, nt, al)
         return ({"rows": rows[idx], "prices": np.asarray(p, dtype=float), "shares": s, "inside_share": float(s.sum()),
                  "cs": cs["total"], "per_draw": cs["per_draw"]}, J)
@@ -875,7 +922,7 @@ def drop_products_counterfactual(model: Any, theta: np.ndarray, delta: np.ndarra
                 if ps.size and ps[0] <= 0:
                     return None
                 s, _ = _eval(_market_like(f, idx, ps), d_t[idx], th, ph, sp, nt, price_derivatives=False,
-                             alpha_lo=al)
+                             bound=al)
                 out_s = np.empty_like(s)
                 out_s[order] = s
                 return out_s

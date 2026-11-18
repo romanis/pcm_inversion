@@ -27,7 +27,7 @@ from .overid import hansen_j
 from .report import block_to_dict, render_text, to_jsonable, validate, write_report
 from .stability import integration_stability, multistart_summary
 
-__all__ = ["DiagnosticInputs", "build_report", "run_diagnostics", "render_text", "validate", "write_report",
+__all__ = ["DiagnosticInputs", "at_bound_parameters", "build_report", "run_diagnostics", "render_text", "validate", "write_report",
            "collinearity", "degeneracies", "identification", "inference", "overid", "report", "stability"]
 
 NOT_INTERPRETED = "not interpreted: objective did not converge"
@@ -106,6 +106,16 @@ def _at_bound(theta: np.ndarray, specs: Sequence[ParameterSpec], units: np.ndarr
     return at_lo, at_hi
 
 
+def at_bound_parameters(theta: np.ndarray, specs: Sequence[ParameterSpec], units: np.ndarray,
+                        tol: float | None = None) -> list[str]:
+    """Names of the free parameters within ``tol`` (default the degeneracy ``bound_tol``, 1e-3) natural units of a
+    layout bound, a cap at its cap excepted: the AT_BOUND flag of the report's convergence block."""
+    tol = float(degeneracies.DEGENERACY_DEFAULTS["bound_tol"] if tol is None else tol)
+    theta = np.asarray(theta, dtype=float)
+    lo, hi = _at_bound(theta, specs, np.asarray(units, dtype=float), tol)
+    return [s.name for i, s in enumerate(specs) if s.free and (lo[i] or (hi[i] and not s.cap))]
+
+
 def build_report(inp: DiagnosticInputs) -> Report:
     """Run every WP6 block on ``inp`` and assemble the ``Report`` of DESIGN 5.10."""
     res = inp.result
@@ -130,6 +140,18 @@ def build_report(inp: DiagnosticInputs) -> Report:
     bound_tol = float(th.get("bound_tol", degeneracies.DEGENERACY_DEFAULTS["bound_tol"]))
     at_lo, at_hi = _at_bound(theta, specs, units, bound_tol)
     cap_active = np.array([s.cap for s in specs], dtype=bool) & at_hi & free
+    # AT_BOUND (ROUND5 5.1 item 4): a free parameter within bound_tol natural units of a layout bound (a cap at its
+    # cap is a stated normalisation, NORMALISATION_CAP_ACTIVE, not this) is a failed estimate, not a result
+    at_bound = free & (at_lo | (at_hi & ~cap_active))
+    conv["at_bound"] = [names[i] for i in np.nonzero(at_bound)[0]]
+    if conv["at_bound"]:
+        what = "; ".join(f"{names[i]} = {theta[i]:.6g} at its {'lower' if at_lo[i] else 'upper'} bound "
+                         f"{specs[i].lower if at_lo[i] else specs[i].upper:g}" for i in np.nonzero(at_bound)[0])
+        conv["messages"] = list(conv["messages"]) + [
+            f"FLAG: AT_BOUND: {what} (within {bound_tol:g} natural units). The objective wants to go past the "
+            f"layout bound, so this point is a failed estimate and must not be reported as a headline."]
+        if conv["status"] == "ok":
+            conv["status"] = "flag"
 
     parts: dict[str, float] = {}
     if g is not None and W is not None:
@@ -232,7 +254,7 @@ def build_report(inp: DiagnosticInputs) -> Report:
     parameters = []
     for i, s in enumerate(specs):
         parameters.append({"name": s.name, "value": float(theta[i]), "unit": float(units[i]), "lower": s.lower,
-                           "upper": s.upper, "cap": s.cap, "at_bound": bool(at_lo[i] or at_hi[i]),
+                           "upper": s.upper, "cap": s.cap, "at_bound": bool(free[i] and (at_lo[i] or at_hi[i])),
                            "free": s.free, "se": se_by_name.get(s.name), "note": s.note})
     linear = []
     beta = np.asarray(inp.beta, dtype=float) if inp.beta is not None else np.full(k_linear, np.nan)

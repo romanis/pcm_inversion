@@ -37,6 +37,12 @@ latest one is also copied to the run directory root):
   every point is in, ``spec.band_finish(pipeline, problem, rows) -> rows`` (optional) labels the headline and
   may add columns (it can rebuild a point's estimate with ``pipeline.band_result``); its rows are checkpointed
   as stage ``band.finish``.
+- ``a_lo_band`` (ROUND5 5.1 item 3): the same procedure over ``spec.a_lo_band_values`` of
+  ``spec.a_lo_band_parameter`` (the bound a_lo, a calibration of the welfare tail), rows from
+  ``spec.a_lo_band_row`` (default ``band_row``) to ``a_lo_band/band.csv``, stages ``aband.<value>.step1|step2|row``,
+  ``spec.a_lo_band_finish`` as ``aband.finish``. A fixed band parameter's bounds widen to the band value.
+  ``--band-values`` runs a subset of a band's values (finish waits for all), ``--band-step1-only`` stops each point
+  after step 1 and its report (``reports/<band>.<value>.step1``).
 - ``margin_band`` (a calibrated markup level, round-3 analysis 5.3): for each m* in ``spec.margin_band_values``
   the problem ``spec.build_problem(..., margin=m*)`` (all nonlinear parameters free), step 1 with W1 from
   ``start_point`` (shared by every point), step 2 with W2 = S^{-1} at the step-1 point when step 1 converged
@@ -99,7 +105,8 @@ __all__ = ["Pipeline", "RunConfig", "StageRefused", "GateFailed", "STAGES", "CHA
 
 log = logging.getLogger("nfp_harness.pipeline")
 
-STAGES = ("prefit", "gate", "extensive", "step1", "step2", "post", "stability", "sigma_p_band", "margin_band")
+STAGES = ("prefit", "gate", "extensive", "step1", "step2", "post", "stability", "sigma_p_band", "a_lo_band",
+          "margin_band")
 CHAIN = ("extensive", "step1", "step2", "post", "stability")
 STABILITY_SEED_OFFSET = 100_000
 STABILITY_ITERATIONS = 20
@@ -122,6 +129,8 @@ class RunConfig:
     workers: int = 4
     gate_nu: int = 4
     outer: str = "nested"   # OptimizerOptions.outer of every stage: "nested" or "mpec" (demand-only problems)
+    band_values: tuple[float, ...] = ()   # run only these values of a band stage (empty: all); results unchanged
+    band_step1_only: bool = False         # band stages stop after each point's step 1 (no step 2, no row)
 
 
 def run_key_options(nu: int, seed: int, extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -597,12 +606,40 @@ class Pipeline:
         return rep
 
     def sigma_p_band(self) -> list[dict[str, Any]]:
-        """The band stage (module docstring). Returns the rows of band.csv."""
+        """The sigma_p band stage (module docstring). Returns the rows of sigma_p_band/band.csv."""
+        return self._band("sigma_p_band")
+
+    def a_lo_band(self) -> list[dict[str, Any]]:
+        """The a_lo band stage (module docstring, ROUND5 5.1 item 3). Returns the rows of a_lo_band/band.csv."""
+        return self._band("a_lo_band")
+
+    # band name -> (spec attribute prefix, checkpoint tag prefix, default parameter)
+    _BANDS = {"sigma_p_band": ("band", "band", "sigma_p"), "a_lo_band": ("a_lo_band", "aband", "a_lo")}
+
+    def _band_fixed(self, layout: Any, par: str, v: float) -> Any:
+        """``layout`` with ``par`` fixed at ``v``; its bounds widen to ``v`` when ``v`` lies outside them (a fixed
+        parameter such as the bound a_lo has lower = upper = its value)."""
+        sp = layout.specs[layout.names.index(par)]
+        ch: dict[str, Any] = {"free": False, "start": v}
+        if not sp.lower <= v <= sp.upper:
+            ch.update(lower=min(sp.lower, v), upper=max(sp.upper, v))
+        return layout.replace({par: ch})
+
+    def _band(self, name: str) -> list[dict[str, Any]]:
         spec = self.spec
-        par = str(getattr(spec, "band_parameter", "sigma_p"))
-        values = [float(v) for v in getattr(spec, "band_values")]
-        moments = str(getattr(spec, "band_moments", "all"))
-        out = self.path / "sigma_p_band"
+        attr, prefix, default_par = self._BANDS[name]
+        par = str(getattr(spec, f"{attr}_parameter", default_par))
+        values = [float(v) for v in getattr(spec, f"{attr}_values")]
+        only = self.cfg.band_values
+        if only:
+            missing = [v for v in only if not any(abs(v - x) < 1e-12 for x in values)]
+            if missing:
+                raise StageRefused(f"{name}: --band-values {missing} are not among the spec's values {values}")
+            values = [x for x in values if any(abs(v - x) < 1e-12 for v in only)]
+        complete = len(values) == len(getattr(spec, f"{attr}_values"))
+        moments = str(getattr(spec, f"{attr}_moments", "all"))
+        row_fn = getattr(spec, f"{attr}_row", None) or spec.band_row
+        out = self.path / name
         out.mkdir(exist_ok=True)
         theta_w = self.prefit()
         problem = self.problem(moments)
@@ -613,12 +650,12 @@ class Pipeline:
         rows: list[dict[str, Any]] = []
         try:
             for v in values:
-                tag = f"band.{v:g}"
+                tag = f"{prefix}.{v:g}"
                 if self.rd.stage_done(f"{tag}.row"):
                     rows.append(dict(json.loads(str(self.rd.load_stage(f"{tag}.row")["row"]))))
                     continue
-                log.info("sigma_p_band: %s = %g", par, v)
-                problem.layout = layout.replace({par: {"free": False, "start": v}})
+                log.info("%s: %s = %g", name, par, v)
+                problem.layout = self._band_fixed(layout, par, v)
                 theta0 = np.array(theta_w, dtype=float)
                 theta0[k] = v
                 if not self.rd.stage_done(f"{tag}.step1"):
@@ -627,6 +664,11 @@ class Pipeline:
                 r1 = minimize(problem, Fixed(W1), self._options(stage=f"{tag}.step1", theta0=theta0,
                                                                   max_iterations=self._limit()), checkpoint=self.rd)
                 res, stage = r1, "step1"
+                if self.cfg.band_step1_only:
+                    log.info("%s: %s = %g, step 1 only (--band-step1-only): %s, q %.10g", name, par, v,
+                             r1.convergence.value, r1.q)
+                    self._band_report(problem, r1, f"{name}.{v:g}.step1")
+                    continue
                 if r1.convergence.converged and r1.evaluation is not None:
                     ev1 = r1.evaluation
 
@@ -643,35 +685,36 @@ class Pipeline:
                                        "step1_convergence": r1.convergence.value, "convergence": res.convergence.value,
                                        "q": float(res.q)}
                 if res.evaluation is not None and res.evaluation.ok:
-                    row.update(spec.band_row(self, problem, res, v))
+                    row.update(row_fn(self, problem, res, v))
                 else:
                     row["note"] = "no successful evaluation at the estimate"
                 rows.append(row)
                 self.rd.save_stage(f"{tag}.row", {"row": json.dumps(to_jsonable(row), allow_nan=False)})
                 self._write_band(out, rows, par)
-            finish = getattr(spec, "band_finish", None)
-            if callable(finish) and len(rows) == len(values):
-                if self.rd.stage_done("band.finish"):
-                    rows = [dict(r) for r in json.loads(str(self.rd.load_stage("band.finish")["rows"]))]
+            finish = getattr(spec, f"{attr}_finish", None)
+            if callable(finish) and complete and len(rows) == len(values):
+                if self.rd.stage_done(f"{prefix}.finish"):
+                    rows = [dict(r) for r in json.loads(str(self.rd.load_stage(f"{prefix}.finish")["rows"]))]
                 else:
                     problem.layout = layout
                     rows = list(finish(self, problem, rows))
-                    self.rd.save_stage("band.finish", {"rows": json.dumps(to_jsonable(rows), allow_nan=False)})
+                    self.rd.save_stage(f"{prefix}.finish", {"rows": json.dumps(to_jsonable(rows), allow_nan=False)})
         finally:
             problem.layout = layout
         self._write_band(out, rows, par)
         return rows
 
-    def band_result(self, problem: Any, value: float) -> tuple[OptimizeResult, str]:
-        """(result, stage) of the finished band point at ``value`` of ``spec.band_parameter``: the stored stage
-        (step2 if it ran, else step1) rebuilt with one evaluation at its endpoint. ``problem.layout`` is left
-        with the band parameter fixed at ``value``; the caller restores it."""
-        par = str(getattr(self.spec, "band_parameter", "sigma_p"))
-        tag = f"band.{float(value):g}"
+    def band_result(self, problem: Any, value: float, name: str = "sigma_p_band") -> tuple[OptimizeResult, str]:
+        """(result, stage) of the finished point at ``value`` of band ``name`` (``sigma_p_band`` or ``a_lo_band``):
+        the stored stage (step2 if it ran, else step1) rebuilt with one evaluation at its endpoint.
+        ``problem.layout`` is left with the band parameter fixed at ``value``; the caller restores it."""
+        attr, prefix, default_par = self._BANDS[name]
+        par = str(getattr(self.spec, f"{attr}_parameter", default_par))
+        tag = f"{prefix}.{float(value):g}"
         stage = "step2" if self.rd.stage_done(f"{tag}.step2") else "step1"
         if not self.rd.stage_done(f"{tag}.{stage}"):
             raise StageRefused(f"band point {par} = {value:g} has not finished")
-        problem.layout = problem.layout.replace({par: {"free": False, "start": float(value)}})
+        problem.layout = self._band_fixed(problem.layout, par, float(value))
         W = np.asarray(self._stage_state(f"{tag}.{stage}")["W"], dtype=float)
         res = minimize(problem, Fixed(W), self._options(stage=f"{tag}.{stage}"), checkpoint=self.rd)
         return res, stage
@@ -814,6 +857,11 @@ def _parser(default_nu: int, default_base: pathlib.Path, spec: Any = None) -> ar
             p.add_argument("--workers", type=int, default=4, help="parallel profile points in the gate")
             p.add_argument("--detach", action="store_true", help="re-execute in a new session, output to log.txt")
             p.add_argument("--new-run", action="store_true", help="archive the run directory and start over")
+            p.add_argument("--band-values", default=None,
+                           help="comma-separated subset of a band stage's values to run (default all); the run "
+                                "directory is the same, so the remaining points can run later")
+            p.add_argument("--band-step1-only", action="store_true",
+                           help="band stages: run step 1 of each point and its report, no step 2 and no band row")
         add = getattr(spec, "add_arguments", None)
         if callable(add):
             add(p)
@@ -835,7 +883,10 @@ def main(spec: Any, argv: Sequence[str] | None = None, default_nu: int = 16,
         return 0
 
     cfg = RunConfig(base=cfg_base, nu=args.nu, seed=args.seed, threads=args.threads, workers=args.workers,
-                    gate_nu=args.gate_nu, outer=str(getattr(args, "outer", None) or "nested"))
+                    gate_nu=args.gate_nu, outer=str(getattr(args, "outer", None) or "nested"),
+                    band_values=tuple(float(x) for x in str(args.band_values).split(",") if x.strip())
+                    if getattr(args, "band_values", None) else (),
+                    band_step1_only=bool(getattr(args, "band_step1_only", False)))
     path = run_dir_path(cfg_base, spec, cfg.nu, cfg.seed)
     st = runtime.status(path)
     if st.get("alive") and int(st.get("pid", -1)) != os.getpid():

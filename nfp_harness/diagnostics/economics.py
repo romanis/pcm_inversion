@@ -26,6 +26,10 @@ OWN_ELASTICITY_EXTREME = -50.0
 PLAUSIBLE_STATS = (
     "own_elasticity_median",
     "own_elasticity_times_sigma_p",
+    "own_elasticity_times_window_width",
+    "frontier_products_per_buying_draw",
+    "log_alpha_range_buyers",
+    "window_width_log_alpha",
     "share_own_elasticity_below_-50",
     "share_own_elasticity_below_-20",
     "nonzero_cross_median",
@@ -184,6 +188,18 @@ def economics_values(model: Any, theta: np.ndarray, delta: np.ndarray, spec: Any
     except (AttributeError, TypeError, IndexError):
         sp = float("nan")
     values["own_elasticity_times_sigma_p"] = None if med is None or not np.isfinite(sp) else -float(med) * sp
+    # the bounded elasticity law (LEARNINGS 32): own elasticity x window width in log alpha, about 20 to 25
+    try:
+        wa = pcm_post.window_anatomy(model, theta, delta)
+    except (AttributeError, TypeError, ValueError) as exc:
+        msgs.append(f"Window anatomy not computed: {type(exc).__name__}: {exc}")
+        wa = {}
+    for k in ("frontier_products_per_buying_draw", "log_alpha_range_buyers", "window_width_log_alpha"):
+        v = wa.get(k)
+        values[k] = None if v is None or not np.isfinite(v) else float(v)
+    ww = values["window_width_log_alpha"]
+    values["own_elasticity_times_window_width"] = None if med is None or ww is None else -float(med) * ww
+    values["window_anatomy_by_market"] = wa.get("by_market", {})
     values["spread_buyer_dollars"] = sb["spreads"]
     values["quality_dispersion_buyer_dollars"] = summary(pcm_post.quality_dispersion(model, theta, delta)["per_product"])
     values["relative_quality_dispersion_buyer_dollars"] = summary(
@@ -228,6 +244,10 @@ def economics_block(problem: Problem, result: OptimizeResult, spec: Any) -> Diag
     stats: dict[str, float | None] = {
         "own_elasticity_median": values["own_elasticity"]["median"],
         "own_elasticity_times_sigma_p": values.get("own_elasticity_times_sigma_p"),
+        "own_elasticity_times_window_width": values.get("own_elasticity_times_window_width"),
+        "frontier_products_per_buying_draw": values.get("frontier_products_per_buying_draw"),
+        "log_alpha_range_buyers": values.get("log_alpha_range_buyers"),
+        "window_width_log_alpha": values.get("window_width_log_alpha"),
         "share_own_elasticity_below_-50": values["share_own_elasticity_below_-50"],
         "nonzero_cross_median": values["nonzero_cross"]["median"],
         "diversion_leaving_group_median": (values.get("diversion_leaving_group") or {}).get("median"),

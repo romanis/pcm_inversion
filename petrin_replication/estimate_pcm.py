@@ -3,8 +3,8 @@
     u_ijt = delta_jt + x_jt . t_i - alpha_i p_jt,   u_i0t = 0
     x     = [1, hpwt, space, air, mpd, fwd, fam],   fam = max(mi, sw, su, pv)   (the taste columns, TASTE)
     t_ik  = sigma_k nu_ik on the 7 taste columns  +  pi_b log(fs_i) fv_i on b in {mi, sw, su, pv}
-    log alpha_i = phi_mid mid_i + phi_high high_i + sigma_p nu_ip        (low income is the reference, c = 1)
-    alpha_i >= alpha_lo = 0.2: nu_ip is truncated below at log(alpha_lo / c_i) / sigma_p   (LEARNINGS 29)
+    log alpha_i = log(ybar / clip(y_i, 1, 150)) + phi_mid mid_i + phi_high high_i + log a_i   (Petrin's income law)
+    a_i ~ LogNormal(0, sigma_p) truncated below at a_lo = 0.2, so alpha_lo,i = a_lo c_i   (LEARNINGS 32)
     delta_jt = X1_jt beta + xi_jt,  X1 = [1, hpwt, space, air, mpd, fwd, mi, sw, su, pv, pgnp, trend, trend2]
     Z     = [X1, demand_instruments0..21]  (35 columns; LEARNINGS 16)
 
@@ -18,9 +18,11 @@ is in Sargan form (``SarganIVMoments``, scale-free; LEARNINGS 24, 25) unless ``-
 ``--margin m`` one calibration row binds the markup level: the 25th-75th percentile trimmed mean of the Nash
 margins (p - mc)/p equals m (``MarginMoment``, weight 1e4 / (n 0.01^2); LEARNINGS 25). The supply Jacobian is
 the central secant over 1e-3 natural units. Taste spreads
-start at $3k on const, $2k on fam and $1k per sd on the other five; sigma_p starts at 1.5 in [0.1, 5]. Normalisations: median alpha = 1 in the low-income group (mu = 0,
-LEARNINGS 11) on the untruncated parent; price sensitivity bounded below, alpha_i >= alpha_lo = 0.2 (a fixed
-parameter of role bound, the richest CEX household's alpha under Petrin's alpha = pi / income); sigma_fam capped at $25k; taste spreads non-negative; u_i0 = 0 in every year with pgnp and
+start at $3k on const, $2k on fam and $1k per sd on the other five; sigma_p starts at 2.5 in [1, 4], phi_mid
+and phi_high at 1.1 and 1.8 (Petrin's pi ratios) in [-4, 4]. Normalisations: median a_i = 1 (mu = 0, LEARNINGS 11) on the untruncated
+parent, alpha_i = exp(phi_g) (ybar / y_i) a_i with income winsorised to [1, 150] and ybar the pooled low-group median
+income (5.78); the unobserved factor bounded below, a_i >= a_lo = 0.2 (a fixed parameter of role bound, a
+calibration of the welfare tail); sigma_fam capped at $25k; taste spreads non-negative; u_i0 = 0 in every year with pgnp and
 trends in X1. Data: the 17 same-firm exact twins (identical price and characteristics) are merged into one
 row with summed shares, then the remaining price ties are spread to a $10 gap. Consumers: the 1,000 CEX
 agents per market crossed with scrambled Sobol standard normal taste draws, 2^ceil(log2(1000 nu)) draws per
@@ -28,17 +30,18 @@ market. Exact PCM shares, no smoothing (LEARNINGS 15). Specification: LEARNINGS 
 files: nfp_harness.pipeline (DESIGN 6.4); the gate is a sigma_p profile concentrated in (phi_mid, phi_high),
 read on q_fixed and on its supply block. step1 starts from the gate minimum (lambda = 1 slice, lowest q_fixed)
 with pi_b re-solved on the eight body micro moments; ``margin_band`` estimates everything at m* in
-{0.10, 0.15, 0.20, 0.24, 0.30} (headline 0.24, Petrin's BLP median margin). ``sigma_p_band`` fixes sigma_p at
-2.5, 3, 3.5 and 4 under the bound and estimates the rest on Sargan + micro + supply; its headline row is the
-point whose median margin is nearest 0.24, a calibration (LEARNINGS 29).
+{0.10, 0.15, 0.20, 0.24, 0.30} (headline 0.24, Petrin's BLP median margin). ``a_lo_band`` fixes a_lo at 0.1, 0.2
+and 0.4 and estimates everything else (sigma_p free, start 2.5, bounds [1, 4]) on Sargan + micro + supply from the
+prefit point; its headline is a_lo = 0.2, a calibration of the welfare tail (LEARNINGS 32). ``sigma_p_band`` (sigma_p
+fixed at 2.5 and 3 at a_lo = 0.2) is kept as a robustness stage. ``--start-theta <run>/stages/<stage>.npz`` starts
+the prefit from a stored estimate's tastes, pis and sigma_p (phi at its starts; part of the run key).
 
 Robustness switches (each changes the run directory): ``--robustness body_sigma`` frees taste spreads on
-mi, sw, su, pv (cap $25k); ``--robustness income_winsor`` adds phi_y log(ybar / clip(income, 1, 150)) to
-log alpha with phi_y fixed at 1 (Petrin's alpha ~ 1/income, winsorised); ``--robustness fixed_w`` uses the
+mi, sw, su, pv (cap $25k); ``--robustness income_winsor`` is a no-op alias (the income law is the main
+spec); ``--robustness fixed_w`` uses the
 fixed-W aggregate block (IVMoments) instead of the Sargan form; ``--robustness sargan`` is accepted as a no-op
 alias (Sargan is the default) so commands and run directories written with it keep their run key;
-``--robustness alpha_lo_01`` and ``alpha_lo_04`` set the bound alpha_lo to 0.1 (a factor two of non-income
-heterogeneity in the marginal utility of money) and 0.4 (the first percentile of the CEX alpha).
+``--robustness a_lo_01`` and ``a_lo_04`` set the bound a_lo to 0.1 and 0.4.
 ``--outer mpec`` (own run directory) runs the optional demand-only MPEC outer of ``nfp_harness.mpec`` with the
 ``.envs/mpec`` python; a stage whose problem has the supply block or a margin row refuses it (LEARNINGS 31).
 
@@ -48,7 +51,8 @@ Run (results under petrin_replication/results/harness/, untracked):
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage all --nu 16 --detach
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage margin_band --nu 16 \
       --start-gate <gate dir> --detach
-  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage sigma_p_band --nu 16 --detach
+  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage a_lo_band --nu 16 \
+      --start-theta <run dir>/stages/band.2.5.step2.npz --detach
   /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py status --nu 16
 Resume a killed run by relaunching the identical command.
 """
@@ -75,6 +79,7 @@ import pyblp  # noqa: E402
 
 from nfp_harness import comparison, pipeline  # noqa: E402
 from nfp_harness.data import break_price_ties  # noqa: E402
+from nfp_harness.diagnostics import at_bound_parameters  # noqa: E402
 from nfp_harness.linear import LinearIV  # noqa: E402
 from nfp_harness.models import pcm_post as pp  # noqa: E402
 from nfp_harness.models.pcm import PCMModel, PCMSpec  # noqa: E402
@@ -110,21 +115,30 @@ NASH_DEVIATION = 0.02
 SIG_FIXED_DOLLARS = {"const": 3.0, "fam": 2.0}
 PER_SD_COLUMNS = ("hpwt", "space", "air", "mpd", "fwd")
 PER_SD_DOLLARS = 1.0
-SIGMA_P = {"start": 1.5, "lower": 0.1, "upper": 5.0, "unit": 0.25}
-# Lower bound on price sensitivity, in units of the low-income median alpha (LEARNINGS 29): under Petrin's
-# alpha = pi_g / income on the 1984 CEX (income winsorised to [1, 150]) the richest household's alpha is 0.235
-# of the low-group median's, the first percentile 0.415. Main value 0.2; robustness 0.1 and 0.4.
-ALPHA_LO = 0.2
-ALPHA_LO_ROBUSTNESS = {"alpha_lo_01": 0.1, "alpha_lo_04": 0.4}
-ALPHA_LO_UNIT = 0.1
+# Under the bound sigma_p no longer moves the buyers' log-alpha range (LEARNINGS 32): estimated, start 2.5 in [1, 4]
+SIGMA_P = {"start": 2.5, "lower": 1.0, "upper": 4.0, "unit": 0.25}
+# Lower bound on the unobserved factor a_i of alpha_i = exp(phi_g) (ybar / y_i) a_i (LEARNINGS 32): alpha_lo,i =
+# a_lo c_i, so the WTP cap is proportional to income. Nothing in the data pins a_lo; it is a calibration of the
+# welfare tail. Headline 0.2 (welfare at BLP's size), robustness 0.1 and 0.4.
+A_LO = 0.2
+A_LO_ROBUSTNESS = {"a_lo_01": 0.1, "a_lo_04": 0.4}
+A_LO_UNIT = 0.1
+A_LO_BAND = (0.1, 0.2, 0.4)
+A_LO_HEADLINE = 0.2
+# Income shifts on log alpha: starts at Petrin's pi ratios, log(12.2 / 3.9) and log(23.7 / 3.9); bounds +-4 so a bound
+# is never the estimate (an estimate within 1e-3 of one is flagged AT_BOUND)
+PHI_STARTS = {"phi_mid": 1.1, "phi_high": 1.8}
+PHI_BOUND = 4.0
 GATE_LAMBDAS = (0.5, 1.0, 2.0)
 GATE_SIGMA_P = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
 GATE_SLICE = {"lambda": 1.0}
 HAULERS = ("mi", "sw", "su", "pv")
-# sigma_p set-identified; under the bound the margin-0.24 point moves to about 3 to 3.5 (LEARNINGS 29)
-BAND_SIGMA_P = (2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
+# sigma_p band, kept as a robustness stage at a_lo = 0.2: past 3.0 margins fall with sigma_p (LEARNINGS 32)
+BAND_SIGMA_P = (2.5, 3.0)
 BAND_MARGIN_TARGET = 0.24   # headline: the band point whose median margin is nearest Petrin's BLP median margin
-BAND_COLUMNS = ("own_elasticity_median", "own_elasticity_times_sigma_p", "share_own_elasticity_below_-20",
+ANATOMY_COLUMNS = ("frontier_products_per_buying_draw", "log_alpha_range_buyers", "window_width_log_alpha")
+BAND_COLUMNS = ("own_elasticity_median", "own_elasticity_times_sigma_p", "own_elasticity_times_window_width",
+                "share_own_elasticity_below_-20",
                 "margin_median", "inside_share_semi_elasticity", "minivan_cs_gain_1984_fixed_prices_musd",
                 "minivan_cs_gain_1984_bounded_nash_musd", "bounded_nash_status_1984",
                 "minivan_diversion_haulers_share_of_inside", "car_to_hauler_diversion_over_hauler_inside_share",
@@ -139,7 +153,7 @@ TWIN_KEYS = ("market_ids", "firm_ids", "prices", "hpwt", "space", "air", "mpd", 
 # at sigma_p 3-4 it is 94-336, and the log-cost residual of a clipped product (log 0.5 against about 2.5)
 # is the supply block's penalty on that region (LEARNINGS 22).
 MC_FLOOR = 0.5
-ROBUSTNESS = ("body_sigma", "income_winsor", "sargan", "fixed_w") + tuple(ALPHA_LO_ROBUSTNESS)
+ROBUSTNESS = ("body_sigma", "income_winsor", "sargan", "fixed_w") + tuple(A_LO_ROBUSTNESS)
 # Markup-level calibration (round-3 analysis 5.2-5.3, LEARNINGS 25)
 MARGIN_TRIM = (0.25, 0.75)
 MARGIN_SD = 0.01          # declared sd of the margin row: W1 entry 1 / (n 0.01^2)
@@ -194,10 +208,11 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, float, int]:
     if not (products[["hpwt", "wt", "mpg", "q"]].to_numpy() > 0).all():
         raise ValueError("the log-cost basis needs positive hpwt, wt, mpg and q")
     agents["logfs_fv"] = np.log(agents.fs) * agents.fv
-    # Price scale c_i = alpha_i / a_i: log c_i = phi_mid mid_i + phi_high high_i, so c_i takes three values
-    # and is bounded by construction (LEARNINGS 18, 19). The income_winsor robustness run adds
-    # phi_y log(ybar / income_i) with income clipped to [1, 150] ($1000), so c_i spans at most a factor 150.
-    agents["log_ybar_inc_w"] = np.log(float(agents.income.median()) / agents.income.clip(*INCOME_CLIP))
+    # Price scale c_i = alpha_i / a_i: log c_i = log(ybar / clip(y_i, 1, 150)) + phi_mid mid_i + phi_high high_i,
+    # Petrin's income law (LEARNINGS 32) with ybar the pooled low-group median income, so the normalising consumer
+    # is the median low-income household; c_i spans at most a factor 150 within a group.
+    ybar = float(agents.income[agents.low == 1].median())
+    agents["log_ybar_inc_w"] = np.log(ybar / agents.income.clip(*INCOME_CLIP))
     agents["income_group"] = np.select([agents.low == 1, agents.mid == 1, agents.high == 1], ["low", "mid", "high"], "none")
     agents["fs_group"] = np.where(agents.fs >= 5, "5+", agents.fs.astype(int).astype(str))
     return products, agents, price_range, n_merged
@@ -224,7 +239,9 @@ class PetrinSpec:
 
     def __init__(self, robustness: tuple[str, ...] = ()) -> None:
         self.robustness: tuple[str, ...] = tuple(sorted(set(robustness)))
-        self.alpha_lo = ALPHA_LO
+        self.a_lo = A_LO
+        self.start_theta: dict[str, float] | None = None
+        self.start_theta_source: str | None = None
         self.band_nash_all = False
         self.margin: float | None = None
         self.start_gate: str | None = None
@@ -245,8 +262,10 @@ class PetrinSpec:
         self.values = dict(pd.read_csv(pyblp.data.PETRIN_VALUES_LOCATION).iloc[:, :2].to_numpy())
         self.micro_covariances = pd.read_csv(pyblp.data.PETRIN_COVARIANCES_LOCATION, index_col=0)
         self.normalisations = [
-            "median alpha = 1 in the low-income group: log alpha_i = phi_mid mid_i + phi_high high_i + log a_i, "
-            "a_i ~ LogNormal(0, sigma_p), no constant (mu = 0; LEARNINGS 11), on the untruncated parent",
+            "median a_i = 1 (mu = 0); alpha_i = exp(phi_g) (ybar / y_i) a_i with income winsorised to [1, 150]: "
+            "log alpha_i = log(ybar / clip(y_i, 1, 150)) + phi_mid mid_i + phi_high high_i + log a_i, a_i ~ "
+            "LogNormal(0, sigma_p) on the untruncated parent, ybar the pooled low-group median income (Petrin's "
+            "income law, LEARNINGS 11, 32)",
             "",   # the lower bound on alpha, set by set_robustness
             f"taste spread on the family-hauler factor fam = max(mi, sw, su, pv) capped at {FAM_CAP:g} ($1000), "
             f"so under 1% of consumers value it beyond the pooled price range {self.price_range:.1f}",
@@ -265,7 +284,8 @@ class PetrinSpec:
             "relative_quality_dispersion_buyer_dollars_median": (1.0, 6.0),
             "sd_xi_over_sd_delta": (None, 1.0), "xi_kurtosis": (None, 10.0),
             "spread_buyer_dollars": {"sigma_fam": (None, FAM_CAP), "sigma_const": (None, 15.0)},
-            "own_elasticity_times_sigma_p": (17.0, 55.0),   # above 55: VERTICAL_TAIL (LEARNINGS 25)
+            # the bounded elasticity law: -median own elasticity x window width in log alpha, 20 to 25 (LEARNINGS 32)
+            "own_elasticity_times_window_width": (15.0, 30.0),
         }
 
     # ------------------------------------------------------------------ robustness switches and CLI
@@ -277,12 +297,12 @@ class PetrinSpec:
             raise ValueError(f"unknown robustness switches {unknown}; known: {ROBUSTNESS}")
         if "sargan" in r and "fixed_w" in r:
             raise ValueError("robustness sargan (the default aggregate block) and fixed_w exclude each other")
-        bounds = [x for x in r if x in ALPHA_LO_ROBUSTNESS]
+        bounds = [x for x in r if x in A_LO_ROBUSTNESS]
         if len(bounds) > 1:
-            raise ValueError(f"robustness switches {bounds} set alpha_lo twice; pick one")
+            raise ValueError(f"robustness switches {bounds} set a_lo twice; pick one")
         self.robustness = r
-        self.alpha_lo = ALPHA_LO_ROBUSTNESS[bounds[0]] if bounds else ALPHA_LO
-        self.normalisations[1] = self.alpha_lo_normalisation(self.alpha_lo) + (
+        self.a_lo = A_LO_ROBUSTNESS[bounds[0]] if bounds else A_LO
+        self.normalisations[1] = self.a_lo_normalisation(self.a_lo) + (
             f" (robustness {bounds[0]})" if bounds else "")
         self.normalisations[3] = (
             "taste spreads on the body dummies mi, sw, su, pv fixed at 0 (only second-choice data would pin "
@@ -291,17 +311,21 @@ class PetrinSpec:
             f"(robustness body_sigma)")
 
     @staticmethod
-    def alpha_lo_normalisation(a: float) -> str:
-        return (f"alpha_i >= alpha_lo = {a:g} x the low-group median alpha, the richest CEX household's alpha under "
-                f"Petrin's alpha = pi / income (minimum 0.235): a_i is truncated below at alpha_lo / c_i, a fixed "
-                f"parameter of role bound (LEARNINGS 29)")
+    def a_lo_normalisation(a: float) -> str:
+        return (f"a_i >= a_lo = {a:g}: the unobserved factor is truncated below at a_lo for every household, so "
+                f"alpha_lo,i = a_lo c_i is proportional to 1 / income and the WTP cap to income; a fixed parameter of "
+                f"role bound, a calibration of the welfare tail that no moment pins (LEARNINGS 32)")
 
     def add_arguments(self, parser: Any) -> None:
         parser.add_argument("--robustness", action="append", choices=ROBUSTNESS, default=None,
                             help="robustness switch (repeatable): body_sigma frees the 4 body taste spreads "
-                                 "(cap 25); income_winsor adds phi_y = 1 on log(ybar / clip(income, 1, 150)); "
+                                 "(cap 25); income_winsor is a no-op alias (the income law is the main spec); "
                                  "fixed_w uses the fixed-W aggregate block; sargan is a no-op alias of the default; "
-                                 "alpha_lo_01 / alpha_lo_04 set the bound on alpha to 0.1 / 0.4 (main 0.2)")
+                                 "a_lo_01 / a_lo_04 set the bound on a_i to 0.1 / 0.4 (main 0.2)")
+        parser.add_argument("--start-theta", default=None,
+                            help="a stored stage (<run dir>/stages/<stage>.npz) whose tastes, pis and sigma_p become "
+                                 "the layout starts (phi_mid, phi_high, phi_y and a_lo keep the spec's); part of the "
+                                 "run key")
         parser.add_argument("--band-nash-all", action="store_true",
                             help="sigma_p_band: run the bounded Nash counterfactual at every band point, not only "
                                  "at the headline point (does not change estimates)")
@@ -323,6 +347,25 @@ class PetrinSpec:
         sg = getattr(args, "start_gate", None)
         self.start_gate = str(pathlib.Path(sg).resolve()) if sg else None
         self.outer = str(getattr(args, "outer", None) or "nested")
+        st = getattr(args, "start_theta", None)
+        if st:
+            self.set_start_theta(st)
+
+    def set_start_theta(self, path: str | pathlib.Path) -> None:
+        """Starts from a stored stage: theta from ``<stage>.npz``, parameter names from the run's history.csv.
+        Tastes, pis and sigma_p are taken (clipped to the layout bounds); phi_mid, phi_high, phi_y and the bound keep
+        the spec's starts, since the income law changes what phi means."""
+        path = pathlib.Path(path).resolve()
+        theta = np.load(path, allow_pickle=False)["theta"]
+        hist = path.parent.parent / "history.csv"
+        cols = hist.read_text().splitlines()[0].split(",")
+        names = [c[len("theta_"):] for c in cols if c.startswith("theta_")]
+        if len(names) != theta.size:
+            raise ValueError(f"{path}: theta has {theta.size} entries, {hist} names {len(names)} parameters")
+        keep = {n: float(v) for n, v in zip(names, theta)
+                if n not in ("phi_mid", "phi_high", "phi_y", "alpha_lo", "a_lo")}
+        self.start_theta = keep
+        self.start_theta_source = f"{path.parent.parent.name}/{path.name}"
 
     def set_margin(self, margin: float | None) -> None:
         """Set the calibrated markup level m* (None: no margin row) and the report's normalisation line."""
@@ -341,10 +384,15 @@ class PetrinSpec:
 
     def run_key(self) -> dict[str, Any]:
         """Result-changing options beyond nu and seed: the robustness switches (none: the main run), the bound
-        alpha_lo (always, so runs of the bounded model never share a directory with the unbounded ones) and the
-        margin calibration, and the MPEC outer (only when chosen, so nested runs keep their directories)."""
+        a_lo and its kind ``bound: "a"`` (always, so runs bounded on a_i never share a directory with the runs bounded
+        on alpha_i), the start theta (when given), the margin calibration, and the MPEC outer (only when chosen, so
+        nested runs keep their directories)."""
         out: dict[str, Any] = {"robustness": list(self.robustness)} if self.robustness else {}
-        out["alpha_lo"] = self.alpha_lo
+        out["a_lo"] = self.a_lo
+        out["bound"] = "a"
+        if self.start_theta is not None:
+            out["start_theta"] = {"source": self.start_theta_source,
+                                  "theta": {k: float(v).hex() for k, v in sorted(self.start_theta.items())}}
         if self.margin is not None:
             out["margin"] = self.margin
         if self.outer != "nested":
@@ -376,20 +424,23 @@ class PetrinSpec:
                       for i, b in enumerate(BODY)]
         specs += [ParameterSpec(f"pi_{b}", "taste", b, "logfs_fv", PI_STARTS[b], -5.0, 5.0, note="x log(fs) fv")
                   for b in BODY]
-        specs += [ParameterSpec("phi_mid", "scale", None, "mid", 0.15, -3.0, 3.0,
-                                note="log alpha shift for mid income (low = 0)"),
-                  ParameterSpec("phi_high", "scale", None, "high", -0.30, -3.0, 3.0,
-                                note="log alpha shift for high income (low = 0)")]
-        winsor = "income_winsor" in self.robustness
-        specs.append(ParameterSpec("phi_y", "scale", None, "log_ybar_inc_w", 1.0 if winsor else 0.0, -1.0, 3.0,
-                                   free=False, note="log alpha on log(ybar / clip(income, 1, 150)); fixed, 1 under "
-                                                    "income_winsor, else 0"))
+        specs += [ParameterSpec("phi_mid", "scale", None, "mid", PHI_STARTS["phi_mid"], -PHI_BOUND, PHI_BOUND,
+                                note="log alpha shift for mid income (low = 0); start Petrin's log(pi_mid / pi_low)"),
+                  ParameterSpec("phi_high", "scale", None, "high", PHI_STARTS["phi_high"], -PHI_BOUND, PHI_BOUND,
+                                note="log alpha shift for high income (low = 0); start Petrin's log(pi_high / pi_low)")]
+        specs.append(ParameterSpec("phi_y", "scale", None, "log_ybar_inc_w", 1.0, -1.0, 3.0, free=False,
+                                   note="log alpha on log(ybar / clip(income, 1, 150)); fixed at 1, Petrin's income law"))
         specs.append(ParameterSpec("sigma_p", "sigma_p", None, None, SIGMA_P["start"], SIGMA_P["lower"], SIGMA_P["upper"],
-                                   unit=SIGMA_P["unit"], note="sd of log alpha (untruncated parent); upper 5 for the "
-                                                              "band under the bound (LEARNINGS 29)"))
-        a = self.alpha_lo
-        specs.append(ParameterSpec("alpha_lo", "bound", None, None, a, a, a, unit=ALPHA_LO_UNIT, free=False,
-                                   note="alpha_i >= alpha_lo x the low-group median alpha; fixed (LEARNINGS 29)"))
+                                   unit=SIGMA_P["unit"], note="sd of log a (untruncated parent); estimated, a_lo is the "
+                                                              "calibration axis (LEARNINGS 32)"))
+        a = self.a_lo
+        specs.append(ParameterSpec("a_lo", "bound", None, None, a, a, a, unit=A_LO_UNIT, free=False,
+                                   note="a_i >= a_lo, alpha_lo,i = a_lo c_i; fixed (LEARNINGS 32)"))
+        if self.start_theta:
+            lay = ParameterLayout(specs)
+            ch = {n: {"start": float(np.clip(v, sp.lower, sp.upper))} for n, v in self.start_theta.items()
+                  if n in lay.names for sp in [lay.specs[lay.names.index(n)]]}
+            return lay.replace(ch)
         return ParameterLayout(specs)
 
     def micro_moment(self, which: str) -> RatioMicroMoment:
@@ -437,7 +488,7 @@ class PetrinSpec:
         # evaluations, 60-73 s), the theta path (stopped at tau 0.25-0.5) and then a 40,000-evaluation cold
         # stage (860-1,380 s): 26 minutes to learn that the step must be rejected. Trial points therefore get
         # no cold stage; the first evaluation and the cold profile points keep the full budget.
-        return PCMSpec(KERNEL_CHARS, track_realised_mass=self.use_max_step, trial_cold_evals=0)
+        return PCMSpec(KERNEL_CHARS, track_realised_mass=self.use_max_step, trial_cold_evals=0, bound_kind="a")
 
     def hash_payload(self) -> dict[str, Any]:
         return {"data": "pyblp 1.3.0 Petrin, prices spread to a $10 gap", "chars": CHARS, "taste": TASTE,
@@ -472,8 +523,11 @@ class PetrinSpec:
                 "micro": {"values": self.values, "observations": 29125, "covariance": MICRO_COVARIANCE_SOURCE},
                 "caps": {"sigma_fam": FAM_CAP, "body_sigma": BODY_SIGMA_CAP, "income_clip": INCOME_CLIP},
                 "robustness": list(self.robustness), "pcm": dataclasses.asdict(self.pcm_spec()),
-                "alpha_lo": {"value": self.alpha_lo, "role": "bound", "free": False,
-                             "distribution": "a_i lognormal(0, sigma_p) truncated below at alpha_lo / c_i"},
+                "a_lo": {"value": self.a_lo, "role": "bound", "free": False, "kind": "a",
+                         "distribution": "a_i lognormal(0, sigma_p) truncated below at a_lo for every household"},
+                "income_law": {"phi_y": 1.0, "ybar": "pooled low-group median income", "clip": INCOME_CLIP},
+                "start_theta": self.start_theta_source,
+                "a_lo_band": {"values": list(self.a_lo_band_values), "headline": A_LO_HEADLINE},
                 "draws": "Sobol normals, seed + market position, crossed with agents", "max_step": self.use_max_step,
                 "optimizer": self.optimizer_options,
                 "prefit": {"free": self.prefit_free, "max_iterations": self.prefit_max_iterations},
@@ -615,6 +669,9 @@ class PetrinSpec:
     band_parameter = "sigma_p"
     band_values = BAND_SIGMA_P
     band_moments = "all"   # Sargan + micro + supply (LEARNINGS 27, SPEC_ANALYSIS v4 change 8)
+    a_lo_band_parameter = "a_lo"
+    a_lo_band_values = A_LO_BAND
+    a_lo_band_moments = "all"
 
     def band_row(self, pipe: Any, problem: Any, result: Any, value: float) -> dict[str, Any]:
         """One row of band.csv at the band estimate with sigma_p fixed at ``value``: elasticities, margins, the
@@ -641,14 +698,51 @@ class PetrinSpec:
                     if k in BAND_COLUMNS})
         cf, _ = self.counterfactual(model, theta, delta, resolve_prices=False)
         row.update({k: cf.get(k) for k in ("minivan_cs_gain_1984_fixed_prices_musd",)})
+        names = problem.layout.names
+        for n in ("phi_mid", "phi_high", "sigma_p", "a_lo"):
+            if n in names:
+                row[n] = float(theta[names.index(n)])
+        row["mean_alpha_buyers"] = float(pp.spread_in_buyer_dollars(model, theta, delta)["mean_alpha_buyers"])
+        wa = pp.window_anatomy(model, theta, delta)
+        row.update({k: wa[k] for k in ANATOMY_COLUMNS})
+        row.update({f"{k}_1984": wa["by_market"][str(YEAR)][k] for k in ANATOMY_COLUMNS if str(YEAR) in wa["by_market"]})
+        row["own_elasticity_times_window_width"] = -summ["own_elasticity_median"] * wa["window_width_log_alpha"]
+        row["at_bound"] = ";".join(at_bound_parameters(theta, problem.layout.specs, problem.layout.units()))
         row.update({f"q:{b}": float(v) for b, v in (ev.aux.get("q_blocks") or {}).items()})
-        row.update({f"theta:{n}": float(x) for n, x in zip(problem.layout.names, theta)})
+        row.update({f"theta:{n}": float(x) for n, x in zip(names, theta)})
         return row
+
+    def a_lo_band_finish(self, pipe: Any, problem: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """After every a_lo point: label a_lo = A_LO_HEADLINE the headline (a calibration of the welfare tail, LEARNINGS
+        32) unless a free parameter ended AT_BOUND there, and run the bounded Nash counterfactual at it (at every point
+        with --band-nash-all)."""
+        for r in rows:
+            r["label"] = ""
+        head = next((r for r in rows if abs(float(r.get("a_lo", float("nan"))) - A_LO_HEADLINE) < 1e-12), None)
+        if head is not None and head.get("at_bound"):
+            head["label"] = f"not a headline: {head['at_bound']} AT_BOUND (a failed estimate)"
+            head = None
+        elif head is not None:
+            head["label"] = f"headline (calibration of the welfare tail: a_lo = {A_LO_HEADLINE:g})"
+        targets = [r for r in rows if not r.get("at_bound")] if self.band_nash_all else ([head] if head else [])
+        layout = problem.layout
+        for r in targets:
+            try:
+                res, _ = pipe.band_result(problem, float(r["a_lo"]), name="a_lo_band")
+                if res.evaluation is None or not res.evaluation.ok:
+                    r["bounded_nash_status_1984"] = "estimate not re-evaluated"
+                    continue
+                cf, _ = self.counterfactual(problem.model, np.asarray(res.theta, dtype=float),
+                                            np.asarray(res.evaluation.aux["delta"]), resolve_prices=True)
+                r.update({k: v for k, v in cf.items() if "bounded_nash" in k or k == "nash_note_1984"})
+            finally:
+                problem.layout = layout
+        return rows
 
     def band_finish(self, pipe: Any, problem: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """After every band point: label the headline row, the point whose median margin is nearest
         BAND_MARGIN_TARGET (a calibration of the markup level, not an estimate of sigma_p)."""
-        ok = [r for r in rows if np.isfinite(float(r.get("margin_median", float("nan"))))]
+        ok = [r for r in rows if np.isfinite(float(r.get("margin_median", float("nan")))) and not r.get("at_bound")]
         if not ok:
             return rows
         head = min(ok, key=lambda r: abs(float(r["margin_median"]) - BAND_MARGIN_TARGET))
@@ -707,8 +801,8 @@ class PetrinSpec:
             if d.get("group_diversion"):
                 d.update(self.diversion_stats(d["group_diversion"]))
             ref = {k: d.get(k, "") for k in BAND_COLUMNS
-                   if k not in ("own_elasticity_times_sigma_p", "share_own_elasticity_below_-20",
-                                "inside_share_semi_elasticity")}
+                   if k not in ("own_elasticity_times_sigma_p", "own_elasticity_times_window_width",
+                                "share_own_elasticity_below_-20", "inside_share_semi_elasticity")}
             # BLP's Nash gain is an equilibrium; the PCM column beside it is the bounded Nash approximation
             ref["minivan_cs_gain_1984_bounded_nash_musd"] = d.get("minivan_cs_gain_1984_musd", "")
             ref["bounded_nash_status_1984"] = f"BLP Nash {d.get('nash_status_1984', '')}".strip()
@@ -872,6 +966,9 @@ class PetrinSpec:
         summary.update(self.diversion_stats(summary["group_diversion"]))
         summary["own_elasticity_times_sigma_p"] = -summary["own_elasticity_median"] * float(
             theta[problem.layout.names.index("sigma_p")])
+        wa = pp.window_anatomy(model, theta, delta)
+        summary.update({k: wa[k] for k in ANATOMY_COLUMNS})
+        summary["own_elasticity_times_window_width"] = -summary["own_elasticity_median"] * wa["window_width_log_alpha"]
         summary["cs_tables_1984"] = extra["tables"]
         for name, rows in extra["tables"].items():
             pd.DataFrame(rows).to_csv(out / f"cs_1984_by_{name}.csv", index=False)

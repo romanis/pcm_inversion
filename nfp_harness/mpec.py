@@ -200,7 +200,7 @@ class MPECProblem:
         return np.r_[lo, np.full(self.n, -_INF)], np.r_[hi, np.full(self.n, _INF)]
 
     def with_fixed(self, theta: np.ndarray) -> None:
-        """Take the fixed parameters (band values, alpha_lo, phi_y) from ``theta`` instead of the layout start."""
+        """Take the fixed parameters (band values, the bound a_lo, phi_y) from ``theta`` instead of the layout start."""
         theta = np.asarray(theta, dtype=float)
         self.base[~self.free] = theta[~self.free]
 
@@ -382,7 +382,7 @@ class MPECProblem:
         model = self.model
         spec = model.spec
         th, ph, sp = model.kernel_params(theta)
-        al = model.alpha_lo(theta)
+        bound = model.kernel_kwargs(theta)
         threads = self._threads()
         delta = np.array(delta, dtype=float)
 
@@ -392,7 +392,7 @@ class MPECProblem:
                                          warm_evals=spec.warm_evals, cold_evals=spec.cold_evals,
                                          path_evals=spec.path_evals, path_seconds=spec.path_seconds,
                                          n_threads=int(threads[t]), derivatives=False, rcond_min=spec.rcond_min,
-                                         alpha_lo=al)
+                                         **bound)
 
         notes = []
         for t, r in zip(markets, model._pool.map(one, markets)):
@@ -418,7 +418,8 @@ def _seed_model(problem: Any, theta: np.ndarray, delta: np.ndarray) -> None:
     st["has_accepted"] = np.ones(model.T, dtype=bool)
     st["delta"] = [np.array(delta[m.rows], dtype=float) for m in model._mk]
     st["theta"] = [stacked.copy() for _ in model._mk]
-    st["alpha_lo"] = np.full(model.T, model.alpha_lo(theta))
+    st.pop("alpha_lo", None)
+    st["a_lo"] = np.full(model.T, model.a_lo(theta))
     model.load_state_dict(st)
 
 
