@@ -2,10 +2,10 @@
 
 The shared object is a build output and is not tracked. Build it with:
 
-    cmake -S /local/home/istomin/pcm_inversion -B /local/home/istomin/pcm_inversion/build-rel2 \\
-          -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=/home/istomin/anaconda3/bin/python \\
-          -Dpybind11_DIR=/home/istomin/.local/lib/python3.12/site-packages/pybind11/share/cmake/pybind11
-    cmake --build /local/home/istomin/pcm_inversion/build-rel2 -j 64 --target pcm_kernel_py
+    cmake -S . -B build-rel2 -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG -g" \\
+          -DPython_EXECUTABLE=$(which python) -DPYTHON_EXECUTABLE=$(which python) \\
+          -Dpybind11_DIR=$(python -m pybind11 --cmakedir) -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    cmake --build build-rel2 -j 64 --target pcm_kernel_py
 """
 
 try:

@@ -29,7 +29,7 @@ Stages: ``published`` evaluates everything at Table 4's theta (no step-1 search)
 theta. ``--years`` fits a subset of markets (the micro moments then pool over the years kept; the second-choice
 moments need 1991, 1999, 2005, 2015 among them).
 
-Run: /home/istomin/anaconda3/bin/python gmy_replication/estimate_blp.py {published,fit} [--households 1000]
+Run: python gmy_replication/estimate_blp.py {published,fit} [--households 1000]
      [--threads 32] [--max-nfev 200] [--years 1980 1991 ...]
 Outputs (untracked): gmy_replication/results/blp_<stage>_h<H>[_years].{json,npz}, blp_<stage>_h<H>.log
 """

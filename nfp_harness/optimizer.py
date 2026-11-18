@@ -86,7 +86,7 @@ class OptimizerOptions:
       ``probe_gain_factor`` (10) x the floor. If no step does, the stage ends CONVERGED_NOISE; else it continues from
       that point (at most ``max_probe_restarts`` times, then the next probe ends it).
 
-    Round 5 (ROUND5 section 4), in noise mode only: a restart from a probe sets the trust radius to the winning
+    Round 5 (LEARNINGS 32), in noise mode only: a restart from a probe sets the trust radius to the winning
     probe step in scaled units (at least ``Delta_0 / 4``), resets the Levenberg-Marquardt damping and recomputes the
     More scales from the restart point's Jacobian (the running maximum would keep stale scales). The radius is
     floored at ``noise_Delta_floor`` (1e-3 natural units, the supply block's secant step): below it a rejection
@@ -754,7 +754,7 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
                                checkpoint, arr, it, dk, W1, pg=pg, dq_gn=dq_gn, noise_floor=noise_floor, lm=lm,
                                probe_restarts=probe_restarts)
             # a probe found more than the floor: continue from it, with the trust radius at the scale the probe measured
-            # (at least Delta_0 / 4), no damping and the More scales of the restart point (ROUND5 section 4)
+            # (at least Delta_0 / 4), no damping and the More scales of the restart point (LEARNINGS 32)
             _call_hook(problem, "commit", pt)
             probe_restarts += 1
             d_win = (pt[f] - theta[f]) / units[f]

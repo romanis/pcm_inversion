@@ -565,8 +565,6 @@ diversion; inside-share semi-elasticity to a uniform 1% price rise in [-2, -0.5]
 demand-only BLP fit with the PCM's moments gives own elasticity -1.97, margin 0.57 and a 1984 gain
 of $1,046M at fixed prices, so demand-only BLP is itself fragile on these moments.
 
-Full analysis kept locally (untracked) at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v1.md.
-
 ## 20. With phi matched to the income purchase rates, the aggregate objective still prefers ever larger sigma_p, and elasticities stay implausible (2026-11-17)
 
 **Run.** Spec of entry 19 at 4,096 draws per market, concentrated sigma_p ray profile: lambda in
@@ -647,8 +645,6 @@ matching BLP's market semi-elasticity gives sigma_p near 0.3.
 
 **Plausibility targets reset for the exact PCM.** Median own elasticity (-15, -5), margins (0.07,
 0.25), inside-share elasticity (-1.5, -0.4), minivan diversion to haulers at least 0.15 of inside.
-
-Full analysis kept locally at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v2.keep.md.
 
 ## 22. Supply block: Nash markups above price at large sigma_p; FOC costs clipped at a floor (2026-11-17)
 
@@ -767,8 +763,6 @@ isolates substitution. The Sargan J across m* decides whether m* is estimated (i
 rising 3.84 at both ends) or calibrated (the band is the result). Fallback: fixed W1 with the margin
 moment binding, sigma_p fixed at 2.0, lambda free, band over m*.
 
-Full analysis kept locally at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v3.keep.md.
-
 ## 26. Sargan aggregate block with micro and supply: the gate prefers larger horizontal spreads (2026-11-17)
 
 Same gate as entry 23 (nu = 4, phi concentrated, 21 points, all inverted) with the aggregate block in
@@ -874,8 +868,6 @@ Gauss-Newton predicted decrease are not convergence statistics on this ridge. Fi
 the trust region, no shrink on sub-noise rejections, CONVERGED_NOISE when the predicted decrease is
 below 10x the noise floor, and a terminal probe.
 
-Full analysis kept locally at $KIROCREW_SCRATCH/fable/SPEC_ANALYSIS_v4.keep.md.
-
 ## 30. Truncated alpha (alpha_lo = 0.2): the CS tail is gone, and markups fall at fixed theta (2026-11-17)
 
 Kernel with alpha_i = c_i a_i, a_i lognormal truncated below at alpha_lo / c_i (exact shares,
@@ -909,8 +901,7 @@ draw's hull), not C1 as in BLP. That is a semismooth system, and Newton-type met
 superlinearly when they use the Jacobian of the active piece, which is what the nested inversion already does
 and what an NLP solver with exact first derivatives does. On Petrin 1984 at 16,384 draws the aggregate
 Jacobian's rate of change along the Newton direction is 0.19 relative per unit step whether 0 or 136 draws
-change frontier inside the step, and the Taylor remainder is quadratic with an event-independent constant
-(numerical checks kept in the untracked review `docs/estimation_harness/MPEC_REVIEW.md`). So objection 1 of entry 14 (no second-order convergence because the
+change frontier inside the step, and the Taylor remainder is quadratic with an event-independent constant. So objection 1 of entry 14 (no second-order convergence because the
 Hessian is a train of spikes) is withdrawn for the share constraints; it stands for Hessians built by finite
 differences (a kink inside the difference step gives spurious curvature w f/(gap h)) and for the supply block
 (below). Objection 2 (LICQ fails at zero-share products) stands and is sharper: with log-share constraints a
@@ -1002,4 +993,3 @@ the kink spacing and every trial is rejected whatever the direction. Fixes: rese
 step on a restart, floor Delta at the secant step, make the probe a compass-search fallback, recompute the
 More scales after a restart.
 
-Full analysis kept locally (untracked) at docs/estimation_harness/ROUND5.md.

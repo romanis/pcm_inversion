@@ -46,9 +46,9 @@ Install. cyipopt is imported at call time, never at import, so the main anaconda
 unchanged. IPOPT needs its own environment (the brew IPOPT needs glibc 2.38; anaconda's cyipopt finds no
 libipopt), and the native module loads in it without a rebuild:
 
-    conda create -p /local/home/istomin/pcm_inversion/.envs/mpec -c conda-forge --override-channels \\
+    conda create -p .envs/mpec -c conda-forge --override-channels \\
         python=3.12 cyipopt numpy scipy pandas pytest
-    /local/home/istomin/pcm_inversion/.envs/mpec/bin/python -m pytest nfp_harness/tests/test_mpec.py
+    .envs/mpec/bin/python -m pytest nfp_harness/tests/test_mpec.py
 """
 
 from __future__ import annotations

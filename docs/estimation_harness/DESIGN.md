@@ -1,8 +1,9 @@
 # Estimation harness: design (2026-11-16)
 
-This document implements `docs/estimation_harness/REQUIREMENTS.md`. Read that file and
-`docs/LEARNINGS.md` first. Where this design and the requirements disagree, the requirements win
-and this file is wrong.
+This is the design the harness was built from. `docs/LEARNINGS.md` records what estimation on real
+data showed afterwards, and it wins where the two disagree. In particular the Petrin specification
+of section 6 was later changed: the supply block, the Sargan-form aggregate moments, and the lower
+bound on price sensitivity placed on the unobserved factor (LEARNINGS 19-32).
 
 The harness estimates nested-fixed-point GMM demand models. The first model is the exact pure
 characteristics model (PCM) and the first application is Petrin (2002). A paper is a spec: data,
@@ -39,9 +40,9 @@ a singular ds/d delta as a named status (section 3.2).
 of every converged market, including trial points that the line search then rejects. The harness
 separates the accepted state from trial state (`commit` / `restore`, section 2.1).
 
-**F4. The interpreter is `/home/istomin/anaconda3/bin/python`** (Python 3.12, numpy 1.26.4 with
+**F4. The interpreter is `python`** (Python 3.12, numpy 1.26.4 with
 OpenBLAS, scipy 1.13.1). pyblp 1.3.0 is vendored at `nevo_replication/.vendor` (gitignored).
-pybind11 comes from `/home/istomin/.local/lib/python3.12/site-packages/pybind11`. The existing
+pybind11 comes from the user site-packages. The existing
 configured build tree `build-rel2` already holds googletest in `_deps`, so it does not need network
 access to reconfigure. `estimate_pcm.py` and `pcm_petrin.py` in `petrin_replication/` are
 byte-identical, and so are `nevo_replication/estimate_pcm.py` and `pcm_nevo.py`.
@@ -111,7 +112,7 @@ stay local. No work package deletes them; their logic moves into `profile.py`, `
 `models/pcm_post.py`.
 
 Results go to `petrin_replication/results/harness/<run_id>/`, which `.gitignore` already excludes
-(`petrin_replication/*`). Scratch files go under `$KIROCREW_SCRATCH`.
+(`petrin_replication/*`).
 
 ### 1.2 CMake
 
@@ -151,11 +152,11 @@ set_target_properties(pcm_kernel_py PROPERTIES OUTPUT_NAME pcm_kernel
 Build command (reuses the configured tree from F4):
 
 ```
-cmake -S /local/home/istomin/pcm_inversion -B /local/home/istomin/pcm_inversion/build-rel2 \
-      -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=/home/istomin/anaconda3/bin/python \
-      -Dpybind11_DIR=/home/istomin/.local/lib/python3.12/site-packages/pybind11/share/cmake/pybind11
-cmake --build /local/home/istomin/pcm_inversion/build-rel2 -j 64 --target pcm_kernel_py pcm_kernel_test pcm_events_test pcm_welfare_test
-ctest --test-dir /local/home/istomin/pcm_inversion/build-rel2 -R "pcm_(kernel|events|welfare)" --output-on-failure
+cmake -S . -B build-rel2 \
+      -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=python \
+      -Dpybind11_DIR=$(python -m pybind11 --cmakedir)
+cmake --build build-rel2 -j 64 --target pcm_kernel_py pcm_kernel_test pcm_events_test pcm_welfare_test
+ctest --test-dir build-rel2 -R "pcm_(kernel|events|welfare)" --output-on-failure
 ```
 
 `.gitignore` gains `nfp_harness/_native/*.so`.
@@ -175,8 +176,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "nevo_replication" / ".vendor")]
 
 The environment lines must run before numpy is imported, so they live in the script, not in the
 package. `nfp_harness.runtime.check_environment()` warns if they were not set. Python tests run with
-`/home/istomin/anaconda3/bin/python -m pytest /local/home/istomin/pcm_inversion/nfp_harness/tests`.
-This repository is not a Brazil package, so `brazil-build` does not apply.
+`python -m pytest nfp_harness/tests`.
 
 ## 2. Problem, moments and parameters
 
@@ -1044,7 +1044,7 @@ No new estimation code: the same model adapter, optimizer, diagnostics and repor
 
 Each package is sized for one coder agent. "Owns" lists every file the package may create or edit.
 No two packages that run in parallel own the same file. Every package must read
-`REQUIREMENTS.md`, `LEARNINGS.md` and this file first, and run its acceptance tests before
+`LEARNINGS.md` and this file first, and run its acceptance tests before
 committing on `feat/estimation-harness`.
 
 **Wave 0 (serial).**
@@ -1055,7 +1055,7 @@ committing on `feat/estimation-harness`.
 `nfp_harness/types.py` in full (sections 2.1, 2.2, 2.3, 2.5 dataclasses, `KernelRequests`,
 `OptimizeResult`, `HistoryRecord`, `Report` skeleton). Stubs raise `NotImplementedError` with the
 signature and docstring from this document. Acceptance: the build command of 1.2 succeeds;
-`/home/istomin/anaconda3/bin/python -c "import nfp_harness._native as n; print(n.pcm_kernel.__doc__)"`
+`python -c "import nfp_harness._native as n; print(n.pcm_kernel.__doc__)"`
 works from the repo root; `pytest nfp_harness/tests` collects with all tests skipped; existing
 gtests still pass. After WP0, ownership of each stub passes to the package below and `types.py` is
 frozen.
@@ -1149,7 +1149,7 @@ and WP9a in parallel; then WP9; then WP10.
    by nine directions. The mechanisms in LEARNINGS 1 and 13 may still hold, but their size was
    measured on an estimator with 22 moments for 31 unknowns. The owner may want a LEARNINGS entry and
    a rerun of the old profile with `Z = [X1, Z_excl]` before reading WP9's profile.
-2. **Cap value.** REQUIREMENTS says "capped at the price range"; LEARNINGS 13 says "say $50k". The
+2. **Cap value.** The requirements said "capped at the price range"; LEARNINGS 13 says "say $50k". The
    pooled range is $66.1k; per-year ranges are smaller. This design uses the pooled 66.1. Owner to
    confirm.
 3. **max_step at 16,000 draws.** `tau_first` will be near zero, so the cap rests on the affected-mass

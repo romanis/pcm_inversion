@@ -37,7 +37,7 @@ latest one is also copied to the run directory root):
   every point is in, ``spec.band_finish(pipeline, problem, rows) -> rows`` (optional) labels the headline and
   may add columns (it can rebuild a point's estimate with ``pipeline.band_result``); its rows are checkpointed
   as stage ``band.finish``.
-- ``a_lo_band`` (ROUND5 5.1 item 3): the same procedure over ``spec.a_lo_band_values`` of
+- ``a_lo_band`` (LEARNINGS 32): the same procedure over ``spec.a_lo_band_values`` of
   ``spec.a_lo_band_parameter`` (the bound a_lo, a calibration of the welfare tail), rows from
   ``spec.a_lo_band_row`` (default ``band_row``) to ``a_lo_band/band.csv``, stages ``aband.<value>.step1|step2|row``,
   ``spec.a_lo_band_finish`` as ``aband.finish``. A fixed band parameter's bounds widen to the band value.
@@ -610,7 +610,7 @@ class Pipeline:
         return self._band("sigma_p_band")
 
     def a_lo_band(self) -> list[dict[str, Any]]:
-        """The a_lo band stage (module docstring, ROUND5 5.1 item 3). Returns the rows of a_lo_band/band.csv."""
+        """The a_lo band stage (module docstring, LEARNINGS 32). Returns the rows of a_lo_band/band.csv."""
         return self._band("a_lo_band")
 
     # band name -> (spec attribute prefix, checkpoint tag prefix, default parameter)

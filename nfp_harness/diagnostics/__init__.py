@@ -148,7 +148,7 @@ def build_report(inp: DiagnosticInputs) -> Report:
     bound_tol = float(th.get("bound_tol", degeneracies.DEGENERACY_DEFAULTS["bound_tol"]))
     at_lo, at_hi = _at_bound(theta, specs, units, bound_tol)
     cap_active = np.array([s.cap for s in specs], dtype=bool) & at_hi & free
-    # AT_BOUND (ROUND5 5.1 item 4): a free parameter within bound_tol natural units of a layout bound (a cap at its
+    # AT_BOUND (LEARNINGS 32): a free parameter within bound_tol natural units of a layout bound (a cap at its
     # cap is a stated normalisation, NORMALISATION_CAP_ACTIVE, not this) is a failed estimate, not a result
     at_bound = free & (at_lo | (at_hi & ~cap_active))
     conv["at_bound"] = [names[i] for i in np.nonzero(at_bound)[0]]

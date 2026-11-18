@@ -600,7 +600,7 @@ def test_terminal_probe_restarts_from_a_better_point() -> None:
 
 
 # ------------------------------------------------------------------------------------------------
-# round 5 (ROUND5 section 4): probe restarts reset the radius, the radius is floored in noise mode, compass search
+# round 5 (LEARNINGS 32): probe restarts reset the radius, the radius is floored in noise mode, compass search
 # ------------------------------------------------------------------------------------------------
 
 
@@ -617,7 +617,7 @@ NOISE_OPTS = OptimizerOptions(pg_tol=1e-12, gn_tol=1e-16, max_rejections=40, fla
 
 
 def test_probe_restart_resets_the_radius_and_does_not_loop() -> None:
-    """The step-2 crawl of ROUND5 section 4: the stage sits at a collapsed radius (1.22e-5), where the predicted
+    """The step-2 crawl of LEARNINGS 32: the stage sits at a collapsed radius (1.22e-5), where the predicted
     decrease is below 10 x the floor, so the terminal probe runs and wins at 0.1 along y. Keeping the collapsed radius
     on the restart re-probed at once, five times over (118 evaluations, no trust-region step). The restart now sets
     the radius to the winning probe step, so the Gauss-Newton steps take y to its optimum: one restart."""

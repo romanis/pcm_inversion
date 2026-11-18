@@ -11,7 +11,7 @@ by body type, inside share, the 1984 no-minivan consumer-surplus change at fixed
 prices re-solved to a Nash equilibrium (Petrin's headline), and that change by income group and
 family size. Households are in thousands and prices in $1000, so households x CS is in $ million.
 
-Run: /home/istomin/anaconda3/bin/python petrin_replication/estimate_blp.py [micro|nomicro|demand_micro|all]
+Run: python petrin_replication/estimate_blp.py [micro|nomicro|demand_micro|all]
 Outputs: petrin_replication/results/blp_<variant>_{summary.json,results.txt,results.pkl,product_level.csv}, blp_<variant>.npz
 """
 from __future__ import annotations

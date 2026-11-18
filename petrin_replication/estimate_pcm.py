@@ -46,14 +46,14 @@ alias (Sargan is the default) so commands and run directories written with it ke
 ``.envs/mpec`` python; a stage whose problem has the supply block or a margin row refuses it (LEARNINGS 31).
 
 Run (results under petrin_replication/results/harness/, untracked):
-  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage prefit --nu 4
-  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage gate --nu 4 [--detach]
-  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage all --nu 16 --detach
-  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage margin_band --nu 16 \
+  python petrin_replication/estimate_pcm.py run --stage prefit --nu 4
+  python petrin_replication/estimate_pcm.py run --stage gate --nu 4 [--detach]
+  python petrin_replication/estimate_pcm.py run --stage all --nu 16 --detach
+  python petrin_replication/estimate_pcm.py run --stage margin_band --nu 16 \
       --start-gate <gate dir> --detach
-  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py run --stage a_lo_band --nu 16 \
+  python petrin_replication/estimate_pcm.py run --stage a_lo_band --nu 16 \
       --start-theta <run dir>/stages/band.2.5.step2.npz --detach
-  /home/istomin/anaconda3/bin/python petrin_replication/estimate_pcm.py status --nu 16
+  python petrin_replication/estimate_pcm.py status --nu 16
 Resume a killed run by relaunching the identical command.
 """
 from __future__ import annotations

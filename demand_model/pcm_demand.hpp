@@ -125,7 +125,7 @@ Eigen::ArrayXd frontier_lift(const Eigen::ArrayXd & delta, const Market & mk, co
  */
 Eigen::ArrayXd initial_guess(const Eigen::ArrayXd & s_data, const Eigen::ArrayXd & p, const Params & prm);
 
-/** Window anatomy of one draw's frontier (ROUND5 5.1 item 5, 5.3 item 10). */
+/** Window anatomy of one draw's frontier (LEARNINGS 32). */
 struct DrawAnatomy {
     int frontier_size = 0;           //!< products with a window of positive mass
     double mass = 0.0;               //!< sum of those windows' masses (the draw's inside share)
