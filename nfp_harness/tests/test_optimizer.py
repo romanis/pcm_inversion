@@ -597,3 +597,74 @@ def test_terminal_probe_restarts_from_a_better_point() -> None:
     assert res.theta[1] == pytest.approx(-0.1, abs=1e-12)
     assert "restarts from a probe" in res.message
     assert any(math.isnan(r.rho) and r.accepted for r in res.history[1:])   # the restart record
+
+
+# ------------------------------------------------------------------------------------------------
+# round 5 (ROUND5 section 4): probe restarts reset the radius, the radius is floored in noise mode, compass search
+# ------------------------------------------------------------------------------------------------
+
+
+def sawtooth(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """x: a residual with a sawtooth of period 0.01 that G (= 1) does not see, like the supply block's frontier jumps;
+    y: a smooth residual 10 (y + 0.5) that the model gets right."""
+    x, y = float(theta[0]), float(theta[1])
+    g = np.array([(x - 1.0) + 0.05 * (((x / 0.01) % 1.0) - 0.5), 10.0 * (y + 0.5)])
+    return g, np.array([[1.0, 0.0], [0.0, 10.0]])
+
+
+NOISE_OPTS = OptimizerOptions(pg_tol=1e-12, gn_tol=1e-16, max_rejections=40, flat_window=200, noise_probe=1e-5,
+                              noise_converge=True, lm_damping=True, Delta_max=0.5)
+
+
+def test_probe_restart_resets_the_radius_and_does_not_loop() -> None:
+    """The step-2 crawl of ROUND5 section 4: the stage sits at a collapsed radius (1.22e-5), where the predicted
+    decrease is below 10 x the floor, so the terminal probe runs and wins at 0.1 along y. Keeping the collapsed radius
+    on the restart re-probed at once, five times over (118 evaluations, no trust-region step). The restart now sets
+    the radius to the winning probe step, so the Gauss-Newton steps take y to its optimum: one restart."""
+    p = ToyProblem(sawtooth, [spec("x", 0.5037), spec("y", 0.0)])
+    res = minimize(p, np.eye(2), replace(NOISE_OPTS, Delta_0=1.22e-5))
+    assert res.convergence is ConvergenceClass.CONVERGED_NOISE
+    restarts = [h for h in res.history[1:] if math.isnan(h.rho) and h.accepted]
+    trials = [h for h in res.history[1:] if not math.isnan(h.rho)]
+    assert len(restarts) == 1
+    assert restarts[0].Delta == pytest.approx(0.1)            # the winning probe step, not the collapsed radius
+    assert trials and trials[0].Delta == pytest.approx(0.1)   # the next trust-region step uses it
+    assert res.theta[1] == pytest.approx(-0.5, abs=1e-9)
+    assert p.evals < 60
+
+
+def test_noise_mode_floors_the_radius_at_the_secant_step() -> None:
+    """In noise mode the radius never falls below noise_Delta_floor (1e-3), and a rejection at the floor goes to the
+    probe, which ends the stage CONVERGED_NOISE on the sawtooth (no probe step beats 10 x the floor near x = 1)."""
+    def fn(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        x = float(theta[0])
+        return np.array([(x - 1.0) + 0.05 * (((x / 0.01) % 1.0) - 0.5)]), np.array([[1.0]])
+
+    res = minimize(ToyProblem(fn, [spec("x", 0.5037)]), np.eye(1), replace(NOISE_OPTS, Delta_0=0.1))
+    assert res.convergence is ConvergenceClass.CONVERGED_NOISE
+    assert all(h.Delta >= 1e-3 * (1 - 1e-12) for h in res.history)
+    assert res.Delta >= 1e-3 * (1 - 1e-12)
+    # outside noise mode the radius may still collapse below the floor
+    res0 = minimize(ToyProblem(fn, [spec("x", 0.5037)]), np.eye(1),
+                    replace(NOISE_OPTS, Delta_0=0.1, noise_converge=False, noise_probe=None))
+    assert min(h.Delta for h in res0.history) < 1e-3
+
+
+def test_compass_probe_stops_at_the_first_winning_step() -> None:
+    """The probe polls the largest step first and stops there when it wins: on the restart toy the probe that wins at
+    0.1 costs one poll (2 x 3 directions), not three."""
+    from nfp_harness.optimizer import _layout_arrays, _Objective, _terminal_probe
+
+    p = ToyProblem(sawtooth, [spec("x", 1.0037), spec("y", 0.0)])
+    arr = _layout_arrays(p)
+    obj = _Objective(p, "fixed", np.eye(2), None, NOISE_OPTS, arr)
+    theta = np.array([1.0037, 0.0])
+    q = obj.q(p.evaluate(theta, False))
+    pt, pq, nev, summary, win = _terminal_probe(p, obj, theta, q, np.array([0.0, 1.0]), arr, (0.01, 0.03, 0.1),
+                                                gain_needed=1e-3)
+    assert win == 0.1 and nev == 6 and pt[1] == pytest.approx(-0.1) and pq < q
+    assert "+-0.1 units" in summary
+    # nothing beats the threshold: every step is tried, largest first, and win is 0
+    *_, nev0, _, win0 = _terminal_probe(p, obj, theta, q, np.array([0.0, 1.0]), arr, (0.01, 0.03, 0.1),
+                                        gain_needed=1e9)
+    assert win0 == 0.0 and nev0 == 18

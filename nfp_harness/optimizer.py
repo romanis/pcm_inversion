@@ -80,10 +80,17 @@ class OptimizerOptions:
     - ``noise_converge`` (needs the noise floor of ``noise_probe``): a rejected trial whose q differs from the
       accepted q by less than the floor carries no information, so the radius is not shrunk; such a rejection,
       or a trust-region step whose predicted decrease is below ``noise_pred_factor`` (10) x the floor, sends
-      the stage to the terminal probe: q at +-``probe_steps`` (0.01, 0.03, 0.1) natural units along the
-      Gauss-Newton direction (scaled to unit max-norm) and along each free coordinate, without Jacobians. If no
-      probe lowers q by more than ``probe_gain_factor`` (10) x the floor the stage ends CONVERGED_NOISE; else it
-      continues from the best probe (at most ``max_probe_restarts`` times, then the next probe ends it).
+      the stage to the terminal probe, a compass search: q at +-s natural units along the Gauss-Newton direction
+      (scaled to unit max-norm) and along each free coordinate, without Jacobians, for s in ``probe_steps`` from
+      the largest down (0.1, 0.03, 0.01), stopping at the first step whose best point lowers q by more than
+      ``probe_gain_factor`` (10) x the floor. If no step does, the stage ends CONVERGED_NOISE; else it continues from
+      that point (at most ``max_probe_restarts`` times, then the next probe ends it).
+
+    Round 5 (ROUND5 section 4), in noise mode only: a restart from a probe sets the trust radius to the winning
+    probe step in scaled units (at least ``Delta_0 / 4``), resets the Levenberg-Marquardt damping and recomputes the
+    More scales from the restart point's Jacobian (the running maximum would keep stale scales). The radius is
+    floored at ``noise_Delta_floor`` (1e-3 natural units, the supply block's secant step): below it a rejection
+    carries no information about the direction, so a rejection at the floor goes straight to the probe.
 
     Outer solver: ``outer`` is ``"nested"`` (this module, the default) or ``"mpec"`` (``mpec.minimize_mpec``, IPOPT on
     (theta, delta) for demand-only problems, LEARNINGS 31) with ``mpec_hessian`` ``"gn"`` or ``"lbfgs"`` and at most
@@ -126,6 +133,7 @@ class OptimizerOptions:
     probe_steps: tuple[float, ...] = (0.01, 0.03, 0.1)
     probe_gain_factor: float = 10.0
     max_probe_restarts: int = 5
+    noise_Delta_floor: float = 1e-3  # natural units; noise mode only
     outer: str = field(default="nested", repr=False)
     mpec_hessian: str = field(default="gn", repr=False)
     mpec_max_restarts: int = field(default=3, repr=False)
@@ -492,10 +500,14 @@ def _probe_noise(problem: Any, obj: _Objective, theta: np.ndarray, ev: Evaluatio
 
 def _terminal_probe(problem: Any, obj: _Objective, theta: np.ndarray, q: float, d_gn: np.ndarray,
                     arr: dict[str, np.ndarray], steps: tuple[float, ...], heartbeat: Any = None, path: Any = None,
-                    stage: str = "", it: int = 0) -> tuple[np.ndarray, float, int, str]:
-    """(best theta, its q, evaluations, summary) over q at theta +- s along the Gauss-Newton direction d_gn
-    (free coordinates, natural units, scaled to unit max-norm) and along each free coordinate, for s in
-    ``steps`` natural units, clipped to the bounds; no Jacobians, the model restored after every probe."""
+                    stage: str = "", it: int = 0, gain_needed: float = math.inf
+                    ) -> tuple[np.ndarray, float, int, str, float]:
+    """(best theta, its q, evaluations, summary, winning step) of a compass search from theta: q at theta +- s along
+    the Gauss-Newton direction d_gn (free coordinates, natural units, scaled to unit max-norm) and along each free
+    coordinate, clipped to the bounds, for s in ``steps`` natural units from the largest down. The search stops at
+    the first s whose best point lowers q by more than ``gain_needed``; the winning step is that s (0 if none won,
+    in which case the best point over all steps is returned). No Jacobians; the model is restored after every
+    probe."""
     f, units = arr["free"], arr["units"]
     dirs: list[tuple[str, np.ndarray]] = []
     if d_gn.size and np.max(np.abs(d_gn)) > 0:
@@ -505,9 +517,12 @@ def _terminal_probe(problem: Any, obj: _Objective, theta: np.ndarray, q: float, 
         e = np.zeros(idx.size)
         e[j] = 1.0
         dirs.append((str(arr["names"][k]), e))
-    best_theta, best_q, nev, best_what = np.array(theta), q, 0, ""
-    for what, v in dirs:
-        for st in steps:
+    best_theta, best_q, nev, best_what, win = np.array(theta), q, 0, "", 0.0
+    order = sorted({float(x) for x in steps if x > 0}, reverse=True)
+    tried: list[float] = []
+    for st in order:
+        tried.append(st)
+        for what, v in dirs:
             for sgn in (1.0, -1.0):
                 th = np.array(theta, dtype=float)
                 th[f] = np.clip(theta[f] + sgn * st * v * units[f], arr["lower"][f], arr["upper"][f])
@@ -523,10 +538,13 @@ def _terminal_probe(problem: Any, obj: _Objective, theta: np.ndarray, q: float, 
                 qp = obj.q(e)
                 if qp < best_q:
                     best_theta, best_q, best_what = th, qp, f"{what} {sgn * st:+g}"
-    summary = (f"terminal probe: {nev} evaluations at +-{', '.join(f'{x:g}' for x in steps)} units along the "
-               f"Gauss-Newton direction and {idx.size} coordinates; best q {best_q:.10g} "
+        if q - best_q > gain_needed:
+            win = st
+            break
+    summary = (f"terminal probe: compass search, {nev} evaluations at +-{', '.join(f'{x:g}' for x in tried)} units "
+               f"along the Gauss-Newton direction and {idx.size} coordinates; best q {best_q:.10g} "
                f"({'at ' + best_what if best_what else 'the current point'}), change {best_q - q:+.3e}")
-    return best_theta, best_q, nev, summary
+    return best_theta, best_q, nev, summary, win
 
 
 def _bound_note(theta: np.ndarray, arr: dict[str, np.ndarray], pg_raw: np.ndarray) -> tuple[bool, str]:
@@ -652,6 +670,16 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         checkpoint.save(_state(stage, mode, it, acc, nev, elapsed(), theta, Delta, q_mass, dk, kink, W, W1,
                                history, problem, q, lm=lm, noise_floor=noise_floor))
 
+    def scales(m: _Model, prev: np.ndarray | None) -> np.ndarray:
+        """dk: the running maximum of the column norms of A since the stage start (or a restart), floored."""
+        colnorm = np.linalg.norm(m.A, axis=0)
+        out = colnorm if prev is None else np.maximum(prev, colnorm)
+        top = float(out.max()) if out.size and out.max() > 0 else 1.0
+        out = np.maximum(out, 1e-8 * top)
+        if out.size and not np.any(out > 0):
+            out = np.ones_like(out)
+        return out
+
     model: _Model | None = None
     probe_due = False      # a sub-noise rejection: the next step goes to the terminal probe
     probe_notes: list[str] = []
@@ -663,12 +691,7 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         if model is None:
             model = obj.model(ev, theta)
             q = model.q
-            colnorm = np.linalg.norm(model.A, axis=0)
-            dk = colnorm if dk is None else np.maximum(dk, colnorm)
-            top = float(dk.max()) if dk.size and dk.max() > 0 else 1.0
-            dk = np.maximum(dk, 1e-8 * top)
-            if dk.size and not np.any(dk > 0):
-                dk = np.ones_like(dk)
+            dk = scales(model, dk)
         mu = _ridge(model.A, dk, options.ridge)
         u_lo = (lower[f] - theta[f]) / units[f]
         u_hi = (upper[f] - theta[f]) / units[f]
@@ -710,14 +733,15 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
                    f"the predicted decrease at radius {Delta:.2e} is below {options.noise_pred_factor:g} x the "
                    f"noise floor")
             probe_due = False
-            pt, pq, n_probe, summary = _terminal_probe(problem, obj, theta, q, d_gn, arr, tuple(options.probe_steps),
-                                                       heartbeat, None if checkpoint is None else checkpoint.path,
-                                                       stage, it)
+            need = options.probe_gain_factor * noise_floor
+            pt, pq, n_probe, summary, win = _terminal_probe(
+                problem, obj, theta, q, d_gn, arr, tuple(options.probe_steps), heartbeat,
+                None if checkpoint is None else checkpoint.path, stage, it, gain_needed=need)
             nev += n_probe
             log.info("stage %s it %d: %s; %s", stage, it, why, summary)
             probe_notes.append(f"{why}; {summary}")
             gain = q - pq
-            restart = gain > options.probe_gain_factor * noise_floor and probe_restarts < options.max_probe_restarts
+            restart = win > 0 and gain > need and probe_restarts < options.max_probe_restarts
             ev_p = problem.evaluate(pt, True) if restart else None
             if ev_p is not None:
                 nev += 1
@@ -729,10 +753,19 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
                                elapsed(), Delta, q_mass, kink, stage, mode, W, " ".join(probe_notes), options,
                                checkpoint, arr, it, dk, W1, pg=pg, dq_gn=dq_gn, noise_floor=noise_floor, lm=lm,
                                probe_restarts=probe_restarts)
-            # a probe found more than the floor: continue from it
+            # a probe found more than the floor: continue from it, with the trust radius at the scale the probe measured
+            # (at least Delta_0 / 4), no damping and the More scales of the restart point (ROUND5 section 4)
             _call_hook(problem, "commit", pt)
             probe_restarts += 1
-            theta, ev, q = pt, ev_p, obj.q(ev_p)
+            d_win = (pt[f] - theta[f]) / units[f]
+            theta, ev = pt, ev_p
+            model = obj.model(ev, theta)
+            q = model.q
+            dk = scales(model, None)
+            w_new = _more_weights(dk, options.more_scale_clip) if options.more_scaling else np.ones(int(f.sum()))
+            Delta = min(options.Delta_max, max(float(np.max(np.abs(w_new * d_win))) if d_win.size else 0.0,
+                                               0.25 * options.Delta_0, options.noise_Delta_floor))
+            lm = 0.0
             acc += 1
             rec = _record(stage, it, True, q, ev, obj, float("nan"), Delta, 1.0, EvalStatus.OK, 0.0, theta)
             history.append(rec)
@@ -741,9 +774,8 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
                 checkpoint.save(_state(stage, mode, it, acc, nev, elapsed(), theta, Delta, q_mass, dk, kink, W, W1,
                                        history, problem, q, lm=lm, noise_floor=noise_floor,
                                        probe_restarts=probe_restarts))
-            log.info("stage %s it %d: restart %d from the best probe, q %.10g (gain %.3e)", stage, it,
-                     probe_restarts, q, gain)
-            model = None
+            log.info("stage %s it %d: restart %d from the best probe (step %g), q %.10g (gain %.3e); Delta -> %.3e, "
+                     "lm reset, More scales recomputed", stage, it, probe_restarts, win, q, gain, Delta)
             continue
         tau_cap, pred_mass = 1.0, float("nan")
         dtheta = np.zeros_like(theta)
@@ -776,6 +808,9 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
             _call_hook(problem, "restore", theta)
             status = trial.status if not trial.ok else EvalStatus.NUMERICAL
             Delta = 0.25 * dinf
+            if noise_mode() and Delta < options.noise_Delta_floor:
+                probe_due = probe_due or Delta_used <= options.noise_Delta_floor * (1 + 1e-9)
+                Delta = options.noise_Delta_floor
             rec = _record(stage, it, False, float("nan"), trial, obj, float("nan"), Delta_used, tau_cap, status, secs,
                           trial_theta, pred_mass, real_mass)
             history.append(rec)
@@ -802,6 +837,12 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
             Delta = 0.25 * dinf
         elif rho > 0.75 and dinf >= 0.9 * Delta:
             Delta = min(2.0 * Delta, options.Delta_max)
+        if noise_mode() and Delta < options.noise_Delta_floor:
+            # below the secant step a rejection says nothing about the direction: floor the radius, and a rejection
+            # already at the floor goes to the probe
+            if not accept and Delta_used <= options.noise_Delta_floor * (1 + 1e-9):
+                probe_due = True
+            Delta = options.noise_Delta_floor
         if tau_cap < 1.0 and rho > 0.75:
             q_mass = min(options.q_mass_max, 1.5 * q_mass)
         if math.isfinite(real_mass) and math.isfinite(pred_mass) and real_mass > 2.0 * pred_mass:
