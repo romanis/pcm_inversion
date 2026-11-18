@@ -494,3 +494,16 @@ def test_vertical_tail_flag_above_the_plausible_range() -> None:
                                         {"own_elasticity_times_sigma_p": (17.0, 55.0)})
     assert flags and "own_elasticity_times_sigma_p" in flags[0]
     assert checked["own_elasticity_times_sigma_p"]["hi"] == 55.0
+
+
+def test_at_bound_exempts_zero_taste_spread() -> None:
+    from nfp_harness.diagnostics import at_bound_parameters
+    from nfp_harness.types import ParameterSpec
+
+    specs = [
+        ParameterSpec("sigma_fwd", "taste", "fwd", "nu5", 1.0, 0.0, 25.0, cap=True),
+        ParameterSpec("phi_high", "scale", None, "high", 1.0, -4.0, 4.0),
+        ParameterSpec("pi_mi", "taste", "mi", "logfs", 1.0, 0.0, 10.0),
+    ]
+    theta = np.array([0.0, -4.0, 0.0])
+    assert at_bound_parameters(theta, specs, np.ones(3)) == ["phi_high", "pi_mi"]

@@ -98,10 +98,17 @@ def _convergence(result: OptimizeResult) -> dict[str, Any]:
             "messages": messages}
 
 
+def _zero_spread(s: ParameterSpec) -> bool:
+    """A taste spread (``sigma_*``, role taste) bounded below at 0: the bound is the sign normalisation of a
+    symmetric draw, so an estimate of 0 is an interior answer (no dispersion), not a bound the data push past."""
+    return s.role == "taste" and s.name.startswith("sigma_") and s.lower == 0.0
+
+
 def _at_bound(theta: np.ndarray, specs: Sequence[ParameterSpec], units: np.ndarray, tol: float):
     lo = np.array([s.lower for s in specs], dtype=float)
     hi = np.array([s.upper for s in specs], dtype=float)
-    at_lo = np.isfinite(lo) & (np.abs(theta - lo) <= tol * units)
+    zero_spread = np.array([_zero_spread(s) for s in specs], dtype=bool)
+    at_lo = np.isfinite(lo) & ~zero_spread & (np.abs(theta - lo) <= tol * units)
     at_hi = np.isfinite(hi) & (np.abs(theta - hi) <= tol * units)
     return at_lo, at_hi
 
@@ -109,7 +116,8 @@ def _at_bound(theta: np.ndarray, specs: Sequence[ParameterSpec], units: np.ndarr
 def at_bound_parameters(theta: np.ndarray, specs: Sequence[ParameterSpec], units: np.ndarray,
                         tol: float | None = None) -> list[str]:
     """Names of the free parameters within ``tol`` (default the degeneracy ``bound_tol``, 1e-3) natural units of a
-    layout bound, a cap at its cap excepted: the AT_BOUND flag of the report's convergence block."""
+    layout bound, a cap at its cap and a taste spread at 0 excepted: the AT_BOUND flag of the report's
+    convergence block."""
     tol = float(degeneracies.DEGENERACY_DEFAULTS["bound_tol"] if tol is None else tol)
     theta = np.asarray(theta, dtype=float)
     lo, hi = _at_bound(theta, specs, np.asarray(units, dtype=float), tol)
