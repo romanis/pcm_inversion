@@ -142,10 +142,10 @@ ArrayXd frontier_lift(const ArrayXd & delta, const Market & mk, const Params & p
             const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
             const double c = std::exp(log_c);
             ArrayXd dc = (delta + (mk.x * t).array()) / c;
-            // With a bound, the hull of the sheared qualities dc - a_lo p: its increasing part holds exactly
-            // the vertices with entry slope above a_lo, the products with a window of positive mass. The
+            // With a bound, the hull of the sheared qualities dc - a_lo,i p: its increasing part holds exactly
+            // the vertices with entry slope above a_lo,i, the products with a window of positive mass. The
             // vertical gap, and so the lift, is the same in both coordinates.
-            if (prm.alpha_lo > 0.0) dc -= (prm.alpha_lo / c) * mk.p;
+            if (prm.lo > 0.0) dc -= pcm_demand::draw_a_lo(prm, c) * mk.p;
             // upper hull by price (prices are sorted); index -1 stands for the origin (0, 0)
             auto px = [&](int k) { return k < 0 ? 0.0 : mk.p[k]; };
             auto qy = [&](int k) { return k < 0 ? 0.0 : dc[k]; };
@@ -187,12 +187,12 @@ ArrayXd frontier_lift(const ArrayXd & delta, const Market & mk, const Params & p
 
 ArrayXd initial_guess(const ArrayXd & s_data, const ArrayXd & p, const Params & prm)
 {
-    if (!(prm.alpha_lo > 0.0)) return pcm_share::initial_guess(s_data, p, prm.sigma_p);
+    if (!(prm.lo > 0.0)) return pcm_share::initial_guess(s_data, p, prm.sigma_p);
     // F_T(e_k) = cum_k means Phi(z(e_k)) = Phi_lo + Z cum_k: the untruncated quantile at Phi_lo + Z cum_k.
     // pcm_share::initial_guess takes quantiles at the shares cumulated from each product up, so scale the
     // shares by Z and append one dearer dummy product of share Phi_lo; the real products' guesses do not
     // depend on the dummy's price.
-    const Trunc tr = make_trunc(prm.alpha_lo, prm.sigma_p);
+    const Trunc tr = make_trunc(prm.lo, prm.sigma_p);   // c = 1: a_lo = lo for both bound kinds
     const int N = static_cast<int>(s_data.size());
     if (N == 0) return ArrayXd();
     ArrayXd s2(N + 1), p2(N + 1);
@@ -201,6 +201,32 @@ ArrayXd initial_guess(const ArrayXd & s_data, const ArrayXd & p, const Params & 
     p2.head(N) = p;
     p2[N] = p[N - 1] + std::max(1.0, std::abs(p[N - 1]));
     return pcm_share::initial_guess(s2, p2, prm.sigma_p).head(N);
+}
+
+DrawAnatomy draw_anatomy(const ArrayXd & d, const ArrayXd & p, double sigma, double a_lo)
+{
+    DrawAnatomy out;
+    const std::vector<int> ind = index_positive_shares(d, p);
+    const int m = static_cast<int>(ind.size());
+    if (m == 0) return out;
+    std::vector<double> e(m + 1, 0.0);
+    e[0] = d[ind[0]] / p[ind[0]];
+    for (int k = 1; k < m; ++k) e[k] = (d[ind[k]] - d[ind[k - 1]]) / (p[ind[k]] - p[ind[k - 1]]);
+    const Trunc tr = make_trunc(a_lo, sigma);
+    const double inf = std::numeric_limits<double>::infinity();
+    double F_hi = ln_terms(e[0], sigma, tr).F;
+    for (int k = 0; k < m; ++k) {
+        const double F_lo = ln_terms(e[k + 1], sigma, tr).F;
+        const double mk = F_hi - F_lo;
+        F_hi = F_lo;
+        if (!(mk > 0.0)) continue;
+        ++out.frontier_size;
+        out.mass += mk;
+        const double lo = std::max(e[k + 1], tr.on ? a_lo : 0.0);
+        out.mass_log_width += lo > 0.0 ? mk * std::log(e[k] / lo) : inf;
+    }
+    if (out.mass > 0.0) out.log_range = tr.on ? std::log(e[0] / a_lo) : inf;
+    return out;
 }
 
 }  // namespace pcm_demand::detail
@@ -226,8 +252,8 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
         if (!(mk.p[j] > mk.p[j - 1])) throw std::runtime_error("pcm_demand::shares: prices must be strictly increasing");
     if (N > 0 && !(mk.p[0] > 0)) throw std::runtime_error("pcm_demand::shares: prices must be positive");
     if (!(prm.sigma_p > 0)) throw std::runtime_error("pcm_demand::shares: sigma_p must be positive");
-    if (!(prm.alpha_lo >= 0) || !std::isfinite(prm.alpha_lo))
-        throw std::runtime_error("pcm_demand::shares: alpha_lo must be finite and non-negative");
+    if (!(prm.lo >= 0) || !std::isfinite(prm.lo))
+        throw std::runtime_error("pcm_demand::shares: the bound lo must be finite and non-negative");
 
     Shares out;
     out.s = ArrayXd::Zero(N);
@@ -236,6 +262,8 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
         out.d_theta = MatrixXd::Zero(N, M + Q + 1);
         out.d_price = MatrixXd::Zero(N, N);
     }
+
+    const bool scale_bound = bound_moves_with_scale(prm);
 
     // Draws are independent: fixed blocks of 64 draws each accumulate partial sums in parallel,
     // and the blocks are added in index order, so results are bit-identical for any thread count.
@@ -267,8 +295,8 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
 
             s_c.setZero();
             if (with_derivatives) { Jd.setZero(); Jp.setZero(); dsig.setZero(); dlogc.setZero(); }
-            detail::cond_vertical(dc, mk.p, prm.sigma_p, prm.alpha_lo / c, s_c,
-                                  with_derivatives ? &Jd : nullptr, &dsig, &Jp, &dlogc);
+            detail::cond_vertical(dc, mk.p, prm.sigma_p, draw_a_lo(prm, c), s_c,
+                                  with_derivatives ? &Jd : nullptr, &dsig, &Jp, scale_bound ? &dlogc : nullptr);
 
             const double w = mk.weights[i];
             acc.s += w * s_c;
@@ -279,9 +307,9 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
             for (int m = 0; m < M; ++m)
                 acc.d_theta.col(m).noalias() += (w * mk.taste_basis(i, m) / c) * (Jd * mk.x.col(mk.taste_col[m]));
             if (Q > 0) {
-                // log c moves s through dc = y / c (-Jd dc) and, with a bound, through a_lo = alpha_lo / c
+                // log c moves s through dc = y / c (-Jd dc) and, with an ALPHA bound, through a_lo = lo / c
                 VectorXd Jdc = Jd * dc.matrix();
-                if (prm.alpha_lo > 0.0) Jdc -= dlogc.matrix();
+                if (scale_bound) Jdc -= dlogc.matrix();
                 for (int q = 0; q < Q; ++q)
                     acc.d_theta.col(M + q).noalias() += (-w * mk.scale_basis(i, q)) * Jdc;
             }
@@ -319,7 +347,9 @@ InversionResult invert(const ArrayXd & s_data, const Market & mk, const Params &
         unsigned iters = 0;
         while (lambda < 1.0 && evals < max_evals && step > 1e-5) {
             const double target = std::min(1.0, lambda + step);
-            Params pl{prm.theta * target, prm.phi * target, prm.sigma_p, prm.alpha_lo};
+            Params pl = prm;
+            pl.theta = prm.theta * target;
+            pl.phi = prm.phi * target;
             InversionResult r = invert_from(s_data, mk, pl, delta, tol, max_evals, evals);
             iters += r.iterations;
             if (r.converged) { delta = r.delta; lambda = target; step = std::min(0.5, step * 1.5); }

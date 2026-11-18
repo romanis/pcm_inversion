@@ -1,6 +1,7 @@
 // Price sensitivity bounded below (LEARNINGS 29, SPEC_ANALYSIS v4 sections 2 and 5 item 6): a_i is
 // LogNormal(0, sigma_p) truncated below at a_lo,i = alpha_lo / c_i. Tests (i) to (vi) of change 6, plus the
-// events kernel on the sheared frontier.
+// events kernel on the sheared frontier. The bound on a_i itself (BoundKind::A, a_lo,i = a_lo for every draw,
+// LEARNINGS 32) gets the same derivative and quadrature checks, and equals the ALPHA form when c_i = 1.
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
@@ -29,7 +30,8 @@ struct Fixture {
 // N products [1, z, dummy], prices on [5, 50], R draws with tastes on z and the dummy and two price-scale
 // demographics; frontier slopes in conditional units are about 0.3 to 1.5, and alpha_lo = 0.5 cuts the
 // windows of many draws, with c_i = exp(phi . b_i) spreading a_lo,i over a factor of about 10.
-Fixture make_fixture(unsigned seed, int N = 14, int R = 300, double alpha_lo = 0.5) {
+Fixture make_fixture(unsigned seed, int N = 14, int R = 300, double alpha_lo = 0.5,
+                     pcm_demand::BoundKind kind = pcm_demand::BoundKind::ALPHA) {
     std::mt19937 gen(seed);
     std::normal_distribution<double> nd(0.0, 1.0);
     std::uniform_real_distribution<double> ud(0.0, 1.0);
@@ -61,7 +63,8 @@ Fixture make_fixture(unsigned seed, int N = 14, int R = 300, double alpha_lo = 0
     f.prm.phi = ArrayXd(2);
     f.prm.phi << 0.5, -0.6;
     f.prm.sigma_p = 0.9;
-    f.prm.alpha_lo = alpha_lo;
+    f.prm.lo = alpha_lo;
+    f.prm.bound_kind = kind;
     return f;
 }
 
@@ -124,8 +127,8 @@ Cut truncation_cuts(const Fixture & f) {
         draw_q(f.mk, f.prm, f.delta, i, q, c);
         ArrayXd s0 = ArrayXd::Zero(N), s1 = ArrayXd::Zero(N);
         pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, 0.0, s0, nullptr, nullptr, nullptr, nullptr);
-        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, f.prm.alpha_lo / c, s1, nullptr, nullptr, nullptr,
-                                          nullptr);
+        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, pcm_demand::draw_a_lo(f.prm, c), s1, nullptr,
+                                          nullptr, nullptr, nullptr);
         const int n0 = (s0 > 0).count(), n1 = (s1 > 0).count();
         if (n1 < n0) {
             ++cut.removed;
@@ -142,8 +145,8 @@ Cut truncation_cuts(const Fixture & f) {
 TEST(PcmTruncation, TinyBoundReproducesUntruncatedModel) {
     Fixture f = make_fixture(1);
     pcm_demand::Params p0 = f.prm, p1 = f.prm;
-    p0.alpha_lo = 0.0;
-    p1.alpha_lo = 1e-300;
+    p0.lo = 0.0;
+    p1.lo = 1e-300;
     const auto a = pcm_demand::shares(f.delta, f.mk, p0, true), b = pcm_demand::shares(f.delta, f.mk, p1, true);
     EXPECT_LT((a.s - b.s).abs().maxCoeff(), 1e-12);
     EXPECT_LT((a.d_delta - b.d_delta).cwiseAbs().maxCoeff(), 1e-12);
@@ -161,8 +164,7 @@ TEST(PcmTruncation, TinyBoundReproducesUntruncatedModel) {
 
 // (ii) analytic derivatives against central differences with a_lo cutting through windows, including
 // products whose window straddles a_lo; the kernel's draw pass and micro parts agree with pcm_demand::shares.
-TEST(PcmTruncation, DerivativesMatchCentralDifferences) {
-    Fixture f = positive_only(make_fixture(2));
+void check_derivatives(const Fixture & f) {
     const Cut cut = truncation_cuts(f);
     std::printf("  draws %d: bound removes a vertex in %d, a positive window straddles a_lo in %d\n",
                 static_cast<int>(f.mk.weights.size()), cut.removed, cut.straddle);
@@ -221,9 +223,19 @@ TEST(PcmTruncation, DerivativesMatchCentralDifferences) {
     EXPECT_LT(worst_m, 1e-6);
 }
 
+TEST(PcmTruncation, DerivativesMatchCentralDifferences) {
+    check_derivatives(positive_only(make_fixture(2)));
+}
+
+// The same checks with the bound on a_i (no d/dlog c term through the bound): ds/dphi and the micro d_theta
+// match central differences.
+TEST(PcmTruncation, ABoundDerivativesMatchCentralDifferences) {
+    check_derivatives(positive_only(make_fixture(2, 14, 300, 0.5, pcm_demand::BoundKind::A)));
+}
+
 // (iii) shares and CS of small vertical markets against quadrature in log a over the truncated density,
 // with the integrand's breakpoints found by brute force (every pairwise indifference point), not by a hull.
-TEST(PcmTruncation, VerticalMarketMatchesQuadrature) {
+void check_quadrature(pcm_demand::BoundKind kind) {
     // two draws with different price scales, so a_lo,i = alpha_lo / c_i differs; three products of which the
     // dearest straddles a_lo for draw 0 and lies wholly below it for draw 1
     pcm_demand::Market mk;
@@ -240,7 +252,8 @@ TEST(PcmTruncation, VerticalMarketMatchesQuadrature) {
     prm.phi = ArrayXd(1);
     prm.phi << 0.7;
     prm.sigma_p = 1.3;
-    prm.alpha_lo = 0.35;
+    prm.lo = 0.35;
+    prm.bound_kind = kind;
     ArrayXd delta(3);
     delta << 6.0, 10.0, 12.6;           // slopes 1.5, 0.8, 0.433 for c = 1; divided by c = 2.01 for draw 1
     const auto sh = pcm_demand::shares(delta, mk, prm, false);
@@ -251,7 +264,7 @@ TEST(PcmTruncation, VerticalMarketMatchesQuadrature) {
     for (int i = 0; i < 2; ++i) {
         const double c = std::exp(prm.phi[0] * mk.scale_basis(i, 0));
         const ArrayXd q = delta / c;
-        const double s = prm.sigma_p, l_lo = std::log(prm.alpha_lo / c), l_hi = l_lo + 14.0 * s;
+        const double s = prm.sigma_p, l_lo = std::log(pcm_demand::draw_a_lo(prm, c)), l_hi = l_lo + 14.0 * s;
         const double Z = 1.0 - Phi(l_lo / s);
         std::vector<double> bp = {l_lo, l_hi};
         for (int j = 0; j < 3; ++j) {
@@ -286,7 +299,7 @@ TEST(PcmTruncation, VerticalMarketMatchesQuadrature) {
             }
         }
         std::printf("  draw %d: a_lo %.4f, quadrature shares %.12f %.12f %.12f, CS %.12f (kernel %.12f)\n", i,
-                    prm.alpha_lo / c, si[0], si[1], si[2], csi, cs.per_draw[i]);
+                    pcm_demand::draw_a_lo(prm, c), si[0], si[1], si[2], csi, cs.per_draw[i]);
         EXPECT_NEAR(csi, cs.per_draw[i], 1e-10);
         s_quad += mk.weights[i] * si;
         cs_quad_total += mk.weights[i] * csi;
@@ -295,6 +308,12 @@ TEST(PcmTruncation, VerticalMarketMatchesQuadrature) {
     EXPECT_LT((s_quad - sh.s).abs().maxCoeff(), 1e-10);
     EXPECT_NEAR(cs_quad_total, cs.total, 1e-10);
 }
+
+TEST(PcmTruncation, VerticalMarketMatchesQuadrature) { check_quadrature(pcm_demand::BoundKind::ALPHA); }
+
+// Welfare with per-draw c under the bound on a_i: the truncation point is a_lo for both draws, the quadrature
+// integrates the draw's own conditional qualities q = delta / c_i.
+TEST(PcmTruncation, ABoundVerticalMarketMatchesQuadrature) { check_quadrature(pcm_demand::BoundKind::A); }
 
 // (iv) per-draw CS is bounded by the most a consumer at the bound could gain: max_j q_j / a_lo,i - p_j.
 TEST(PcmTruncation, PerDrawSurplusIsBounded) {
@@ -368,7 +387,7 @@ TEST(PcmTruncation, SharesContinuousAtTheBound) {
     prm.theta = ArrayXd(0);
     prm.phi = ArrayXd(0);
     prm.sigma_p = 1.1;
-    prm.alpha_lo = 0.4;
+    prm.lo = 0.4;
     for (double eps : {-1e-9, 1e-9}) {
         ArrayXd d(2);
         d << 8.0, 8.0 + (0.4 + eps) * 7.0;           // slope into product 2 = a_lo + eps
@@ -384,8 +403,8 @@ TEST(PcmTruncation, SharesContinuousAtTheBound) {
     ArrayXd d(2);
     d << 8.0, 8.0 + 0.4 * 7.0;
     pcm_demand::Params lo = prm, hi = prm;
-    lo.alpha_lo = 0.4 - 1e-9;
-    hi.alpha_lo = 0.4 + 1e-9;
+    lo.lo = 0.4 - 1e-9;
+    hi.lo = 0.4 + 1e-9;
     EXPECT_LT((pcm_demand::shares(d, mk, lo, false).s - pcm_demand::shares(d, mk, hi, false).s).abs().maxCoeff(), 1e-8);
 }
 
@@ -400,19 +419,19 @@ TEST(PcmTruncation, EventsUseThePositiveMassFrontier) {
         ArrayXd q; double c;
         draw_q(f.mk, f.prm, f.delta, i, q, c);
         ArrayXd s = ArrayXd::Zero(N);
-        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, f.prm.alpha_lo / c, s, nullptr, nullptr, nullptr,
+        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, f.prm.lo / c, s, nullptr, nullptr, nullptr,
                                           nullptr);
         for (int j = 0; j < N; ++j) if (s[j] > 0) B[j] += f.mk.weights[i];
     }
     const auto ev = pcm_events::max_step(f.delta, ArrayXd::Zero(N), f.mk, f.prm, ArrayXd::Zero(P), 1.0, 2);
     EXPECT_LT((ev.buyer_mass - B).abs().maxCoeff(), 1e-14);
     pcm_demand::Params p0 = f.prm;
-    p0.alpha_lo = 0.0;
+    p0.lo = 0.0;
     const auto ev0 = pcm_events::max_step(f.delta, ArrayXd::Zero(N), f.mk, p0, ArrayXd::Zero(P), 1.0, 2);
     EXPECT_GT((ev0.buyer_mass - ev.buyer_mass).maxCoeff(), 0.01) << "the bound must remove some buyers";
     // signatures: moving the bound changes the hashes of the draws whose positive-mass set changes, and no others
     pcm_demand::Params p1 = f.prm;
-    p1.alpha_lo = 0.55;
+    p1.lo = 0.55;
     const auto s_a = pcm_events::frontier_signature(f.delta, f.mk, f.prm, 2);
     const auto s_b = pcm_events::frontier_signature(f.delta, f.mk, p1, 2);
     int mismatch = 0, changed = 0;
@@ -420,9 +439,9 @@ TEST(PcmTruncation, EventsUseThePositiveMassFrontier) {
         ArrayXd q; double c;
         draw_q(f.mk, f.prm, f.delta, i, q, c);
         ArrayXd sa = ArrayXd::Zero(N), sb = ArrayXd::Zero(N);
-        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, f.prm.alpha_lo / c, sa, nullptr, nullptr, nullptr,
+        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, f.prm.lo / c, sa, nullptr, nullptr, nullptr,
                                           nullptr);
-        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, p1.alpha_lo / c, sb, nullptr, nullptr, nullptr,
+        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, p1.lo / c, sb, nullptr, nullptr, nullptr,
                                           nullptr);
         const bool set_changed = ((sa > 0) != (sb > 0)).any();
         changed += set_changed;
@@ -430,4 +449,132 @@ TEST(PcmTruncation, EventsUseThePositiveMassFrontier) {
     }
     EXPECT_GT(changed, 5);
     EXPECT_EQ(mismatch, 0);
+}
+
+// Regression: with no price-scale parameters (c_i = 1) the bound on a_i is the bound on alpha_i, in every kernel
+// output, to 1e-12.
+TEST(PcmTruncation, ABoundWithoutScaleEqualsAlphaBound) {
+    Fixture f = make_fixture(8);
+    f.mk.scale_basis = MatrixXd(f.mk.weights.size(), 0);
+    f.prm.phi = ArrayXd(0);
+    pcm_demand::Params pa = f.prm, pb = f.prm;
+    pa.bound_kind = pcm_demand::BoundKind::ALPHA;
+    pb.bound_kind = pcm_demand::BoundKind::A;
+    const int N = f.delta.size(), P = f.prm.theta.size() + 1;
+    pcm_kernel::MicroRequest mr;
+    mr.H = MatrixXd::Ones(f.mk.weights.size(), 1);
+    mr.U = MatrixXd(N, 2);
+    mr.U.col(0).setOnes();
+    mr.U.col(1) = f.mk.x.col(2);
+    mr.h_of_part = {0, 0};
+    const auto a = pcm_kernel::evaluate_market(f.delta, f.mk, pa, &mr, true, true);
+    const auto b = pcm_kernel::evaluate_market(f.delta, f.mk, pb, &mr, true, true);
+    EXPECT_LT((a.s - b.s).abs().maxCoeff(), 1e-12);
+    EXPECT_LT((a.ds_ddelta - b.ds_ddelta).cwiseAbs().maxCoeff(), 1e-12);
+    EXPECT_LT((a.ds_dtheta - b.ds_dtheta).cwiseAbs().maxCoeff(), 1e-12);
+    EXPECT_LT((a.ds_dp - b.ds_dp).cwiseAbs().maxCoeff(), 1e-12);
+    EXPECT_LT((a.micro - b.micro).cwiseAbs().maxCoeff(), 1e-12);
+    EXPECT_LT((a.micro_d_theta - b.micro_d_theta).cwiseAbs().maxCoeff(), 1e-12);
+    const auto sa = pcm_demand::shares(f.delta, f.mk, pa, true), sb = pcm_demand::shares(f.delta, f.mk, pb, true);
+    EXPECT_LT((sa.d_theta - sb.d_theta).cwiseAbs().maxCoeff(), 1e-12);
+    const auto ca = pcm_welfare::consumer_surplus(f.delta, f.mk, pa, 2), cb = pcm_welfare::consumer_surplus(f.delta, f.mk, pb, 2);
+    EXPECT_LT((ca.per_draw - cb.per_draw).abs().maxCoeff(), 1e-12 * std::max(1.0, ca.per_draw.abs().maxCoeff()));
+    const ArrayXd la = pcm_demand::detail::frontier_lift(f.delta, f.mk, pa), lb = pcm_demand::detail::frontier_lift(f.delta, f.mk, pb);
+    for (int j = 0; j < N; ++j) EXPECT_EQ(la[j], lb[j]);
+    EXPECT_EQ(pcm_events::frontier_signature(f.delta, f.mk, pa, 2), pcm_events::frontier_signature(f.delta, f.mk, pb, 2));
+    ArrayXd dth = ArrayXd::Zero(P);
+    dth[0] = 0.3;
+    const auto ea = pcm_events::max_step(f.delta, ArrayXd::Constant(N, 0.1), f.mk, pa, dth, 1.0, 2);
+    const auto eb = pcm_events::max_step(f.delta, ArrayXd::Constant(N, 0.1), f.mk, pb, dth, 1.0, 2);
+    EXPECT_LT((ea.tau_draw - eb.tau_draw).abs().maxCoeff(), 1e-12);
+    EXPECT_LT((ea.buyer_mass - eb.buyer_mass).abs().maxCoeff(), 1e-12);
+    const auto fa = pcm_kernel::frontier_anatomy(f.delta, f.mk, pa), fb = pcm_kernel::frontier_anatomy(f.delta, f.mk, pb);
+    EXPECT_TRUE((fa.frontier_size == fb.frontier_size).all());
+    EXPECT_LT((fa.mass_log_width - fb.mass_log_width).abs().maxCoeff(), 1e-12);
+    // inversion from the vertical guess lands on the same delta
+    const Fixture g = positive_only(f);
+    pcm_demand::Params ga = pa, gb = pb;
+    const ArrayXd s_data = pcm_demand::shares(g.delta, g.mk, ga, false).s;
+    ASSERT_TRUE((s_data > 0).all());
+    {
+        pcm_kernel::SolveOptions opt;
+        opt.tol = 1e-12;
+        const auto ra = pcm_kernel::solve_market(s_data, g.mk, ga, ArrayXd(), nullptr, nullptr, opt);
+        const auto rb = pcm_kernel::solve_market(s_data, g.mk, gb, ArrayXd(), nullptr, nullptr, opt);
+        EXPECT_EQ(ra.status, pcm_kernel::Status::OK) << ra.stages;
+        EXPECT_LT((ra.delta - rb.delta).abs().maxCoeff(), 1e-12);
+    }
+}
+
+// Under the bound on a_i the truncation point is the same for every draw, so draws with a larger c_i face a
+// larger bound on alpha_i: the events kernel and frontier_lift use the frontier of positive-mass products,
+// B_j of max_step is the weight of the draws in which j has positive conditional share, and the two bound forms
+// differ when c varies.
+TEST(PcmTruncation, ABoundEventsUseThePositiveMassFrontier) {
+    Fixture f = make_fixture(7, 14, 300, 0.5, pcm_demand::BoundKind::A);
+    const int N = f.delta.size(), R = f.mk.weights.size(), P = f.prm.theta.size() + f.prm.phi.size() + 1;
+    ArrayXd B = ArrayXd::Zero(N);
+    for (int i = 0; i < R; ++i) {
+        ArrayXd q; double c;
+        draw_q(f.mk, f.prm, f.delta, i, q, c);
+        ArrayXd s = ArrayXd::Zero(N);
+        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, f.prm.lo, s, nullptr, nullptr, nullptr, nullptr);
+        for (int j = 0; j < N; ++j) if (s[j] > 0) B[j] += f.mk.weights[i];
+    }
+    const auto ev = pcm_events::max_step(f.delta, ArrayXd::Zero(N), f.mk, f.prm, ArrayXd::Zero(P), 1.0, 2);
+    EXPECT_LT((ev.buyer_mass - B).abs().maxCoeff(), 1e-14);
+    pcm_demand::Params pa = f.prm;
+    pa.bound_kind = pcm_demand::BoundKind::ALPHA;
+    const auto s_a = pcm_demand::shares(f.delta, f.mk, f.prm, false).s, s_alpha = pcm_demand::shares(f.delta, f.mk, pa, false).s;
+    EXPECT_GT((s_a - s_alpha).abs().maxCoeff(), 1e-4) << "with c varying the two bounds differ";
+    // a pure scale direction moves the A frontier: the linearised first event along dphi matches the brute-force
+    // first change of the signature on a fine tau grid, to the grid step plus the linearisation error
+    ArrayXd dth = ArrayXd::Zero(P);
+    dth[f.prm.theta.size()] = 0.4;
+    const auto es = pcm_events::max_step(f.delta, ArrayXd::Zero(N), f.mk, f.prm, dth, 0.5, 2);
+    EXPECT_LT(es.tau_first, 0.5) << "a scale step moves some draw's A frontier";
+    const auto sig0 = pcm_events::frontier_signature(f.delta, f.mk, f.prm, 2);
+    double tau_bf = 0.5;
+    for (int g = 1; g <= 2000 && tau_bf == 0.5; ++g) {
+        pcm_demand::Params pt = f.prm;
+        pt.phi[0] += 0.4 * 0.5 * g / 2000.0;
+        if (pcm_events::frontier_signature(f.delta, f.mk, pt, 2) != sig0) tau_bf = 0.5 * g / 2000.0;
+    }
+    EXPECT_NEAR(es.tau_first, tau_bf, 0.02 * std::max(tau_bf, 1e-3) + 0.5 / 2000.0);
+    // frontier_lift lifts a zero-share product onto a positive-mass window
+    const auto sh = pcm_demand::shares(f.delta, f.mk, f.prm, false).s;
+    const ArrayXd lift = pcm_demand::detail::frontier_lift(f.delta, f.mk, f.prm);
+    for (int j = 0; j < N; ++j) {
+        if (sh[j] > 0 || !std::isfinite(lift[j])) continue;
+        ArrayXd d = f.delta;
+        d[j] += lift[j] * (1.0 + 1e-6) + 1e-9;
+        EXPECT_GT(pcm_demand::shares(d, f.mk, f.prm, false).s[j], 0.0) << "product " << j;
+    }
+}
+
+// frontier_anatomy: per-draw mass is the draw's inside share, the mass-weighted window width telescopes to at
+// most the log range, and the sizes count the positive-mass windows.
+TEST(PcmTruncation, FrontierAnatomyMatchesTheDrawPass) {
+    for (auto kind : {pcm_demand::BoundKind::ALPHA, pcm_demand::BoundKind::A}) {
+        Fixture f = make_fixture(9, 14, 300, 0.5, kind);
+        const int N = f.delta.size(), R = f.mk.weights.size();
+        const auto an = pcm_kernel::frontier_anatomy(f.delta, f.mk, f.prm);
+        double tot = 0.0;
+        for (int i = 0; i < R; ++i) {
+            ArrayXd q; double c;
+            draw_q(f.mk, f.prm, f.delta, i, q, c);
+            ArrayXd s = ArrayXd::Zero(N);
+            const double a_lo = pcm_demand::draw_a_lo(f.prm, c);
+            pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, a_lo, s, nullptr, nullptr, nullptr, nullptr);
+            EXPECT_NEAR(an.mass[i], s.sum(), 1e-14);
+            EXPECT_EQ(an.frontier_size[i], (s > 0).count());
+            if (an.mass[i] > 0) {
+                EXPECT_LE(an.mass_log_width[i], an.mass[i] * an.log_range[i] * (1 + 1e-12));
+                EXPECT_GT(an.log_range[i], 0.0);
+                if (an.frontier_size[i] == 1) EXPECT_NEAR(an.mass_log_width[i], an.mass[i] * an.log_range[i], 1e-12);
+            }
+            tot += f.mk.weights[i] * an.mass[i];
+        }
+        EXPECT_NEAR(tot, pcm_demand::shares(f.delta, f.mk, f.prm, false).s.sum(), 1e-12);
+    }
 }

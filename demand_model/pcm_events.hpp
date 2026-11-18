@@ -15,9 +15,11 @@
  * not vertices, which matches index_positive_shares (pcm_market_share.cpp): a product is on F_i
  * exactly when it has positive conditional share. Membership does not depend on c_i or sigma_p
  * (DESIGN F5), so the scale and sigma_p components of a direction never cause an event. With a bound
- * alpha_lo > 0 (pcm_demand::Params) the hull is that of (p_j, y_ij - alpha_lo p_j): a vertex has a window of
- * positive mass exactly when its entry slope in y units exceeds alpha_lo, whatever c_i, so F5 still holds and
- * F_i is the set of products with positive conditional share under the bound.
+ * lo > 0 (pcm_demand::Params) the hull is that of (p_j, y_ij - lo_y,i p_j) with lo_y,i the bound in y units:
+ * a vertex has a window of positive mass exactly when its entry slope in y units exceeds lo_y,i, so F_i is the
+ * set of products with positive conditional share under the bound. Under BoundKind::ALPHA lo_y,i = lo, so F5
+ * still holds; under BoundKind::A lo_y,i = lo c_i, so membership depends on c_i (never on sigma_p) and the scale
+ * component of a direction moves the shear, linearised in max_step as d lo_y,i = lo_y,i (scale_basis_i . dphi).
  *
  * Every function processes draws in fixed blocks of 64 and reduces in draw order, so results are
  * bit-identical for every thread count. n_threads <= 0 uses the OpenMP default team size. The

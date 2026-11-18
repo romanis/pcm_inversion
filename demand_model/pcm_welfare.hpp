@@ -15,10 +15,11 @@
  *     CS_i = sum_k [ q_k E(1/a; e_{k+1} < a < e_k) - p_k P(e_{k+1} < a < e_k) ],
  *     E(1/a; lo < a < hi) = exp(s^2/2) [Phi((ln hi + s^2)/s) - Phi((ln lo + s^2)/s)].
  * The utility scale cancels (LEARNINGS 11), so CS is invariant to (delta, theta, c) -> kappa (...).
- * With a bound alpha_lo > 0 (pcm_demand::Params), a_i is truncated below at a_lo = alpha_lo / c_i: P and E
- * become the truncated F_T and E_T(1/a) of the window ends clipped at a_lo, so the last window ends at a_lo
- * and CS_i <= max_k q_k / a_lo - p_k (LEARNINGS 29). The bound scales with the utility, so the invariance
- * holds with alpha_lo -> kappa alpha_lo.
+ * With a bound lo > 0 (pcm_demand::Params), a_i is truncated below at a_lo,i = draw_a_lo(prm, c_i) (lo / c_i
+ * for BoundKind::ALPHA, lo for A): P and E become the truncated F_T and E_T(1/a) of the window ends clipped at
+ * a_lo,i, so the last window ends at a_lo,i and CS_i <= max_k q_k / a_lo,i - p_k (LEARNINGS 29). Under ALPHA
+ * the bound scales with the utility, so the invariance holds with lo -> kappa lo; under A it holds with
+ * c -> kappa c and lo fixed.
  */
 namespace pcm_welfare {
 

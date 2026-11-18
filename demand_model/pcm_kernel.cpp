@@ -60,7 +60,7 @@ void validate_market(const pcm_demand::Market & mk, const pcm_demand::Params & p
     require(Q == 0 || mk.scale_basis.allFinite(), "scale_basis must be finite");
     require(prm.theta.allFinite() && prm.phi.allFinite(), "theta and phi must be finite");
     require(std::isfinite(prm.sigma_p) && prm.sigma_p > 0, "sigma_p must be positive and finite");
-    require(std::isfinite(prm.alpha_lo) && prm.alpha_lo >= 0, "alpha_lo must be finite and non-negative");
+    require(std::isfinite(prm.lo) && prm.lo >= 0, "the bound (alpha_lo or a_lo) must be finite and non-negative");
 }
 
 void validate_micro(const MicroRequest & mr, int N, int R) {
@@ -92,7 +92,7 @@ void append(std::string & stages, const std::string & s) {
 
 pcm_demand::Params interpolate(const pcm_demand::Params & a, const pcm_demand::Params & b, double tau) {
     return pcm_demand::Params{(1.0 - tau) * a.theta + tau * b.theta, (1.0 - tau) * a.phi + tau * b.phi,
-                              (1.0 - tau) * a.sigma_p + tau * b.sigma_p, b.alpha_lo};
+                              (1.0 - tau) * a.sigma_p + tau * b.sigma_p, b.lo, b.bound_kind};
 }
 
 }  // namespace
@@ -146,7 +146,7 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
             }
         }
         ArrayXd s_c = ArrayXd::Zero(N), dsig = ArrayXd::Zero(N), dlogc = ArrayXd::Zero(N);
-        const bool bound = prm.alpha_lo > 0.0;
+        const bool bound = pcm_demand::bound_moves_with_scale(prm);   // log c acts through a_lo = lo / c
         MatrixXd Jd, Jp;
         if (jac) { Jd = MatrixXd::Zero(N, N); Jp = MatrixXd::Zero(N, N); }
         VectorXd t(K);
@@ -166,7 +166,7 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
 
             s_c.setZero();
             if (jac) { dsig.setZero(); if (bound) dlogc.setZero(); }
-            pcm_demand::detail::cond_vertical(dc, mk.p, prm.sigma_p, prm.alpha_lo / c, s_c, jac ? &Jd : nullptr,
+            pcm_demand::detail::cond_vertical(dc, mk.p, prm.sigma_p, pcm_demand::draw_a_lo(prm, c), s_c, jac ? &Jd : nullptr,
                                               &dsig, &Jp, bound ? &dlogc : nullptr);
 
             const double w = mk.weights[i];
@@ -193,7 +193,7 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
                     acc.ds_dtheta(S, m) += (w * mk.taste_basis(i, m) / c) * (Jc * xs);
                 }
                 if (Q > 0) {
-                    // log c acts through dc = y / c (-Jd dc) and, with a bound, through a_lo = alpha_lo / c
+                    // log c acts through dc = y / c (-Jd dc) and, with an ALPHA bound, through a_lo = lo / c
                     VectorXd Jdc = Jc * dc(S).matrix();
                     if (bound) Jdc -= dlogc(S).matrix();
                     for (int q = 0; q < Q; ++q) acc.ds_dtheta(S, M + q) += (-w * mk.scale_basis(i, q)) * Jdc;
@@ -274,7 +274,8 @@ SolveResult solve_market(const ArrayXd & s_data, const pcm_demand::Market & mk,
                     "theta_warm must have the layout of theta");
             require(prm_warm->theta.allFinite() && prm_warm->phi.allFinite() && std::isfinite(prm_warm->sigma_p) &&
                     prm_warm->sigma_p > 0, "theta_warm must be finite with positive sigma_p");
-            require(prm_warm->alpha_lo == prm.alpha_lo, "theta_warm must have the alpha_lo of theta");
+            require(prm_warm->lo == prm.lo && prm_warm->bound_kind == prm.bound_kind,
+                    "theta_warm must have the bound of theta");
         }
         if (micro) validate_micro(*micro, N, static_cast<int>(mk.weights.size()));
         require(opt.tol > 0 && opt.n_threads >= 1 && opt.rcond_min >= 0 && opt.path_seconds >= 0,
@@ -411,6 +412,37 @@ SolveResult solve_market(const ArrayXd & s_data, const pcm_demand::Market & mk,
     res.share_evaluations = evals;
     res.seconds = seconds_since(t0);
     return res;
+}
+
+FrontierAnatomy frontier_anatomy(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm)
+{
+    const int N = static_cast<int>(delta.size());
+    const int K = static_cast<int>(mk.x.cols());
+    const int R = static_cast<int>(mk.weights.size());
+    const int M = static_cast<int>(prm.theta.size());
+    const int Q = static_cast<int>(prm.phi.size());
+    validate_market(mk, prm, N);
+    require(delta.allFinite(), "delta must be finite");
+    FrontierAnatomy out;
+    out.frontier_size = Eigen::ArrayXi::Zero(R);
+    out.mass = ArrayXd::Zero(R);
+    out.log_range = ArrayXd::Zero(R);
+    out.mass_log_width = ArrayXd::Zero(R);
+#pragma omp parallel for schedule(dynamic, 64) if(R > 64)
+    for (int i = 0; i < R; ++i) {
+        VectorXd t = VectorXd::Zero(K);
+        for (int m = 0; m < M; ++m) t[mk.taste_col[m]] += prm.theta[m] * mk.taste_basis(i, m);
+        const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
+        const double c = std::exp(log_c);
+        const ArrayXd dc = (delta + (mk.x * t).array()) / c;
+        const pcm_demand::detail::DrawAnatomy a =
+            pcm_demand::detail::draw_anatomy(dc, mk.p, prm.sigma_p, pcm_demand::draw_a_lo(prm, c));
+        out.frontier_size[i] = a.frontier_size;
+        out.mass[i] = a.mass;
+        out.log_range[i] = a.log_range;
+        out.mass_log_width[i] = a.mass_log_width;
+    }
+    return out;
 }
 
 }  // namespace pcm_kernel

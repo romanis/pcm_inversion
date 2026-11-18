@@ -36,16 +36,35 @@ void check_market(const ArrayXd & delta, const pcm_demand::Market & mk, const pc
         if (!(j == 0 ? mk.p[0] > 0 : mk.p[j] > mk.p[j - 1])) fail("prices must be positive and strictly increasing");
     if (!delta.allFinite() || !prm.theta.allFinite() || !mk.taste_basis.allFinite() || !mk.weights.allFinite())
         fail("delta, theta, taste_basis and weights must be finite");
-    if (!(prm.alpha_lo >= 0.0) || !std::isfinite(prm.alpha_lo)) fail("alpha_lo must be finite and non-negative");
+    if (!(prm.lo >= 0.0) || !std::isfinite(prm.lo)) fail("the bound lo must be finite and non-negative");
+    const int Q = static_cast<int>(prm.phi.size());
+    if (prm.lo > 0.0 && prm.bound_kind == pcm_demand::BoundKind::A && Q > 0) {
+        if (mk.scale_basis.rows() != R || mk.scale_basis.cols() != Q) fail("scale_basis must be R x Q (Q = size of phi)");
+        if (!mk.scale_basis.allFinite() || !prm.phi.allFinite()) fail("scale_basis and phi must be finite");
+    }
 }
 
-// The utility the frontier is built on: y = delta + x . t, sheared to y - alpha_lo p under a bound. Draw i
-// buys a vertex with entry slope e (in y / c units) only if e > a_lo = alpha_lo / c, that is if its slope in
-// y units exceeds alpha_lo, so the increasing part of the sheared hull is the set of products with a window
-// of positive mass, whatever c_i and sigma_p (F5 still holds).
-void shear(const pcm_demand::Params & prm, const pcm_demand::Market & mk, ArrayXd & y)
+// log c_i of draw i (0 without scale parameters)
+double log_scale(const pcm_demand::Market & mk, const pcm_demand::Params & prm, int i)
 {
-    if (prm.alpha_lo > 0.0) y -= prm.alpha_lo * mk.p;
+    return prm.phi.size() > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
+}
+
+// The utility the frontier is built on: y = delta + x . t, sheared to y - lo_y,i p under a bound, with
+// lo_y,i = c_i draw_a_lo(prm, c_i) the bound in y units. Draw i buys a vertex with entry slope e (in y / c
+// units) only if e > a_lo,i, that is if its slope in y units exceeds lo_y,i, so the increasing part of the
+// sheared hull is the set of products with a window of positive mass. Under ALPHA lo_y,i = lo whatever c_i
+// (F5 holds); under A lo_y,i = lo c_i, so membership depends on c_i, never on sigma_p.
+double bound_in_y(const pcm_demand::Params & prm, const pcm_demand::Market & mk, int i)
+{
+    if (!(prm.lo > 0.0)) return 0.0;
+    return prm.bound_kind == pcm_demand::BoundKind::A ? prm.lo * std::exp(log_scale(mk, prm, i)) : prm.lo;
+}
+
+void shear(const pcm_demand::Params & prm, const pcm_demand::Market & mk, int i, ArrayXd & y)
+{
+    const double b = bound_in_y(prm, mk, i);
+    if (b > 0.0) y -= b * mk.p;
 }
 
 // y = base + sum_m coef_m * taste_basis(i, m) * x.col(taste_col[m])
@@ -166,7 +185,7 @@ void all_frontiers(const ArrayXd & delta, const pcm_demand::Market & mk, const p
         H.reserve(delta.size() + 1);
         for (int i = b * BLOCK; i < std::min(R, (b + 1) * BLOCK); ++i) {
             affine_utility(delta, mk, prm.theta, i, y);
-            shear(prm, mk, y);
+            shear(prm, mk, i, y);
             frontier(y, mk.p, H);
             part[b].insert(part[b].end(), H.begin(), H.end());
             sizes[b].push_back(static_cast<int>(H.size()));
@@ -200,7 +219,9 @@ StepEvents max_step(const ArrayXd & delta, const ArrayXd & delta_dot, const pcm_
     if (!(tau_max > 0) || !std::isfinite(tau_max))
         throw std::invalid_argument("pcm_events::max_step: tau_max must be positive and finite");
 
-    const ArrayXd dtaste = dtheta.head(M);   // scale and sigma_p never move a frontier (F5)
+    const ArrayXd dtaste = dtheta.head(M);   // sigma_p never moves a frontier; scale only through an A bound
+    const ArrayXd dphi = dtheta.segment(M, Q);
+    const bool scale_moves = prm.lo > 0.0 && prm.bound_kind == pcm_demand::BoundKind::A && Q > 0;
 
     StepEvents out;
     out.tau_draw.resize(R);
@@ -216,8 +237,10 @@ StepEvents max_step(const ArrayXd & delta, const ArrayXd & delta_dot, const pcm_
         H.reserve(N + 1);
         for (int i = b * BLOCK; i < std::min(R, (b + 1) * BLOCK); ++i) {
             affine_utility(delta, mk, prm.theta, i, y);
-            shear(prm, mk, y);
+            shear(prm, mk, i, y);
             affine_utility(delta_dot, mk, dtaste, i, v);
+            // under an A bound the shear lo c_i p moves with log c_i: linearised, d/dtau = lo c_i (b_i . dphi) p
+            if (scale_moves) v -= bound_in_y(prm, mk, i) * (mk.scale_basis.row(i).array() * dphi.transpose()).sum() * mk.p;
             frontier(y, mk.p, H);
             const FirstEvent ev = first_event(y, v, mk.p, H, tau_max);
             out.tau_draw[i] = ev.tau;
@@ -288,7 +311,7 @@ std::vector<uint64_t> frontier_signature(const ArrayXd & delta, const pcm_demand
         H.reserve(delta.size() + 1);
         for (int i = b * BLOCK; i < std::min(R, (b + 1) * BLOCK); ++i) {
             affine_utility(delta, mk, prm.theta, i, y);
-            shear(prm, mk, y);
+            shear(prm, mk, i, y);
             frontier(y, mk.p, H);
             sig[i] = hash_frontier(H);
         }

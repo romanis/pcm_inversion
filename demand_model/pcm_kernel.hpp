@@ -85,6 +85,22 @@ MarketEvaluation evaluate_market(const Eigen::ArrayXd & delta, const pcm_demand:
                                  const pcm_demand::Params & prm, const MicroRequest * micro,
                                  bool derivatives, bool price_derivatives);
 
+/** Per-draw window anatomy (pcm_demand::detail::DrawAnatomy), (R,) arrays. */
+struct FrontierAnatomy {
+    Eigen::ArrayXi frontier_size;      //!< products with a window of positive mass
+    Eigen::ArrayXd mass;               //!< the draw's inside share
+    Eigen::ArrayXd log_range;          //!< log(e_0 / a_lo,i), 0 for a draw that buys nothing, inf without a bound
+    Eigen::ArrayXd mass_log_width;     //!< sum over positive-mass windows of mass x log width
+};
+
+/**
+ * Window anatomy of every draw of one market at delta: the inputs of the bounded elasticity law (LEARNINGS 32),
+ * own elasticity about (p / hull gap) / (window width in log alpha). Uses the calling thread's OpenMP team
+ * size. Throws std::invalid_argument on bad input.
+ */
+FrontierAnatomy frontier_anatomy(const Eigen::ArrayXd & delta, const pcm_demand::Market & mk,
+                                 const pcm_demand::Params & prm);
+
 }  // namespace pcm_kernel
 
 #endif
