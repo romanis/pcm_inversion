@@ -681,7 +681,7 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         return out
 
     model: _Model | None = None
-    probe_due = False      # a sub-noise rejection: the next step goes to the terminal probe
+    probe_due = ""         # why the next step goes to the terminal probe (a sub-noise rejection, one at the floor)
     probe_notes: list[str] = []
 
     def noise_mode() -> bool:
@@ -729,10 +729,10 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
 
         # round 4: the terminal probe when the model has nothing left to offer above the noise floor
         if noise_mode() and (probe_due or _gn_pred(model, d, n) < options.noise_pred_factor * noise_floor):
-            why = ("a rejection changed q by less than the noise floor" if probe_due else
+            why = (probe_due if probe_due else
                    f"the predicted decrease at radius {Delta:.2e} is below {options.noise_pred_factor:g} x the "
                    f"noise floor")
-            probe_due = False
+            probe_due = ""
             need = options.probe_gain_factor * noise_floor
             pt, pq, n_probe, summary, win = _terminal_probe(
                 problem, obj, theta, q, d_gn, arr, tuple(options.probe_steps), heartbeat,
@@ -809,7 +809,8 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
             status = trial.status if not trial.ok else EvalStatus.NUMERICAL
             Delta = 0.25 * dinf
             if noise_mode() and Delta < options.noise_Delta_floor:
-                probe_due = probe_due or Delta_used <= options.noise_Delta_floor * (1 + 1e-9)
+                if not probe_due and Delta_used <= options.noise_Delta_floor * (1 + 1e-9):
+                    probe_due = f"a trial at the radius floor {options.noise_Delta_floor:g} failed to evaluate"
                 Delta = options.noise_Delta_floor
             rec = _record(stage, it, False, float("nan"), trial, obj, float("nan"), Delta_used, tau_cap, status, secs,
                           trial_theta, pred_mass, real_mass)
@@ -832,7 +833,7 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
                 lm = options.lm_start if lm <= 0 else min(lm * options.lm_factor, options.lm_max)
         sub_noise = (noise_mode() and not accept and abs(q_trial - q) < noise_floor)
         if sub_noise:
-            probe_due = True   # no information in this rejection: keep the radius, probe next
+            probe_due = "a rejection changed q by less than the noise floor"   # no information: keep the radius
         elif rho < 0.25:
             Delta = 0.25 * dinf
         elif rho > 0.75 and dinf >= 0.9 * Delta:
@@ -840,8 +841,8 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         if noise_mode() and Delta < options.noise_Delta_floor:
             # below the secant step a rejection says nothing about the direction: floor the radius, and a rejection
             # already at the floor goes to the probe
-            if not accept and Delta_used <= options.noise_Delta_floor * (1 + 1e-9):
-                probe_due = True
+            if not accept and not probe_due and Delta_used <= options.noise_Delta_floor * (1 + 1e-9):
+                probe_due = f"a rejection at the radius floor {options.noise_Delta_floor:g}"
             Delta = options.noise_Delta_floor
         if tau_cap < 1.0 and rho > 0.75:
             q_mass = min(options.q_mass_max, 1.5 * q_mass)
