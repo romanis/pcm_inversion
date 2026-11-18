@@ -18,6 +18,11 @@ petrin_replication/*
 nevo_replication/*
 !nevo_replication/estimate_blp.py
 !nevo_replication/estimate_pcm.py
+# GMY: the raw replication package (Dataverse doi:10.7910/DVN/CZGOKP) is unpacked into gmy_replication/data/
+gmy_replication/*
+!gmy_replication/estimate_blp.py
+!gmy_replication/estimate_pcm.py
+gmy_replication/data/
 
 # Estimation harness: compiled module and pytest cache
 nfp_harness/_native/*.so
