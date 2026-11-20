@@ -166,7 +166,7 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
 
             s_c.setZero();
             if (jac) { dsig.setZero(); if (bound) dlogc.setZero(); }
-            pcm_demand::detail::cond_vertical(dc, mk.p, prm.sigma_p, pcm_demand::draw_a_lo(prm, c), s_c, jac ? &Jd : nullptr,
+            pcm_share::cond_share(dc, mk.p, prm.sigma_p, pcm_demand::draw_a_lo(prm, c), s_c, jac ? &Jd : nullptr,
                                               &dsig, &Jp, bound ? &dlogc : nullptr);
 
             const double w = mk.weights[i];
@@ -228,7 +228,7 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
                     acc.micro_d_theta(p, M + Q) += wh * ud[p];
                 }
             }
-            // restore the zero state cond_vertical requires
+            // restore the zero state cond_share requires
             Jd(S, S).setZero();
             Jp(S, S).setZero();
         }

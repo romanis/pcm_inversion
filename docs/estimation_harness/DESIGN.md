@@ -661,7 +661,9 @@ summarised in the report (`kink_limited_steps`, `predicted_vs_realised_mass`).
   `S = blockdiag(S_aggregate_clustered, n V_micro)`, re-concentrate beta (`set_weighting`), restart
   the optimizer at theta_hat_1 with a fresh history segment. Stage boundaries are checkpointed.
   Step 2 starts only if the step-1 report has no `SCALE_ARTIFACT` or `SD_XI_BLOWUP` (section 5.4);
-  otherwise the run stops and says so, because W2 would inherit the degenerate point.
+  otherwise the run stops and says so, because W2 would inherit the degenerate point. When the aggregate
+  block is in Sargan form (`SarganIVMoments`, scale-free) `SD_XI_BLOWUP` is a warning and step 2 runs: that
+  form cannot be lowered by shrinking xi, and a concentrated xi drives it toward n h_jj, not 0 (LEARNINGS 19).
 - `CUE`: `q = n g' S(theta)^{-1} g`. Gradient exact from `cue_terms` (LEARNINGS 1 formula),
   Hessian approximated by `2 n G' S^{-1} G` in the same trust-region loop, acceptance on the actual q.
   The micro block of S is held at its value at the CUE start point and the report states it. CUE is

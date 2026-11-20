@@ -147,7 +147,8 @@ class Fixed:
 class TwoStep:
     """TwoStep(W1): run with W1, then W2 = S(theta_hat_1)^{-1} and restart at theta_hat_1.
 
-    Step 2 starts only if the step-1 report has no SCALE_ARTIFACT or SD_XI_BLOWUP.
+    Step 2 starts only if the step-1 report has no SCALE_ARTIFACT or SD_XI_BLOWUP; a blocking degeneracy the caller
+    names in ``gate(..., warn_only=...)`` is a warning instead (SD_XI_BLOWUP under a scale-free aggregate block).
     """
 
     mode = "two_step"
@@ -166,15 +167,23 @@ class TwoStep:
         self.W2 = weight_from_covariance(problem.covariance(ev))
         return self.W2
 
-    def gate(self, detected: Any) -> tuple[bool, str]:
-        """gate(detected_degeneracy_names) -> (may_start_step2, reason).
+    def gate(self, detected: Any, warn_only: Any = ()) -> tuple[bool, str]:
+        """gate(detected_degeneracy_names, warn_only=()) -> (may_start_step2, reason).
 
-        ``detected`` is an iterable of names of degeneracies detected in the step-1 report.
+        ``detected`` is an iterable of names of degeneracies detected in the step-1 report. A blocking degeneracy
+        also in ``warn_only`` does not stop step 2: the result is (True, warning text). Otherwise the reason is ""
+        when step 2 may start.
         """
-        blocking = sorted(set(detected) & set(self.blocking_degeneracies))
+        found = set(detected) & set(self.blocking_degeneracies)
+        warned = sorted(found & set(warn_only))
+        blocking = sorted(found - set(warn_only))
         if blocking:
             return False, (f"Step 2 not started: the step-1 point shows {', '.join(blocking)}, and W2 would "
                            f"inherit the degenerate point (DESIGN 4.5).")
+        if warned:
+            return True, (f"WARNING: the step-1 point shows {', '.join(warned)}; step 2 runs because the aggregate "
+                          f"block is scale-free (Sargan form), which bounds the concentrated-xi direction (LEARNINGS "
+                          f"19), so W2 does not inherit the fixed-W scale artefact (DESIGN 4.5).")
         return True, ""
 
     def describe(self) -> dict[str, Any]:

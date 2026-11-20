@@ -37,6 +37,8 @@ from .types import EvalStatus, HistoryRecord
 
 __all__ = [
     "RunDirectory",
+    "read_stage_file",
+    "stage_parameter_names",
     "SpecMismatchError",
     "atomic_write",
     "hash_options",
@@ -204,6 +206,35 @@ def _reorder(row: list[str], old: list[str], new: list[str]) -> list[str]:
 def _sib(stem: pathlib.Path, suffix: str) -> pathlib.Path:
     """``stem`` plus a suffix, without ``with_suffix`` (stage names may contain dots)."""
     return stem.with_name(stem.name + suffix)
+
+
+def read_stage_file(path: str | pathlib.Path) -> dict[str, Any]:
+    """read_stage_file(path) -> the state of one stored stage (``<run dir>/stages/<stage>.npz`` or its ``.json``), read
+    without a RunDirectory and without the spec-hash check: for reading another run's stage (a warm start)."""
+    p = pathlib.Path(path)
+    stem = p.with_name(p.name[:-len(".npz")]) if p.name.endswith(".npz") else (
+        p.with_name(p.name[:-len(".json")]) if p.name.endswith(".json") else p)
+    doc = json.loads(_sib(stem, ".json").read_text())
+    for candidate in (_sib(stem, ".npz"), _sib(stem, ".prev.npz")):
+        if not candidate.exists():
+            continue
+        with np.load(candidate, allow_pickle=False) as z:
+            if str(z["__token__"]) == doc["token"]:
+                return _join(doc["state"], {k: z[k] for k in z.files if k != "__token__"})
+    raise RuntimeError(f"stage {stem} has no matching array file (token {doc['token']})")
+
+
+def stage_parameter_names(path: str | pathlib.Path) -> list[str] | None:
+    """stage_parameter_names(path) -> the layout names of a stored stage (``<run dir>/stages/<stage>.npz``) in theta
+    order, read from the ``theta_<name>`` columns of its run's ``history.csv`` header; None when the run directory has
+    no history. For mapping another run's theta onto a layout by name."""
+    hist = pathlib.Path(path).resolve().parent.parent / "history.csv"
+    if not hist.exists():
+        return None
+    with open(hist, newline="") as fh:
+        header = next(csv.reader(fh), [])
+    names = [c[len("theta_"):] for c in header if c.startswith("theta_")]
+    return names or None
 
 
 def _utc_now() -> str:

@@ -80,6 +80,32 @@ def test_replace_and_with_starts_keep_units() -> None:
     assert layout.describe()[1]["cap"] is True and layout.describe()[0]["unit"] == pytest.approx(u[0])
 
 
+def test_fixed_and_parse_fixed() -> None:
+    """``fixed`` fixes named parameters at values (bounds widen to a value outside them), as the band stages do;
+    ``parse_fixed`` reads the NAME=VALUE items of a --fix option."""
+    from nfp_harness.params import parse_fixed
+
+    layout = _layout()
+    u = layout.units(_data())
+    f = layout.fixed({"sigma_hpwt": 3.5, "pi_space": -0.2})
+    assert f.free_mask().tolist() == [False, True, False, True, False]
+    assert f["sigma_hpwt"].start == 3.5 and f["pi_space"].start == -0.2
+    assert (f["sigma_hpwt"].lower, f["sigma_hpwt"].upper) == (0.0, 100.0)
+    np.testing.assert_allclose(f.units(), u)
+    wide = layout.fixed({"sigma_p": 4.0})
+    assert (wide["sigma_p"].start, wide["sigma_p"].lower, wide["sigma_p"].upper) == (4.0, 0.05, 4.0)
+    assert layout.fixed({}).describe() == layout.describe()
+    with pytest.raises(KeyError):
+        layout.fixed({"nope": 1.0})
+    with pytest.raises(ValueError):
+        layout.fixed({"sigma_p": float("nan")})
+    assert parse_fixed(["sigma_p=3.0", " a_lo = 0.1"]) == {"sigma_p": 3.0, "a_lo": 0.1}
+    assert parse_fixed(None) == {}
+    for bad in (["sigma_p"], ["=1"], ["sigma_p=x"], ["sigma_p=1", "sigma_p=2"]):
+        with pytest.raises(ValueError):
+            parse_fixed(bad)
+
+
 def test_spec_validation() -> None:
     with pytest.raises(ValueError, match="duplicate"):
         ParameterLayout([ParameterSpec("a", "sigma_p", None, None, 1.0, 0.0, 2.0)] * 2)

@@ -230,3 +230,181 @@ def test_margin_band_rows_start_and_resume(tmp_path: pathlib.Path) -> None:
     finally:
         pipe2.close()
     assert spec2.calls == 0 and rows2 == rows
+
+
+class VariantSpec(ToySpec):
+    """Two layout variants of phi_inc's basis (agent columns inc and hi); the prefit keeps the one with the lower q."""
+
+    name = "toy_variants"
+    prefit_free = ("phi_inc",)
+    prefit_max_iterations = 4
+
+    def __init__(self, syn: dict[str, Any]) -> None:
+        super().__init__(syn)
+        self.variant: str | None = None
+        self.built: list[str | None] = []
+
+    def prefit_variants(self) -> tuple[str, ...]:
+        return ("inc", "hi")
+
+    def named_directions(self, theta: np.ndarray, units: np.ndarray) -> dict[str, np.ndarray]:
+        return {}
+
+    def set_prefit_variant(self, name: str | None) -> None:
+        self.variant = name
+
+    def build_problem(self, nu: int, seed: int, threads: int | None, moments: str,
+                      layout_changes: dict[str, Any] | None = None) -> NFPGMMProblem:
+        prob = super().build_problem(nu, seed, threads, moments, layout_changes)
+        self.built.append(self.variant)
+        basis = self.variant or "inc"
+        if basis != "inc":
+            prob.model.close()
+            syn = self.syn
+            layout = prob.layout.replace({"phi_inc": {"basis": basis}})
+            model = PCMModel(PCMSpec(CHARS, tol=1e-12), syn["data"], layout, syn["nu"], syn["seed"], total_threads=8)
+            prob = NFPGMMProblem(model, prob.moments, prob.linear, layout)
+        return prob
+
+
+def test_prefit_variants_keep_the_lower_q_and_apply_on_resume(tmp_path: pathlib.Path) -> None:
+    syn = make_synthetic(2, 8, 32, 8, seed=2)
+    spec = VariantSpec(syn)
+    cfg = RunConfig(base=tmp_path, nu=syn["nu"], seed=syn["seed"], threads=8)
+    pipe = Pipeline(spec, cfg)
+    try:
+        prob = pipe.problem("all")   # needs the variant: runs both prefits first
+        q = json.loads(str(pipe.rd.load_stage("prefit.variant")["q"]))
+        best = min(q, key=q.get)
+        assert set(q) == {"inc", "hi"} and pipe.rd.load_stage("prefit.variant")["variant"] == best
+        assert spec.variant == best and spec.built[:2] == ["inc", "hi"] and spec.built[-1] == best
+        assert prob.layout.specs[prob.layout.names.index("phi_inc")].basis == best
+        np.testing.assert_array_equal(pipe.prefit(), pipe.rd.load_stage(f"prefit.{best}")["theta"])
+        assert (pipe.path / "reports" / "prefit" / "report.json").exists()
+    finally:
+        pipe.close()
+    spec2 = VariantSpec(syn)
+    pipe2 = Pipeline(spec2, cfg)
+    try:
+        assert spec2.variant == best   # applied when the run directory is opened, before any problem is built
+        pipe2.prefit()
+        assert spec2.built == []       # nothing re-estimated
+    finally:
+        pipe2.close()
+
+
+class StabilitySpec(ToySpec):
+    """ToySpec whose stability problem (another seed, doubled draws) comes with a spec-side warm start from another
+    run at another theta, as GMY's --warm-delta gives it (the round-4 run whose nu-64 re-run failed to invert 1991)."""
+
+    name = "toy_stability"
+    gate_required: tuple[str, ...] = ()
+
+    def __init__(self, syn: dict[str, Any]) -> None:
+        super().__init__(syn)
+        self.stability_starts: list[np.ndarray | None] = []
+
+    def named_directions(self, theta: np.ndarray, units: np.ndarray) -> dict[str, np.ndarray]:
+        return {}
+
+    def headlines(self, problem: Any, result: Any) -> dict[str, float]:
+        return {}
+
+    def build_problem(self, nu: int, seed: int, threads: int | None, moments: str,
+                      layout_changes: dict[str, Any] | None = None) -> NFPGMMProblem:
+        prob = super().build_problem(nu, seed, threads, moments, layout_changes)
+        if seed == self.syn["seed"]:
+            return prob
+        prob.model.close()
+        syn = self.syn
+        model = PCMModel(PCMSpec(CHARS, tol=1e-12, trial_cold_evals=0), syn["data"], prob.layout, nu, syn["seed"] + seed,
+                         total_threads=8)
+        model.warm_from_delta(np.full(model.n_products, 7.5), THETA_TRUE * 2.0)   # another run's state
+        solve = model.solve
+
+        def spy(theta: np.ndarray, requests: Any, need_jacobian: bool) -> Any:
+            if not self.stability_starts:
+                self.stability_starts.append(model.accepted_delta())
+            return solve(theta, requests, need_jacobian)
+
+        model.solve = spy  # type: ignore[method-assign]
+        return NFPGMMProblem(model, prob.moments, prob.linear, prob.layout)
+
+
+def test_stability_rerun_starts_from_the_estimate_delta(tmp_path: pathlib.Path) -> None:
+    """The doubled-draw re-run is warm-started from the estimate's own delta, not from the state the spec built the
+    problem with, and its verdict is a comparison (STABLE / UNSTABLE), not INCONCLUSIVE."""
+    syn = make_synthetic(2, 8, 32, 8, seed=2)
+    spec = StabilitySpec(syn)
+    cfg = RunConfig(base=tmp_path, nu=syn["nu"], seed=syn["seed"], threads=8)
+    pipe = Pipeline(spec, cfg)
+    pipe.rd.save_stage("prefit", {"theta": synthetic_layout().starts() * np.array([1.05, 0.95, 1.1, 0.9, 1.3])})
+    try:
+        pipe.step1()
+        problem, res, stage = pipe.estimate()
+        est_delta = problem.model.accepted_delta()
+        rep = pipe.stability()
+    finally:
+        pipe.close()
+    assert stage == "step1" and est_delta is not None
+    assert len(spec.stability_starts) == 1
+    np.testing.assert_array_equal(spec.stability_starts[0], est_delta)
+    assert rep["integration"]["status"] in ("STABLE", "UNSTABLE")
+    assert rep["integration"]["rerun_class"] != "INVERSION_FAILED"
+
+
+class SarganStabilitySpec(StabilitySpec):
+    """StabilitySpec with the aggregate block in Sargan form (or the fixed-W IVMoments form when ``sargan`` is off)."""
+
+    name = "toy_sargan_gate"
+
+    def __init__(self, syn: dict[str, Any], sargan: bool) -> None:
+        super().__init__(syn)
+        self.sargan = sargan
+
+    def hash_payload(self) -> dict[str, Any]:
+        return {"toy": 3, "sargan": self.sargan}
+
+    def build_problem(self, nu: int, seed: int, threads: int | None, moments: str,
+                      layout_changes: dict[str, Any] | None = None) -> NFPGMMProblem:
+        from nfp_harness.moments import SarganIVMoments
+
+        prob = super().build_problem(nu, seed, threads, moments, layout_changes)
+        if not self.sargan:
+            return prob
+        ms = [SarganIVMoments(self.syn["Z"]) if m.name == "aggregate" else m for m in prob.moments]
+        return NFPGMMProblem(prob.model, ms, prob.linear, prob.layout)
+
+
+@pytest.mark.parametrize("sargan", [True, False])
+def test_sd_xi_blowup_warns_under_sargan_and_refuses_step2_otherwise(tmp_path: pathlib.Path, sargan: bool) -> None:
+    """A step-1 report showing SD_XI_BLOWUP: step 2 runs with a warning when the aggregate block is in Sargan form, and
+    is refused as before with the fixed-W IVMoments block."""
+    from nfp_harness.pipeline import StageRefused
+
+    syn = make_synthetic(2, 8, 32, 8, seed=2)
+    spec = SarganStabilitySpec(syn, sargan)
+    spec.max_iterations = 30
+    cfg = RunConfig(base=tmp_path, nu=syn["nu"], seed=syn["seed"], threads=8)
+    pipe = Pipeline(spec, cfg)
+    pipe.rd.save_stage("prefit", {"theta": synthetic_layout().starts() * np.array([1.05, 0.95, 1.1, 0.9, 1.3])})
+    try:
+        r1 = pipe.step1()
+        assert r1.convergence.converged
+        path = pipe.path / "reports" / "step1" / "report.json"
+        rep = json.loads(path.read_text())
+        for d in rep["degeneracies"]:
+            d["detected"] = d["detected"] or d["name"] == "SD_XI_BLOWUP"
+        path.write_text(json.dumps(rep))
+        if sargan:
+            pipe.step2()
+            assert pipe.rd.stage_done("step2")
+            warning = (pipe.path / "reports" / "step2_warning.txt").read_text()
+            assert warning.startswith("WARNING: the step-1 point shows SD_XI_BLOWUP; step 2 runs")
+        else:
+            with pytest.raises(StageRefused, match="SD_XI_BLOWUP"):
+                pipe.step2()
+            assert not pipe.rd.stage_done("step2")
+            assert not (pipe.path / "reports" / "step2_warning.txt").exists()
+    finally:
+        pipe.close()

@@ -9,8 +9,8 @@ import numpy as np
 
 from ..types import DiagnosticBlock, OptimizeResult, Problem
 
-__all__ = ["economics_block", "economics_values", "plausible_flags", "summary", "PLAUSIBLE_STATS",
-           "OWN_ELASTICITY_EXTREME", "VERTICAL_TAIL_STAT"]
+__all__ = ["economics_block", "economics_values", "plausible_flags", "pooled_cross_group_diversion", "summary",
+           "PLAUSIBLE_STATS", "OWN_ELASTICITY_EXTREME", "VERTICAL_TAIL_STAT"]
 
 #: Statistic whose value above its declared plausible upper bound raises the VERTICAL_TAIL flag: -median own
 #: elasticity x sigma_p, about 25 to 55 in the exact PCM on Petrin's products; above it the buyers are the far
@@ -121,6 +121,30 @@ def plausible_flags(stats: Mapping[str, float | None], plausible: Mapping[str, A
     return flags, notes, checked
 
 
+def pooled_cross_group_diversion(post: Mapping[str, Any]) -> float | None:
+    """pooled_cross_group_diversion(post) -> 1 - the sales-weighted within-group share of inside diversion, pooled
+    over groups and markets: with D_jk the diversion of ``pcm_post.diversion``, s_j the share and g(j) j's group,
+
+        1 - sum_j s_j sum_{k in g(j)} D_jk / sum_j s_j sum_k D_jk
+
+    over the products whose diversion to every group is finite (the rows of ``postestimation``'s group matrix).
+    ``post`` is a ``postestimation`` output with groups; None without groups or without inside diversion."""
+    names = list(post.get("group_names") or [])
+    pr = post["products"]
+    if not names or "group" not in pr:
+        return None
+    s = np.asarray(pr["shares"], dtype=float)
+    lab = np.asarray(pr["group"]).astype(str)
+    to = np.column_stack([np.asarray(pr[f"diversion_to_{g}"], dtype=float) for g in names])
+    ok = np.all(np.isfinite(to), axis=1) & np.isfinite(s)
+    own = np.array([to[j, names.index(lab[j])] if lab[j] in names else np.nan for j in range(s.size)])
+    ok &= np.isfinite(own)
+    inside = float(s[ok] @ to[ok].sum(axis=1))
+    if not inside > 0:
+        return None
+    return 1.0 - float(s[ok] @ own[ok]) / inside
+
+
 def economics_values(model: Any, theta: np.ndarray, delta: np.ndarray, spec: Any = None,
                      xi: np.ndarray | None = None) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     """economics_values(model, theta, delta, spec=None, xi=None) -> (values, messages, post).
@@ -157,7 +181,10 @@ def economics_values(model: Any, theta: np.ndarray, delta: np.ndarray, spec: Any
     }
     if post["group_names"]:
         values["diversion_leaving_group"] = summary(pr["diversion_leaving_group"])
-        values["cross_group_diversion"] = values["diversion_leaving_group"]["median"]
+        # the median over products is 0 whenever most products divert to nothing outside their group (few nonzero
+        # cross-elasticities), whatever the sales-weighted flows; SEGMENTED_CORNER reads the pooled flow (GMY round 2)
+        values["cross_group_diversion"] = pooled_cross_group_diversion(post)
+        values["cross_group_diversion_product_median"] = values["diversion_leaving_group"]["median"]
         lab = np.asarray(pr["group"]).astype(str)
         values["diversion_leaving_group_by_group"] = {
             g: summary(pr["diversion_leaving_group"][lab == g])["median"] for g in post["group_names"]}

@@ -252,6 +252,33 @@ def test_draws_and_markets(small: dict[str, Any]) -> None:
     model.close()
 
 
+def test_antithetic_taste_draws(small: dict[str, Any]) -> None:
+    """``antithetic`` pairs the taste draws of the named dimensions within each market (exactly zero sum); the
+    demographic basis and the weights do not move, and the default draws are those of a model built without it."""
+    import math
+
+    syn = small
+    lay = synthetic_layout()
+    ref = PCMModel(PCMSpec(CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2)
+    off = PCMModel(PCMSpec(CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2, antithetic=())
+    one = PCMModel(PCMSpec(CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2, antithetic=("nu1",))
+    every = PCMModel(PCMSpec(CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2, antithetic=True)
+    assert ref.antithetic == () and one.antithetic == ("nu1",) and every.antithetic == ("nu0", "nu1")
+    for t in range(ref.T):
+        b0 = np.asarray(ref.kernel_market(t).taste_basis)
+        np.testing.assert_array_equal(np.asarray(off.kernel_market(t).taste_basis), b0)
+        b1 = np.asarray(one.kernel_market(t).taste_basis)
+        b2 = np.asarray(every.kernel_market(t).taste_basis)
+        assert math.fsum(b1[:, 1]) == 0.0 and math.fsum(b1[:, 0]) != 0.0
+        assert math.fsum(b2[:, 0]) == 0.0 and math.fsum(b2[:, 1]) == 0.0
+        np.testing.assert_array_equal(b2[:, 2], b0[:, 2])   # pi_x1_demo: the agent's demo, not a draw
+        np.testing.assert_array_equal(np.asarray(every.kernel_market(t).weights), np.asarray(ref.kernel_market(t).weights))
+    for m in (ref, off, one, every):
+        m.close()
+    with pytest.raises(ValueError, match="taste draw dimensions"):
+        PCMModel(PCMSpec(CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2, antithetic=("demo",))
+
+
 def test_status_not_exception(small: dict[str, Any]) -> None:
     """A singular ds/ddelta and a failed inversion are named statuses, never exceptions."""
     prob = build_problem(small, THETA_TRUE, rcond_min=0.5)

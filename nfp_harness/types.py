@@ -160,6 +160,13 @@ class KernelRequests:
 
     micro_parts: tuple[MicroPartRequest, ...] = ()
     price_derivatives: bool = False  # ds/dp (postestimation)
+    # product columns whose per-household purchase-weighted sums the model returns (GMY micro moments; the
+    # grouping is always the agent): sol.outputs["group_sums"], contract in moments.GroupMicroMoments
+    group_sums: tuple[str, ...] = ()
+    # exact second-choice matrices C[j, k] = P(second = k | first = j, second inside) in the markets
+    # ``second_choice_markets`` (ids): sol.outputs["second_choice"], contract in moments.SecondChoiceMoments
+    second_choice: bool = False
+    second_choice_markets: tuple[Any, ...] = ()
 
     def merge(self, other: KernelRequests) -> KernelRequests:
         """Union of two requests. Parts are matched by name; one name with two definitions is an error."""
@@ -172,9 +179,15 @@ class KernelRequests:
                 merged.append(p)
             elif known != p:
                 raise ValueError(f"micro part {p.name!r} requested with two definitions: {known} and {p}")
+        def union(x: tuple[Any, ...], y: tuple[Any, ...]) -> tuple[Any, ...]:
+            return tuple(x) + tuple(v for v in y if v not in x)
+
         return KernelRequests(
             micro_parts=tuple(merged),
             price_derivatives=self.price_derivatives or other.price_derivatives,
+            group_sums=union(self.group_sums, other.group_sums),
+            second_choice=self.second_choice or other.second_choice,
+            second_choice_markets=union(self.second_choice_markets, other.second_choice_markets),
         )
 
 
@@ -222,7 +235,7 @@ class LinearFit:
     names: tuple[str, ...]  # (K,) linear parameter names; empty when everything is absorbed
     beta: np.ndarray  # (K,)
     xi: np.ndarray  # (n,)
-    M: np.ndarray | None  # (n, n) linear map with xi = M delta, None if not formed
+    M: np.ndarray | Any | None  # (n, n) map with xi = M delta: an array or a linear.Annihilator; None if not formed
 
 
 @dataclass(eq=False)

@@ -20,7 +20,8 @@ import numpy as np
 
 from .models.pcm_post import cs_by_group, diversion, elasticities, group_diversion, nonzero_cross
 
-__all__ = ["market_quantities", "products_from_markets", "summarise", "cs_gain_by_group", "scalar_items"]
+__all__ = ["market_quantities", "products_from_markets", "summarise", "cs_gain_by_group", "scalar_items", "gmy_table",
+           "weighted_median"]
 
 
 def market_quantities(s: np.ndarray, ds_dp: np.ndarray, p: np.ndarray, labels: np.ndarray,
@@ -71,6 +72,19 @@ def products_from_markets(markets: Sequence[Mapping[str, np.ndarray]], names: Se
     with np.errstate(divide="ignore", invalid="ignore"):
         gm = num / den[:, None]
     return prod, gm
+
+
+def weighted_median(v: np.ndarray, w: np.ndarray) -> float:
+    """weighted_median(v, w) -> the smallest v_k with at least half the weight of the finite (v, w > 0) pairs at or
+    below it; NaN when there are none. With equal weights and an odd count this is the median."""
+    v = np.asarray(v, dtype=float).ravel()
+    w = np.asarray(w, dtype=float).ravel()
+    ok = np.isfinite(v) & np.isfinite(w) & (w > 0)
+    if not ok.any():
+        return float("nan")
+    order = np.argsort(v[ok], kind="stable")
+    vs, cw = v[ok][order], np.cumsum(w[ok][order])
+    return float(vs[np.searchsorted(cw, 0.5 * cw[-1])])
 
 
 def _stat(v: np.ndarray, fn: Any) -> float | None:
@@ -132,3 +146,140 @@ def scalar_items(d: Mapping[str, Any]) -> dict[str, Any]:
         elif isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
             out[k] = None if not math.isfinite(float(v)) else float(v)
     return out
+
+
+def _fmt(v: Any, digits: int = 3) -> str:
+    if v is None:
+        return "-"
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return "-" if not math.isfinite(x) else f"{x:.{digits}f}"
+
+
+def _year_get(d: Mapping[Any, Any] | None, y: int) -> Any:
+    if not d:
+        return None
+    return d.get(y, d.get(str(y)))
+
+
+def gmy_table(pcm: Mapping[str, Mapping[str, Any]], blp: Mapping[str, Mapping[str, Any]],
+              paper: Mapping[str, Any] | None = None) -> str:
+    """gmy_table(pcm, blp, paper=None) -> the PCM-vs-BLP comparison table of the GMY spec (section 4) as text.
+
+    ``pcm`` maps a column label to a PCM summary (``GMYSpec.summary``), ``blp`` a label to an ``estimate_blp.py`` JSON
+    (``table5``, ``lerner_median_by_year``, ``second_choice``, ``micro``, ``own_elasticity_mean_by_year``), ``paper``
+    the paper's quoted numbers (definitions unverified). Every row uses one definition for every column; a missing
+    entry prints as ``-``. Second-choice means are over the years of the first PCM column.
+    """
+    paper = dict(paper or {})
+    cols = list(pcm) + list(blp) + (["paper (definition UNVERIFIED)"] if paper else [])
+    first = next(iter(pcm.values()), {})
+    years = sorted(int(y) for y in (first.get("lerner_median_by_year") or first.get("own_elasticity_median_by_year")
+                                    or {}))
+    lines: list[str] = []
+    w = max(14, *(len(c) + 2 for c in cols))
+
+    def row(label: str, vals: Sequence[Any], digits: int = 3) -> None:
+        lines.append(f"{label:52s}" + "".join(f"{_fmt(v, digits):>{w}s}" for v in vals))
+
+    lines.append(f"{'':52s}" + "".join(f"{c:>{w}s}" for c in cols))
+    lines.append("Own-price elasticity by income quintile, mean over products (quintile demand s_jq, e_jq = p_j/s_jq "
+                 "ds_jq/dp_j; PCM: mean / 5-95% trimmed mean [median])")
+    for y in (1980, 2018):
+        for q in range(5):
+            vals: list[Any] = []
+            for s in pcm.values():
+                t = _year_get(s.get("table5"), y)
+                trim = t.get("trimmed_mean_over_products") if t else None
+                vals.append(f"{_fmt(t['mean_over_products'][q], 2)}"
+                            + (f" / {_fmt(trim[q], 2)}" if trim else "")
+                            + f" [{_fmt(t['median_over_products'][q], 2)}]"
+                            if t and "median_over_products" in t else (t["mean_over_products"][q] if t else None))
+            for b in blp.values():
+                t = _year_get(b.get("table5"), y)
+                vals.append(t["mean_over_products"][q] if t else None)
+            if paper:
+                t = _year_get(paper.get("table5"), y)
+                vals.append(t[q] if t else None)
+            row(f"  {y} Q{q + 1}", vals, 2)
+    lines.append("Median Lerner index (p - mc)/p, Nash with parent ownership, median over products")
+    for y in years:
+        vals = [_year_get(s.get("lerner_median_by_year"), y) for s in pcm.values()]
+        vals += [_year_get(b.get("lerner_median_by_year"), y) for b in blp.values()]
+        if paper:
+            vals.append(" / ".join(f"{_fmt(_year_get(v, y))}" for v in paper.get("lerner_median", {}).values())
+                        if y in (1980, 2018) else None)
+        row(f"  {y}", vals)
+    na = [None] * (len(blp) + (1 if paper else 0))
+    row("  all years: median over products", [s.get("margin_median") for s in pcm.values()] + na)
+    row("  all years: sales-weighted median", [s.get("margin_median_sales_weighted") for s in pcm.values()] + na)
+    row("  products with |own elasticity| < 1 (margin > 1)", [s.get("products_own_elasticity_above_-1")
+                                                             for s in pcm.values()] + na, 0)
+    lines.append("Own-price elasticity, mean over products (PCM: mean / 5-95% trimmed mean [median])")
+    for y in years:
+        vals: list[Any] = [f"{_fmt(_year_get(s.get('own_elasticity_mean_by_year'), y), 2)} / "
+                           f"{_fmt(_year_get(s.get('own_elasticity_trimmed_mean_by_year'), y), 2)} "
+                           f"[{_fmt(_year_get(s.get('own_elasticity_median_by_year'), y), 2)}]" for s in pcm.values()]
+        vals += [_year_get(b.get("own_elasticity_mean_by_year"), y) for b in blp.values()]
+        if paper:
+            vals.append(None)
+        row(f"  {y}", vals, 2)
+    sc_years = sorted(int(y) for y in (first.get("second_choice") or {}))
+    if sc_years:
+        lines.append(f"Second-choice correlation of first and second choice, mean over {sc_years} (data: merged "
+                     f"products; paper: Table 6 data / model)")
+        chars = list((paper.get("table6_data") or {}).keys()) or [f"x{k}" for k in range(11)]
+        for c_i, c in enumerate(chars):
+            def mean_of(sc: Mapping[Any, Any] | None, key: str) -> Any:
+                v = [(_year_get(sc, y) or {}).get(key, [None] * len(chars))[c_i] for y in sc_years] if sc else []
+                v = [float(x) for x in v if x is not None and math.isfinite(float(x))]
+                return sum(v) / len(v) if v else None
+            vals = [f"{_fmt(mean_of(s.get('second_choice'), 'pcm'))} ({_fmt(mean_of(s.get('second_choice'), 'data'))})"
+                    for s in pcm.values()]
+            vals += [mean_of(b.get("second_choice"), "model") for b in blp.values()]
+            if paper:
+                vals.append(f"{_fmt(paper['table6_data'].get(c), 2)} / {_fmt(paper['table6_model'].get(c), 2)}")
+            row(f"  {c} model (data)", vals)
+        row("  RMSE model - data (PCM years)", [s.get("second_choice_rmse") for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)))
+    mic = first.get("micro") or []
+    if mic:
+        lines.append("Micro moments (V3): data, then each model")
+        bl = [{r["name"]: r.get("model") for r in (b.get("micro") or [])} for b in blp.values()]
+        row("  name / data", ["data"] + [""] * (len(cols) - 1))
+        for r in mic:
+            vals = [f"{_fmt(next((x['pcm'] for x in (s.get('micro') or []) if x['name'] == r['name']), None))}"
+                    for s in pcm.values()] + [d.get(r["name"]) for d in bl]
+            if paper:
+                vals.append(None)
+            lines.append(f"  {r['name']:42s}{_fmt(r['data']):>10s}" + "".join(f"{_fmt(v):>{w}s}" for v in vals))
+    lines.append("Diversion to the product's own vehicle type (share-weighted, pooled over markets)")
+    for g in ("car", "van", "suv", "truck"):
+        row(f"  {g}", [(s.get("diversion_to_own_type") or {}).get(g) for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)))
+    lines.append("Consumer surplus per household, $ (PCM frontier formula, 1/alpha tail bounded by a_lo; not a headline)")
+    for y in years:
+        row(f"  {y}", [_year_get(s.get("cs_per_household_usd_by_year"), y) for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)), 0)
+    lines.append("Window anatomy and fit")
+    for k in ("frontier_products_per_buying_draw", "log_alpha_range_buyers", "window_width_log_alpha"):
+        row(f"  {k}", [(s.get("window_anatomy") or {}).get(k) for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)))
+    bins = next((list(h) for s in pcm.values() if (h := (s.get("window_anatomy") or {}).get("frontier_size_mass"))),
+                [])
+    for b in bins:
+        row(f"  buyer mass on frontiers of {b} product{'' if b == '1' else 's'}",
+            [((s.get("window_anatomy") or {}).get("frontier_size_mass") or {}).get(b) for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)))
+    row("  own_elasticity_times_window_width", [s.get("own_elasticity_times_window_width") for s in pcm.values()]
+        + [None] * (len(blp) + (1 if paper else 0)), 2)
+    row("  convergence", [s.get("convergence") for s in pcm.values()] + [None] * (len(blp) + (1 if paper else 0)))
+    row("  q", [s.get("q") for s in pcm.values()] + [b.get("q") for b in blp.values()] + ([None] if paper else []), 2)
+    for blk in (first.get("q_blocks") or {}):
+        row(f"  q:{blk}", [(s.get("q_blocks") or {}).get(blk) for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)), 2)
+    row("  AT_BOUND", [";".join(s.get("at_bound") or []) or "none" for s in pcm.values()]
+        + [None] * (len(blp) + (1 if paper else 0)))
+    return "\n".join(lines)

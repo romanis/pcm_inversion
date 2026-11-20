@@ -217,6 +217,74 @@ def test_group_diversion_adds_up(model: Any, syn: dict[str, Any]) -> None:
     np.testing.assert_allclose(post["group_matrix"].sum(1), 1.0, atol=1e-12)
     ok = np.isfinite(pr["diversion_within_group"])
     np.testing.assert_allclose(pr["diversion_within_group"][ok] + pr["diversion_leaving_group"][ok], 1.0)
+    # the pooled cross-group diversion is the group matrix's inside flow leaving its group, weighted by group sales
+    from nfp_harness.diagnostics.economics import pooled_cross_group_diversion
+
+    gm, lab, s = post["group_matrix"], np.asarray(pr["group"]).astype(str), pr["shares"]
+    fin = np.isfinite(pr["diversion_to_g1"]) & np.isfinite(pr["diversion_to_base"])
+    sales = np.array([s[fin & (lab == g)].sum() for g in post["group_names"]])
+    inside = gm[:, :-1].sum(1)
+    expect = 1.0 - float(sales @ np.diag(gm)) / float(sales @ inside)
+    assert pooled_cross_group_diversion(post) == pytest.approx(expect, rel=1e-12)
+    assert 0.0 < expect < 1.0
+    # the product median is a separate statistic: here it differs from the pooled flow
+    assert np.nanmedian(pr["diversion_leaving_group"]) != pytest.approx(expect, rel=1e-6)
+    assert pooled_cross_group_diversion(pp.postestimation(model, THETA, syn["delta"])) is None
+
+
+def test_window_anatomy_frontier_size_histogram(model: Any, syn: dict[str, Any]) -> None:
+    """The buyer-mass histogram by frontier size is the kernel's per-draw frontier_size weighted by w_i x the draw's
+    inside share, pooled and per market; it sums to 1 and its mean over the bins below 4+ matches the mean frontier
+    size when no draw has 4 or more frontier products."""
+    wa = pp.window_anatomy(model, THETA, syn["delta"])
+    th, ph, sp = model.kernel_params(THETA)
+    tot = {b: 0.0 for b in pp.FRONTIER_SIZE_BINS}
+    mass = 0.0
+    sizes = []
+    for t, m in enumerate(model.markets):
+        km = model.kernel_market(t)
+        r = pcm_kernel.frontier_anatomy(syn["delta"][np.asarray(m.rows)], km, th, ph, sp, 2, **pp._bound(model, THETA))
+        wm = np.asarray(km.weights) * np.asarray(r["mass"])
+        size = np.asarray(r["frontier_size"])
+        sizes.append(size[wm > 0])
+        for k, b in enumerate(pp.FRONTIER_SIZE_BINS, start=1):
+            tot[b] += float(wm[size >= k].sum() if b == "4+" else wm[size == k].sum())
+        mass += float(wm.sum())
+        hm = wa["by_market"][str(m.market_id)]["frontier_size_mass"]
+        assert sum(hm.values()) == pytest.approx(1.0, abs=1e-12)
+    h = wa["frontier_size_mass"]
+    assert list(h) == list(pp.FRONTIER_SIZE_BINS)
+    for b in pp.FRONTIER_SIZE_BINS:
+        assert h[b] == pytest.approx(tot[b] / mass, rel=1e-12, abs=1e-15)
+    assert wa["single_frontier_buyer_share"] == h["1"]
+    assert sum(h.values()) == pytest.approx(1.0, abs=1e-12)
+    assert len(set(np.concatenate(sizes).tolist())) > 1   # the toy has buyers on frontiers of different sizes
+    if h["4+"] == 0.0:
+        assert sum(int(b) * v for b, v in h.items() if b != "4+") == pytest.approx(
+            wa["frontier_products_per_buying_draw"], rel=1e-12)
+
+
+def test_pooled_cross_group_diversion_when_the_product_median_is_zero() -> None:
+    """Three products of group a divert only within a (leaving share 0), one big product of group b sends half its
+    inside diversion to a: the median over products is 0, the pooled flow is 1 - (0.1 * 3 * 0.8 + 0.6 * 0.4) / (0.1 * 3
+    * 0.8 + 0.6 * 0.8) = 1/3. The pre-round-2 statistic (the median) would read as a segmented corner."""
+    from nfp_harness.diagnostics.economics import pooled_cross_group_diversion
+
+    pr = {"shares": np.array([0.1, 0.1, 0.1, 0.6]), "group": np.array(["a", "a", "a", "b"], dtype=object),
+          "diversion_to_a": np.array([0.8, 0.8, 0.8, 0.4]), "diversion_to_b": np.array([0.0, 0.0, 0.0, 0.4]),
+          "diversion_leaving_group": np.array([0.0, 0.0, 0.0, 0.5])}
+    post = {"products": pr, "group_names": ["a", "b"]}
+    assert float(np.median(pr["diversion_leaving_group"])) == 0.0
+    assert pooled_cross_group_diversion(post) == pytest.approx(1.0 - (0.24 + 0.24) / (0.24 + 0.48), rel=1e-12)
+    # SEGMENTED_CORNER reads the pooled flow: 33% is not a corner, the product median of 0 was
+    from nfp_harness.diagnostics.degeneracies import segmented_corner
+    from nfp_harness.types import ParameterSpec
+
+    specs = [ParameterSpec("sigma_x", "taste", "x", "nu0", 1.0, 0.0, 10.0)]
+    assert not segmented_corner(np.array([1.0]), specs, 10.0, pooled_cross_group_diversion(post))["detected"]
+    assert segmented_corner(np.array([1.0]), specs, 10.0, 0.0)["detected"]
+    pr["diversion_to_a"][3] = np.nan     # a row with non-finite diversion is left out, as in the group matrix
+    assert pooled_cross_group_diversion(post) == pytest.approx(0.0, abs=1e-15)
 
 
 def test_removing_a_dominated_product_leaves_cs_unchanged() -> None:
@@ -349,6 +417,10 @@ def test_economics_block_flags_and_report(model: Any, syn: dict[str, Any]) -> No
     assert sum(m.startswith("FLAG:") for m in blk.messages) == 1
     assert "spread_buyer_dollars:sigma_g1" in blk.thresholds["plausible"]
     assert blk.values["price_range"] == pytest.approx(np.ptp(syn["data"]["products"]["prices"]))
+    from nfp_harness.diagnostics.economics import pooled_cross_group_diversion
+    post = pp.postestimation(model, THETA, syn["delta"], groups={"g1": "g1"}, group_other="base")
+    assert blk.values["cross_group_diversion"] == pytest.approx(pooled_cross_group_diversion(post), rel=1e-12)
+    assert blk.values["cross_group_diversion_product_median"] == blk.values["diversion_leaving_group"]["median"]
     rep = build_report(DiagnosticInputs(result=res, specs=model.layout.specs, units=np.ones(THETA.size), n=n,
                                         economics=blk, xi=xi))
     d = to_jsonable(rep.to_dict())

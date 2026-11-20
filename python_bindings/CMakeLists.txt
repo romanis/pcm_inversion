@@ -66,7 +66,8 @@ if(pybind11_FOUND)
     # Estimation harness kernel module (docs/estimation_harness/DESIGN.md 1.2), written into the package.
     pybind11_add_module(pcm_kernel_py
         ${ROOT}/python_bindings/pcm_kernel_python.cpp ${ROOT}/python_bindings/bind_solve.cpp
-        ${ROOT}/python_bindings/bind_events.cpp ${ROOT}/python_bindings/bind_welfare.cpp)
+        ${ROOT}/python_bindings/bind_events.cpp ${ROOT}/python_bindings/bind_welfare.cpp
+        ${ROOT}/python_bindings/bind_groups.cpp ${ROOT}/python_bindings/bind_second_choice.cpp)
     target_link_libraries(pcm_kernel_py PRIVATE pcm_kernel)
     set_target_properties(pcm_kernel_py PROPERTIES OUTPUT_NAME pcm_kernel
         LIBRARY_OUTPUT_DIRECTORY ${ROOT}/nfp_harness/_native)

@@ -97,18 +97,8 @@ InversionResult invert(const Eigen::ArrayXd & s_data, const Market & m, const Pa
  */
 namespace detail {
 
-/**
- * Vertical model for one draw in conditional qualities d (N), prices p (N, increasing) and
- * LogNormal(0, sigma) price sensitivity truncated below at a_lo (a_lo <= 0: not truncated). Writes
- * into global-index outputs, which must be zeroed: s (N) shares, and when Jd is not null also Jd
- * (N x N) ds/dd, dsig (N) ds/dsigma, Jp (N x N) ds/dp and, when dlogc is not null, dlogc (N) the
- * derivative of s through a_lo = lo / c with respect to log c at fixed d (the d = y / c part is
- * the caller's -Jd d term; only meaningful for BoundKind::ALPHA, where a_lo = lo / c). Products off the
- * frontier, and frontier products whose window lies entirely below a_lo, get zero share and zero derivatives.
- */
-void cond_vertical(const Eigen::ArrayXd & d, const Eigen::ArrayXd & p, double sigma, double a_lo,
-                   Eigen::ArrayXd & s, Eigen::MatrixXd * Jd, Eigen::ArrayXd * dsig, Eigen::MatrixXd * Jp,
-                   Eigen::ArrayXd * dlogc);
+// The vertical model of one draw (shares and derivatives, with the bound) is pcm_share::cond_share in
+// market_share/pcm_market_share.hpp, the one implementation every kernel function uses.
 
 /**
  * For every product, the smallest increase in delta_j that puts it on at least one consumer's
