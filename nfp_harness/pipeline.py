@@ -58,9 +58,12 @@ latest one is also copied to the run directory root):
   markets and draws (a spec's ``--warm-delta``), e.g. one per value of a fixed bound (a state solved under another
   bound is a warm start, ``PCMModel``).
 
-Every W the estimation stages minimise (W1, W2, band W) passes through ``spec.binding_weighting(problem, W)``
-when the spec has it, e.g. to make a calibration row bind. A spec with ``step2_weighting(problem, ev1) -> W2`` forms
-W2 itself (step2 and the band stages), e.g. when a block of S is singular by construction.
+Every W the estimation stages minimise (W1, W2, band W) passes through ``spec.binding_weighting(problem, W)`` when
+the spec has it, else ``weighting.bind_calibration`` (every calibration row binds). ``spec.step2_weighting`` forms W2
+(step2 and the band stages) when a block of S is singular by construction: a callable ``(problem, ev1) -> W2`` or the
+name of a rule in ``weighting.STEP2_RULES``. The prefit and gate concentration W is ``spec.concentrate_weighting(problem,
+W1)`` or, declared, ``spec.concentrate_rows`` up-weighted by ``spec.upweight``; the gate-minimum start's W likewise
+(``start_concentrate_weighting`` / ``start_concentrate_rows``, calibration rows zeroed).
 
 ``--stage all`` runs extensive, step1, step2, post and stability in order; a refused stage is reported and the
 chain continues with what it can do (post and stability fall back to the step-1 estimate). When extensive or
@@ -69,7 +72,8 @@ rerunning the identical command: finished stages are skipped, the stage in progr
 last accepted step (``optimizer.minimize``), a profile from its last finished point. A second process
 on the same run directory is refused while the first is alive.
 
-Spec interface (duck-typed): ``name``; ``hash_payload() -> dict`` (what changes results);
+Spec interface (duck-typed; ``nfp_harness.paper.PaperSpec`` implements the parts every paper shares, DESIGN 1.4):
+``name``; ``hash_payload() -> dict`` (what changes results);
 ``normalisations``; the economics and diagnostics fields read by ``diagnostics.run_diagnostics`` and
 ``economics_block`` (``firm_column``, ``groups``, ``group_other``, ``price_range``, ``plausible``,
 ``binary_columns``, ``X1``, ``Z``, ``linear_names``); ``build_problem(nu, seed, threads, moments,
@@ -106,9 +110,10 @@ from .diagnostics.report import to_jsonable
 from .optimizer import OptimizerOptions, minimize
 from .profile import ray_profile
 from .types import KernelRequests, OptimizeResult
-from .weighting import Fixed, TwoStep, weight_from_covariance
+from .weighting import STEP2_RULES, Fixed, TwoStep, bind_calibration, upweight_rows, weight_from_covariance
 
-__all__ = ["Pipeline", "RunConfig", "StageRefused", "GateFailed", "STAGES", "CHAIN", "main", "run_dir_path", "run_key_options"]
+__all__ = ["Pipeline", "RunConfig", "StageRefused", "GateFailed", "STAGES", "CHAIN", "main", "run_dir_path", "run_key_options",
+           "estimate_columns", "evaluation_record"]
 
 log = logging.getLogger("nfp_harness.pipeline")
 
@@ -158,6 +163,38 @@ def spec_run_key(spec: Any) -> dict[str, Any]:
 def run_dir_path(base: pathlib.Path, spec: Any, nu: int, seed: int) -> pathlib.Path:
     """``<base>/<spec.name>_<run key[:10]>``."""
     return base / f"{spec.name}_{hash_options(run_key_options(nu, seed, spec_run_key(spec)))[:10]}"
+
+
+def estimate_columns(problem: Any, result: OptimizeResult) -> dict[str, Any]:
+    """The band-row columns every estimate carries: ``at_bound`` (free parameters within 1e-3 units of a bound, joined
+    by ";"), ``q:<block>`` and ``theta:<name>``."""
+    from .diagnostics import at_bound_parameters
+
+    theta = np.asarray(result.theta, dtype=float)
+    lay = problem.layout
+    out: dict[str, Any] = {"at_bound": ";".join(at_bound_parameters(theta, lay.specs, lay.units()))}
+    ev = result.evaluation
+    out.update({f"q:{b}": float(v) for b, v in ((ev.aux.get("q_blocks") if ev is not None else None) or {}).items()})
+    out.update({f"theta:{n}": float(x) for n, x in zip(lay.names, theta)})
+    return out
+
+
+def evaluation_record(problem: Any, ev: Any, data_shares: np.ndarray) -> list[dict[str, Any]]:
+    """Per market of one evaluation: the model's solve record plus the largest relative share error against
+    ``data_shares`` and the number of products whose delta was inverted."""
+    sol = ev.aux["solution"]
+    delta = np.asarray(sol.delta)
+    shares = np.asarray(sol.outputs["shares"])
+    out = []
+    for m, pm in zip(problem.model.markets, sol.per_market):
+        rows = np.asarray(m.rows)
+        s_model = shares[rows]
+        pm = dict(pm)
+        pm["max_rel_share_error"] = float(np.max(np.abs(s_model / data_shares[rows] - 1))) \
+            if np.all(np.isfinite(s_model)) else float("nan")
+        pm["products_inverted"] = int(np.sum(np.isfinite(delta[rows])))
+        out.append(pm)
+    return out
 
 
 def _block_diagonal_like(W: np.ndarray, blocks: dict[str, slice],
@@ -308,7 +345,21 @@ class Pipeline:
     def _binding(self, problem: Any, W: np.ndarray) -> np.ndarray:
         """``spec.binding_weighting(problem, W)`` when the spec has it, else W."""
         hook = getattr(self.spec, "binding_weighting", None)
-        return np.asarray(W, dtype=float) if hook is None else np.asarray(hook(problem, W), dtype=float)
+        return bind_calibration(problem, W) if hook is None else np.asarray(hook(problem, W), dtype=float)
+
+    def _weighting_hook(self, name: str) -> Callable[[Any, np.ndarray], np.ndarray] | None:
+        """The spec's ``<name>_weighting(problem, W)`` when it has one, else the up-weighting of its declared
+        ``<name>_rows`` ({block: (lo, hi)}, factor ``spec.upweight``; the start also zeroes calibration rows), else
+        None. ``name``: ``concentrate`` (prefit, gate concentration) or ``start_concentrate`` (the gate-minimum start)."""
+        hook = getattr(self.spec, f"{name}_weighting", None)
+        if callable(hook):
+            return hook
+        rows = getattr(self.spec, f"{name}_rows", None)
+        if not rows:
+            return None
+        factor = float(getattr(self.spec, "upweight", 1e4))
+        zero = name == "start_concentrate"
+        return lambda problem, W: upweight_rows(problem, W, rows, factor, zero_calibration=zero)
 
     def _gate_minimum(self, tag: str, names: Sequence[str]) -> np.ndarray:
         """theta at the gate minimum (module docstring, ``step1``), stored once as stage ``<tag>.gate_minimum`` so a
@@ -364,7 +415,7 @@ class Pipeline:
         unknown = [c for c in conc if c not in layout.names]
         if unknown:
             raise ValueError(f"start_concentrate names unknown parameters {unknown}")
-        hook = getattr(self.spec, "start_concentrate_weighting", None)
+        hook = self._weighting_hook("start_concentrate")
         W = self._saved_weight(f"{tag}.start_W", lambda: (problem.initial_weighting(theta_g) if hook is None
                                                           else hook(problem, problem.initial_weighting(theta_g))))
         problem.layout = layout.replace({n: {"free": n in conc} for n in layout.names})
@@ -427,7 +478,7 @@ class Pipeline:
         try:
             theta0 = prefit_layout.starts()
             W1 = self._saved_weight("prefit_W1", lambda: problem.initial_weighting(theta0))
-            hook = getattr(self.spec, "concentrate_weighting", None)
+            hook = self._weighting_hook("concentrate")
             W_pre = W1 if hook is None else hook(problem, W1)
             res = minimize(problem, Fixed(W_pre), self._options(stage="prefit", theta0=theta0,
                                                                max_iterations=self.spec.prefit_max_iterations),
@@ -449,7 +500,7 @@ class Pipeline:
                     problem.layout = problem.layout.replace({n: {"free": n in free} for n in problem.layout.names})
                     theta0 = problem.layout.starts()
                     W1 = self._saved_weight(f"prefit_W1.{v}", lambda: problem.initial_weighting(theta0))
-                    hook = getattr(self.spec, "concentrate_weighting", None)
+                    hook = self._weighting_hook("concentrate")
                     W_pre = W1 if hook is None else hook(problem, W1)
                     res = minimize(problem, Fixed(W_pre), self._options(
                         stage=stage, theta0=theta0, max_iterations=self.spec.prefit_max_iterations), checkpoint=self.rd)
@@ -505,7 +556,7 @@ class Pipeline:
             try:
                 self._warm(problem, "prefit")  # W1 needs one evaluation at the prefit point; the points start cold
                 W1 = problem.initial_weighting(theta)
-                hook = getattr(self.spec, "concentrate_weighting", None)
+                hook = self._weighting_hook("concentrate")
                 if kw.get("concentrate") and hook is not None:
                     kw["concentrate_weighting"] = hook(problem, W1)
                 res = ray_profile(problem, theta, kw.pop("direction"), kw.pop("lambdas"), kw.pop("grid", None),
@@ -579,6 +630,8 @@ class Pipeline:
         """W2 at the step-1 evaluation: ``spec.step2_weighting(problem, ev1)`` when the spec has it, else S(theta_1)^-1
         made block diagonal across moment blocks (``coupled_blocks`` excepted)."""
         hook = getattr(self.spec, "step2_weighting", None)
+        if isinstance(hook, str):
+            hook = STEP2_RULES[hook]
         if callable(hook):
             return np.asarray(hook(problem, ev1), dtype=float)
         return _block_diagonal_like(weight_from_covariance(problem.covariance(ev1)), ev1.blocks,
@@ -842,6 +895,21 @@ class Pipeline:
         W = np.asarray(self._stage_state(f"{tag}.{stage}")["W"], dtype=float)
         res = minimize(problem, Fixed(W), self._options(stage=f"{tag}.{stage}"), checkpoint=self.rd)
         return res, stage
+
+    def at_band_points(self, problem: Any, rows: Sequence[dict[str, Any]], name: str,
+                       fn: Callable[[dict[str, Any], OptimizeResult | None], None]) -> None:
+        """``fn(row, result)`` for each of ``rows`` of band ``name`` at its finished point (``band_result``), result None
+        when the estimate could not be re-evaluated; ``problem.layout`` is restored after each point. For a band's
+        ``finish`` hook, e.g. a costly counterfactual at the headline point only."""
+        attr, _, default_par = self._BANDS[name]
+        par = str(getattr(self.spec, f"{attr}_parameter", default_par))
+        layout = problem.layout
+        for r in rows:
+            try:
+                res, _ = self.band_result(problem, float(r[par]), name=name)
+                fn(r, res if res.evaluation is not None and res.evaluation.ok else None)
+            finally:
+                problem.layout = layout
 
     def margin_band(self) -> list[dict[str, Any]]:
         """The margin band stage (module docstring). Returns the rows of margin_band/band.csv."""

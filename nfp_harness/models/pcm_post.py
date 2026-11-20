@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 from scipy.stats import norm
@@ -41,7 +41,7 @@ __all__ = [
     "market_post", "postestimation", "consumer_surplus", "draw_price_scale", "alpha_quintiles",
     "demographic_labels", "cs_by_group", "spread_in_buyer_dollars", "drop_products_counterfactual",
     "quality_dispersion", "relative_quality_dispersion", "best_response_box", "window_anatomy",
-    "compare_blp",
+    "compare_blp", "draw_labels", "elasticities_by_agent_group", "group_diversion_table", "point_economics",
 ]
 
 NASH_OK = "ok"
@@ -472,6 +472,51 @@ def demographic_labels(model: Any, t: int, column: str, bins: Sequence[float] | 
     md = model.market_draws(t)
     v = np.asarray(model.agents[column], dtype=float).ravel()[np.asarray(md["agent_rows"])][md["agent_of_draw"]]
     return np.digitize(v, np.asarray(bins, dtype=float)) if bins is not None else v
+
+
+def draw_labels(model: Any, t: int, values: Any) -> np.ndarray:
+    """draw_labels(model, t, values) -> (R,) the agent-level ``values`` (one per agent row) of each draw of market t, as
+    strings (via ``market_draws(t)``)."""
+    md = model.market_draws(t)
+    return np.asarray(values)[np.asarray(md["agent_rows"])[md["agent_of_draw"]]].astype(str)
+
+
+def elasticities_by_agent_group(model: Any, theta: np.ndarray, delta: np.ndarray, values: Any,
+                                levels: Sequence[Any], markets: Sequence[Any],
+                                trimmed: Callable[[np.ndarray], float]) -> dict[int, dict[str, Any]]:
+    """Own-price elasticities of each agent group's demand: for markets in ``markets`` and each level of the
+    agent-level ``values``, group demand s_jq = sum_{i in q} w_i s_ij and e_jq = (p_j / s_jq) d s_jq / d p_j, then
+    the mean, median and ``trimmed`` mean over the products with s_jq > 0 (a PCM product can have no buyer in a group;
+    the count is reported)."""
+    k = model._k
+    th, ph, sp = model.kernel_params(theta)
+    kw = model.kernel_kwargs(theta)
+    vals = np.asarray(values)
+    out: dict[int, dict[str, Any]] = {}
+    for t, m in enumerate(model.markets):
+        y = int(m.market_id)
+        if y not in markets:
+            continue
+        km = model.kernel_market(t)
+        md = model.market_draws(t)
+        lab = vals[np.asarray(md["agent_rows"])][md["agent_of_draw"]]
+        row, med, trim, zeros = [], [], [], []
+        for q in levels:
+            w = np.asarray(km.weights) * (lab == q)
+            sub = k.Market(np.asarray(km.x), np.asarray(km.p), w, np.asarray(km.taste_basis), list(km.taste_col),
+                           np.asarray(km.scale_basis))
+            r = k.evaluate_market(delta[np.asarray(m.rows)], sub, th, ph, sp, derivatives=False,
+                                  price_derivatives=True, n_threads=model.total_threads, **kw)
+            s = np.asarray(r["s"])
+            pos = s > 0
+            e = np.asarray(km.p)[pos] / s[pos] * np.diag(np.asarray(r["ds_dp"]))[pos]
+            row.append(float(e.mean()))
+            med.append(float(np.median(e)))
+            trim.append(trimmed(e))
+            zeros.append(int((~pos).sum()))
+        out[y] = {"mean_over_products": row, "median_over_products": med, "trimmed_mean_over_products": trim,
+                  "products_without_buyers": zeros}
+    return out
 
 
 def cs_by_group(per_draw: np.ndarray | Mapping[str, np.ndarray], weights: np.ndarray,
@@ -1004,3 +1049,42 @@ def compare_blp(pcm_summary: Mapping[str, Any], blp_summaries: Mapping[str, Mapp
     if note:
         lines += ["", note]
     return "\n".join(lines)
+
+
+def group_diversion_table(post: Mapping[str, Any]) -> dict[str, dict[str, float]]:
+    """{from group: {to group: share-weighted diversion, ..., "outside": ...}} of a ``postestimation`` result."""
+    gm, names = post["group_matrix"], post["group_names"]
+    return {str(g): {**{str(h): float(gm[a, b]) for b, h in enumerate(names)}, "outside": float(gm[a, -1])}
+            for a, g in enumerate(names)}
+
+
+def point_economics(problem: Any, ev: Any, post: Mapping[str, Any]) -> dict[str, float]:
+    """The economics of one evaluated point (a profile point's ``economics`` callback): the aggregate-only CUE
+    objective, the median own elasticity and the law monitor -median own elasticity x sigma_p, the median Nash
+    margin, the supply guard's mc and rcond readings (from the post-estimation when the problem has no supply block),
+    the median count of nonzero cross elasticities, the relative quality dispersion, the mean inside share, mean alpha
+    of buyers, sd(delta) and the inside-share elasticity to a uniform 1% price rise (mean over markets). ``post`` is
+    ``postestimation`` at the point."""
+    sol, fit = ev.aux["solution"], ev.aux["linear_fit"]
+    g_a = ev.g[problem.agg_rows]
+    S_a = problem.agg.covariance_block(sol, fit)
+    out = {"q_cue:aggregate": float(problem.n * g_a @ np.linalg.solve(S_a, g_a))}
+    pr = post["products"]
+    names = problem.layout.names
+    sigma_p = float(np.asarray(ev.theta)[names.index("sigma_p")])
+    own = float(np.nanmedian(pr["own_elasticity"]))
+    sup = ev.aux.get("supply") or {}
+    out.update({"median_own_elasticity": own, "own_elasticity_times_sigma_p": -own * sigma_p,
+                "margin_median": float(np.nanmedian(pr["margin"])),
+                "share_mc_nonpositive": float(sup.get("share_mc_nonpositive", np.mean(~(pr["cost"] > 0)))),
+                "nash_rcond_min": float(sup.get("nash_rcond_min", min(m["rcond"] for m in post["markets"]))),
+                "nonzero_cross_median": float(np.nanmedian(pr["nonzero_cross"])),
+                "relative_quality_dispersion_buyer_dollars_median":
+                    relative_quality_dispersion(problem.model, ev.theta, ev.aux["delta"])["median"],
+                "inside_share_mean": float(np.mean([m["inside_share"] for m in post["markets"]])),
+                "mean_alpha_buyers": float(spread_in_buyer_dollars(problem.model, ev.theta,
+                                                                   ev.aux["delta"])["mean_alpha_buyers"]),
+                "sd_delta": float(np.std(ev.aux["delta"])),
+                "inside_share_semi_elasticity": float(np.mean([m["inside_share_elasticity"]
+                                                               for m in post["markets"]]))})
+    return out

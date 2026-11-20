@@ -24,6 +24,10 @@ __all__ = [
     "stacked_covariance",
     "weight_from_covariance",
     "cue_objective",
+    "bind_calibration",
+    "upweight_rows",
+    "efficient_on_excluded",
+    "STEP2_RULES",
 ]
 
 
@@ -216,3 +220,82 @@ class CUE:
     def describe(self) -> dict[str, Any]:
         return {"mode": self.mode, "hold_micro_block": self.hold_micro_block,
                 "note": "micro block of S held at its value at the CUE start point"}
+
+
+# ------------------------------------------------------------------------------------------------
+# W adjustments of the pipeline's stages (declared by a spec, DESIGN 6.0)
+# ------------------------------------------------------------------------------------------------
+
+
+def bind_calibration(problem: Any, W: np.ndarray) -> np.ndarray:
+    """W with every calibration row of ``problem`` (e.g. a margin row) set to its binding entry and decoupled from the
+    rest; a copy of W when the problem has none."""
+    W = np.array(W, dtype=float)
+    for m in getattr(problem, "calibration", ()):
+        rows = problem.blocks[m.name]
+        idx = np.arange(rows.start, rows.stop)
+        W[idx, :] = 0.0
+        W[:, idx] = 0.0
+        W[idx, idx] = m.binding_block()
+    return W
+
+
+def upweight_rows(problem: Any, W: np.ndarray, rows: Any, factor: float,
+                  zero_calibration: bool = False) -> np.ndarray:
+    """W with the rows ``rows`` = {moment block: (lo, hi)} (positions within the block, Python slice bounds) multiplied
+    by ``factor`` in their diagonal block, so those moments are solved with the rest of q only breaking ties (a block
+    the problem lacks is skipped); with ``zero_calibration`` the calibration rows are set to zero, so the result does
+    not depend on a calibration target."""
+    W = np.array(W, dtype=float)
+    for block, (lo, hi) in dict(rows).items():
+        sl = problem.blocks.get(block)
+        if sl is None:
+            continue
+        idx = np.arange(sl.start, sl.stop)[lo:hi]
+        W[np.ix_(idx, idx)] *= factor
+    if zero_calibration:
+        for m in getattr(problem, "calibration", ()):
+            r = problem.blocks[m.name]
+            W[r, :] = 0.0
+            W[:, r] = 0.0
+    return W
+
+
+def efficient_on_excluded(problem: Any, ev: Any) -> np.ndarray:
+    """W2 at an evaluation: every block other than the aggregate keeps its fixed (n V)^-1, and the aggregate block is
+    efficient on the excluded instruments only.
+
+    When beta is concentrated by OLS the X1 rows of Z'xi are identically zero and the clustered S of the full aggregate
+    block is singular (a cluster with one product carries a row that is exactly zero). In the basis Z~ = Z A =
+    [X1, M_X1 Z_ex], A = [[I, -G], [0, I]] with G = (X1'X1)^-1 X1'Z_ex, W_aa = A blockdiag((X1'X1/n)^-1, S_h^-1) A' with
+    S_h the clustered covariance of the residualised excluded rows (A' S A restricted to them). That W keeps beta at
+    OLS (the excluded rows of Z~'(delta - X1 b) do not depend on b), so the aggregate block is n h' S_h^-1 h with
+    h = Z~_ex' xi / n: the aggregate J on the excluded instruments' degrees of freedom. Needs Z = [X1, Z_ex]."""
+    S = problem.covariance(ev)
+    W = np.zeros_like(S)
+    agg = getattr(problem, "agg", None)
+    for name, sl in ev.blocks.items():
+        if agg is not None and name == agg.name:
+            continue
+        W[sl, sl] = weight_from_covariance(S[sl, sl])
+    if agg is not None:
+        a = problem.agg_rows
+        Z = np.asarray(agg.Z, dtype=float)
+        X1 = np.asarray(problem.linear.X1, dtype=float)
+        K = X1.shape[1]
+        if not np.array_equal(Z[:, :K], X1):
+            raise ValueError("efficient_on_excluded: the aggregate Z does not start with X1")
+        n = Z.shape[0]
+        G = np.linalg.lstsq(X1, Z[:, K:], rcond=None)[0]
+        A = np.eye(Z.shape[1])
+        A[:K, K:] = -G
+        St = A.T @ S[a, a] @ A
+        B = np.zeros_like(St)
+        B[:K, :K] = np.linalg.inv(X1.T @ X1 / n)
+        B[K:, K:] = weight_from_covariance(St[K:, K:])
+        W[a, a] = A @ B @ A.T
+    return 0.5 * (W + W.T)
+
+
+#: named W2 rules a spec may declare as ``step2_weighting`` (the pipeline's default is S^-1 block diagonal)
+STEP2_RULES = {"efficient_on_excluded": efficient_on_excluded}

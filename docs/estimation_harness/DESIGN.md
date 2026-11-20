@@ -88,6 +88,7 @@ pcm_inversion/
       pcm.py                       PCM adapter: markets, draws, kernel calls, threads, warm starts
       pcm_post.py                  elasticities, diversion, Nash costs, CS, counterfactuals
     data.py                        tie breaking, QMC draws, agent crossing (model-agnostic helpers)
+    paper.py                       PaperSpec: what every paper's spec shares (1.4)
     _native/
       __init__.py                  imports pcm_kernel, explains how to build if it is missing
       pcm_kernel.cpython-312-x86_64-linux-gnu.so   build output (gitignored)
@@ -183,6 +184,43 @@ sys.path[:0] = [str(ROOT), str(ROOT / "nevo_replication" / ".vendor")]
 The environment lines must run before numpy is imported, so they live in the script, not in the
 package. `nfp_harness.runtime.check_environment()` warns if they were not set. Python tests run with
 `python -m pytest nfp_harness/tests`.
+
+### 1.4 Paper specs (`nfp_harness/paper.py`)
+
+A paper is a subclass of `paper.PaperSpec` in its replication folder's `estimate_pcm.py`; `pipeline.main(spec)` runs
+it. The border: the spec says what the paper is, the harness does everything a second paper would do the same way.
+Harness code never names a paper.
+
+The paper writes its data loader (products, agents, X1, Z, clusters), `base_layout()` (the nonlinear parameters with
+starts, bounds and units, nothing applied), `pcm_spec()` (kernel columns and solve settings), `moment_list(moments)`
+(the moments of each moment set), `normalisations` and `payload()` (the report's normalisation lines and the hashed
+description of what changes results), its own options (`add_paper_arguments`, `configure_paper`, `paper_run_key`),
+the pipeline's declarative fields (prefit and extensive free sets, gate profiles and rules, band values, optimizer
+options) and its postestimation (`post`, `headlines`, band rows, counterfactuals). Everything else is `PaperSpec` or
+the pipeline:
+
+- the options every paper shares: `--robustness` (choices and the switches that set the bound are spec fields),
+  `--a-lo`, `--fix`, `--start-theta` (`start_theta_keep` names the parameters that keep their starts),
+  `--start-theta-except`, `--warm-delta`, `--cold-draws`, `--max-iterations`, `--outer`, `--start-gate`, beside the
+  pipeline's own (`--stage`, `--nu`, `--seed`, `--threads`, `--detach`, `--band-values`, ...);
+- the run key: the paper's entries plus each shared option that differs from its default, and always `a_lo` and the
+  bound kind, so a run without an option keeps its directory (`nfp_harness/tests/test_run_keys.py` pins the run
+  directories and spec hashes of representative command lines of both papers); the spec hash adds the shared options
+  that are set to the paper's payload;
+- the layout the problems use: `base_layout()` with the start theta and the fixed values applied; warm starts from
+  another run's stage, matched by market and parameter name; the model (`PCMModel` on the paper's products and
+  agents, seed offset `draw_seed_offset`) and the `NFPGMMProblem` of a moment set; the named flat directions (the
+  utility-scale direction, plus `flat_directions`);
+- weighting, declared instead of coded: `concentrate_rows` and `start_concentrate_rows` (moment rows up-weighted by
+  `upweight` in the prefit and gate concentration and in the gate-minimum start, which also zeroes calibration rows;
+  `weighting.upweight_rows`), calibration rows bound in every W the stages minimise (`weighting.bind_calibration`),
+  and `step2_weighting` as a rule name (`weighting.STEP2_RULES`, e.g. `efficient_on_excluded`: W2 efficient on the
+  excluded instruments with beta kept at OLS, the other blocks fixed);
+- shared postestimation pieces: `pcm_post.point_economics` (a profile point's economics), `group_diversion_table`,
+  `elasticities_by_agent_group` (own elasticities of each agent group's demand), `draw_labels`,
+  `comparison.trimmed_mean`, `near_twins`, `load_summaries`, `pipeline.estimate_columns` (a band row's `at_bound`,
+  `q:<block>` and `theta:<name>`), `pipeline.at_band_points` (a band finish hook's per-point re-evaluation),
+  `pipeline.evaluation_record` and `diagnostics.identification.identification_summary`.
 
 ## 2. Problem, moments and parameters
 

@@ -8,7 +8,9 @@ from typing import Any
 import numpy as np
 import pytest
 
+from nfp_harness.comparison import near_twins, trimmed_mean
 from nfp_harness.tests.test_gmy_instruments import gmy_module
+from nfp_harness.weighting import efficient_on_excluded
 
 
 @pytest.fixture(scope="module")
@@ -141,8 +143,9 @@ def test_step2_weighting_keeps_ols_and_handles_singular_x1_rows(gmy: Any, spec: 
     S[:k, :k] = S_a
     S[k:, k:] = np.diag([1.0, 2.0, 3.0])
     blocks = {"aggregate": slice(0, k), "micro_gmy": slice(k, k + 3)}
-    prob = SimpleNamespace(covariance=lambda ev: S, agg=SimpleNamespace(name="aggregate", Z=Z), agg_rows=blocks["aggregate"])
-    W = spec.step2_weighting(prob, SimpleNamespace(blocks=blocks))
+    prob = SimpleNamespace(covariance=lambda ev: S, agg=SimpleNamespace(name="aggregate", Z=Z), agg_rows=blocks["aggregate"],
+                           linear=SimpleNamespace(X1=spec.X1))
+    W = efficient_on_excluded(prob, SimpleNamespace(blocks=blocks))
     assert np.linalg.eigvalsh(W)[0] > 0
     np.testing.assert_allclose(W[k:, k:], np.diag([1.0, 1 / 2, 1 / 3]), rtol=1e-12)
     delta = rng.normal(size=n)
@@ -265,7 +268,7 @@ def test_income_basis_variants(gmy: Any) -> None:
     assert lay.specs[lay.names.index("phi_inc")].basis == "inc"
     sp.set_prefit_variant("log")
     assert sp.layout().specs[lay.names.index("phi_inc")].basis == "log_inc_ratio"
-    assert sp._hash_layout().specs[lay.names.index("phi_inc")].basis == "inc"   # the hash ignores the choice
+    assert sp.hash_layout().specs[lay.names.index("phi_inc")].basis == "inc"   # the hash ignores the choice
     a = sp.agents
     np.testing.assert_allclose(np.exp(a.log_inc_ratio) * (a.income - a.inc * 1e4), a.income, rtol=1e-12)
     fixed = gmy.GMYSpec((1991, 1999), income_basis="log")
@@ -359,9 +362,9 @@ def test_fix_sigma_p(gmy: Any) -> None:
 
 def test_trimmed_mean_and_near_twins(gmy: Any) -> None:
     v = np.r_[np.arange(1.0, 101.0), -1e4, np.nan]
-    assert gmy.trimmed_mean(v) == pytest.approx(np.mean(np.arange(5.0, 97.0)), rel=0.02)
-    assert abs(gmy.trimmed_mean(v)) < 60
+    assert trimmed_mean(v) == pytest.approx(np.mean(np.arange(5.0, 97.0)), rel=0.02)
+    assert abs(trimmed_mean(v)) < 60
     import pandas as pd
     p = pd.DataFrame({"market_ids": [1, 1, 1, 1, 2], "veh_type": ["car", "car", "van", "car", "car"],
                       "prices_data": [1.0, 1.005, 1.002, 2.0, 1.0]})
-    assert gmy.near_twins(p) == {1: 2, 2: 0}
+    assert near_twins(p, gmy.NEAR_TWIN_GAP, "veh_type", "prices_data") == {1: 2, 2: 0}
