@@ -15,9 +15,14 @@ Cases (``CASES``):
   estimate_pcm.py, ``GMYSpec(GMY_YEARS, households=GMY_HOUSEHOLDS)``, ``build_problem(nu=1, seed=0,
   moments="demand_supply")`` = Sargan aggregate + group micro + second choice + supply, as Petrin. The round-4 case
   sets the two age tastes (start 0) to ``GMY_AGE_TASTES``; at 0 the two layouts give identical g and delta.
-- ``nevo_pcm``: nevo_replication/estimate_pcm.py's own ``PCMProblem`` (not the harness; legacy ``python_pcm_demand``
-  binding), 5-node Gauss-Hermite grid, ``objective(start_values())``: q, the moments g = Z'xi/n, the
-  gradient of q, delta, xi and G.
+- ``nevo_pcm``: nevo_replication/estimate_pcm.py's ``NevoSpec`` on the harness, 5-node Gauss-Hermite grid,
+  ``evaluate`` at the layout starts: q, the moments g = Z'xi/n, the gradient of q, delta, xi, G and W. The golden was
+  written on 0e95f4a by the script's own pre-harness ``PCMProblem`` (legacy ``python_pcm_demand`` binding) at its
+  ``start_values()``, the same theta. delta, xi and g stay bit-identical: the same consumers, the same cold
+  ``pcm_invert::invert`` and the same brand demeaning. Four pins are compared to a relative tolerance because the
+  harness computes them by a different but equivalent sequence of operations: W (``NFPGMMProblem.set_weighting``
+  stores 0.5 (W + W'), and ``inv(Z'Z/n)`` is symmetric only to 5e-16), q (through W), G (the kernel's LU solve of
+  ds/ddelta D = -ds/dtheta and (Z'M/n) D, where the old code used numpy's solve and Z'D/n) and the gradient of q.
 - ``gmy_blp``: gmy_replication/estimate_blp.py ``main()`` stage ``published`` (GMY's Table 4 theta, no fit) on
   ``GMY_YEARS`` with ``GMY_HOUSEHOLDS`` households; writes go to a temporary directory.
 - ``kernel_synthetic``: the two synthetic markets of ``tests/fixtures/gmy_baseline.py`` (every ``pcm_kernel`` function,
@@ -77,6 +82,9 @@ class Case:
     needs: tuple[str, ...]        # paths under ROOT, "module:<name>" (importable), "kernel", "legacy_bindings"
     threads: tuple[int, ...]      # kernel thread counts the test checks
     note: str
+    #: pins compared to a relative tolerance instead of bit for bit: (pin, rtol) pairs, each with its reason in the
+    #: case's docstring entry (module docstring)
+    approx: tuple[tuple[str, float], ...] = ()
 
 
 # ------------------------------------------------------------------ flattening and comparison
@@ -127,13 +135,25 @@ def same(a: np.ndarray, b: np.ndarray) -> bool:
     return digest(np.asarray(a)) == digest(np.asarray(b))
 
 
-def differences(ref: Pins, got: Pins) -> list[str]:
-    """Human-readable list of every pin that is missing, extra or not bit-identical."""
+def close(a: np.ndarray, b: np.ndarray, rtol: float) -> bool:
+    """Same dtype and shape, finite, and max |a - b| <= rtol max |a|."""
+    a, b = np.asarray(a), np.asarray(b)
+    if a.dtype != b.dtype or a.shape != b.shape or a.dtype.kind != "f":
+        return False
+    if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
+        return same(a, b)
+    return bool(np.max(np.abs(a - b), initial=0.0) <= rtol * np.max(np.abs(a), initial=0.0))
+
+
+def differences(ref: Pins, got: Pins, approx: dict[str, float] | None = None) -> list[str]:
+    """Human-readable list of every pin that is missing, extra or not bit-identical (pins named in ``approx``: not
+    within their relative tolerance)."""
+    approx = approx or {}
     msgs = [f"missing {k}" for k in sorted(set(ref) - set(got))]
     msgs += [f"extra {k}" for k in sorted(set(got) - set(ref))]
     for k in sorted(set(ref) & set(got)):
         a, b = ref[k], got[k]
-        if same(a, b):
+        if same(a, b) or (k in approx and close(a, b, approx[k])):
             continue
         if a.dtype.kind in "fc" and b.dtype.kind in "fc" and a.shape == b.shape:
             with np.errstate(invalid="ignore"):
@@ -190,8 +210,6 @@ def child_env(threads: int) -> dict[str, str]:
     env.update(OMP_NUM_THREADS=str(threads), OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1",
                MKL_CBWR="COMPATIBLE", OMP_WAIT_POLICY="PASSIVE", OMP_DYNAMIC="FALSE", PYTHONHASHSEED="0",
                PYTHONPATH=os.pathsep.join([str(ROOT)] + [p for p in [env.get("PYTHONPATH")] if p]))
-    for k in ("PCM_START", "PCM_DROP", "PCM_TAG", "PCM_GH_NODES", "PCM_DEMO_DRAWS", "PCM_FIRM_TASTE", "PCM_NU_DRAWS"):
-        env.pop(k, None)   # nevo_replication/estimate_pcm.py reads these
     return env
 
 
@@ -220,10 +238,6 @@ def missing_needs(case: Case) -> list[str]:
         elif need == "kernel":
             if not any((ROOT / "nfp_harness" / "_native").glob("pcm_kernel*.so")):
                 missing.append("nfp_harness/_native/pcm_kernel*.so (build the CMake target pcm_kernel_py)")
-        elif need == "legacy_bindings":
-            if legacy_bindings_dir() is None:
-                missing.append("python_pcm_demand*.so (set NFP_LEGACY_BINDINGS or build the CMake tree in "
-                               "<repo>/build*/)")
         elif not (ROOT / need).exists():
             missing.append(str(ROOT / need))
     return missing
@@ -238,16 +252,6 @@ def _vendor_path() -> Iterator[None]:
     finally:
         for p in added:
             sys.path.remove(p)
-
-
-def legacy_bindings_dir() -> pathlib.Path | None:
-    """Directory of the legacy ``python_pcm_demand`` module: ``$NFP_LEGACY_BINDINGS``, else the most recently built
-    ``<repo>/build*/python_bindings`` of THIS checkout (never another worktree's build)."""
-    env = os.environ.get("NFP_LEGACY_BINDINGS")
-    if env:
-        return pathlib.Path(env) if any(pathlib.Path(env).glob("python_pcm_demand*.so")) else None
-    found = sorted(ROOT.glob("build*/python_bindings/python_pcm_demand*.so"), key=lambda p: p.stat().st_mtime)
-    return found[-1].parent if found else None
 
 
 def load_script(rel: str, name: str) -> Any:
@@ -414,31 +418,22 @@ def build_gmy_pcm(robustness: tuple[str, ...], theta_changes: dict[str, float] |
 
 def build_nevo_pcm(threads: int, inputs: Pins | None) -> Pins:
     del inputs
-    legacy = legacy_bindings_dir()
-    if legacy is None:
-        raise RuntimeError("python_pcm_demand is not built")
-    sys.path.append(str(legacy))
     mod = load_script("nevo_replication/estimate_pcm.py", "golden_nevo_pcm")
-    import pandas as pd
-    import pyblp
-
-    products = pd.read_csv(pyblp.data.NEVO_PRODUCTS_LOCATION)
-    agents = pd.read_csv(pyblp.data.NEVO_AGENTS_LOCATION)
-    mod.configure(False)
-    # each worker's legacy kernel call runs OMP_NUM_THREADS threads; the pool keeps the total within MAX_THREADS
-    prob = mod.PCMProblem(products, agents, gh_nodes=NEVO_GH_NODES, workers=max(1, MAX_THREADS // max(threads, 1)),
-                          nu_draws=0)
+    spec = mod.NevoSpec()
+    spec.gh_nodes = NEVO_GH_NODES
+    prob = spec.build_problem(1, 0, threads, "all")
     try:
-        theta = mod.start_values()
-        q, dq = prob.objective(theta)
-        last = prob.last
-        pins: Pins = {"nevo.names": np.asarray(list(mod.NAMES)), "nevo.theta": np.asarray(theta),
-                      "nevo.q": np.asarray(q), "nevo.g": np.asarray(prob.Z.T @ last["xi"] / prob.n),
-                      "nevo.dq": np.asarray(dq), "nevo.ok": np.asarray(bool(last["ok"])),
-                      "nevo.delta": np.asarray(last["delta"]), "nevo.xi": np.asarray(last["xi"]),
-                      "nevo.G": np.asarray(last["G"]), "nevo.W": np.asarray(prob.W)}
+        theta = np.asarray(prob.layout.starts(), dtype=float)
+        ev = prob.evaluate(theta, need_jacobian=True)
+        if not ev.ok:
+            raise RuntimeError(f"Nevo evaluation at the layout starts ended {ev.status.value}")
+        g, G = np.asarray(ev.g), np.asarray(ev.G)
+        pins: Pins = {"nevo.names": np.asarray(list(prob.layout.names)), "nevo.theta": theta,
+                      "nevo.q": np.asarray(ev.aux["q"]), "nevo.g": g, "nevo.dq": 2 * prob.n * (G.T @ prob.W @ g),
+                      "nevo.ok": np.asarray(True), "nevo.delta": np.asarray(ev.aux["delta"]),
+                      "nevo.xi": np.asarray(ev.aux["xi"]), "nevo.G": G, "nevo.W": np.asarray(prob.W)}
     finally:
-        prob.pool.shutdown()
+        _close(prob)
     return pins
 
 
@@ -486,8 +481,10 @@ CASES: dict[str, Case] = {c.name: c for c in (
     Case("gmy_pcm_no_age_taste", "GMY", build_gmy_pcm(("no_age_taste",)), PCM_DATA + GMY_DATA, (1, 8),
          f"GMYSpec round-2 layout (robustness no_age_taste) on {GMY_YEARS}, {GMY_HOUSEHOLDS} households, nu 1, "
          "seed 0, moments demand_supply, layout starts"),
-    Case("nevo_pcm", "Nevo", build_nevo_pcm, ("module:pyblp", "legacy_bindings"), (1, 8),
-         f"nevo_replication PCMProblem, {NEVO_GH_NODES}-node GH grid, objective at start_values()"),
+    Case("nevo_pcm", "Nevo", build_nevo_pcm, PCM_DATA, (1, 8),
+         f"nevo_replication NevoSpec, {NEVO_GH_NODES}-node GH grid, evaluate at the layout starts (golden written "
+         f"by the pre-harness PCMProblem at its start_values)",
+         approx=(("nevo.W", 1e-15), ("nevo.q", 1e-13), ("nevo.G", 1e-12), ("nevo.dq", 1e-11))),
     Case("gmy_blp", "GMY", build_gmy_blp, ("module:pyblp",) + GMY_DATA, (1,),
          f"gmy estimate_blp main() stage published on {GMY_YEARS}, {GMY_HOUSEHOLDS} households"),
     Case("kernel_synthetic", "kernel", build_kernel_synthetic, ("kernel",), (1, 8),
