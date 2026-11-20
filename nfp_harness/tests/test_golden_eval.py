@@ -42,7 +42,7 @@ def test_golden_outputs_are_bit_identical(name: str, threads: int) -> None:
     ref, meta = harness.load(path)
     assert meta["sha256"] == harness.digest_all(ref), f"{path} is corrupt: its pins do not hash to its metadata"
     got, _ = harness.compute_isolated(name, threads, golden=path)
-    bad = harness.differences(ref, got)
+    bad = harness.differences(ref, got, dict(case.approx))
     assert not bad, (f"{name} at {threads} threads differs from {path.name} (written on {meta.get('commit')}) in "
                      f"{len(bad)} of {len(ref)} pins:\n  " + "\n  ".join(bad[:40]))
 
@@ -55,3 +55,7 @@ def test_comparison_sees_one_ulp_a_signed_zero_and_a_dtype() -> None:
     assert harness.differences({"x": a}, {"x": a.astype(np.float32)})
     assert harness.differences({"x": np.array([np.nan])}, {"x": np.array([np.nan])}) == []
     assert harness.differences({"x": a}, {}) == ["missing x"]
+    # a pin with a tolerance passes within it and fails beyond it, and never across dtypes
+    assert harness.differences({"x": a + 1}, {"x": np.nextafter(a + 1, 3.0)}, {"x": 1e-14}) == []
+    assert harness.differences({"x": a + 1}, {"x": a * 1.001 + 1}, {"x": 1e-14})
+    assert harness.differences({"x": a}, {"x": a.astype(np.float32)}, {"x": 1.0})

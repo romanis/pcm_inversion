@@ -323,7 +323,7 @@ class PaperSpec:
 
         model = PCMModel(self.pcm_spec(), {"products": self.products, "agents": self.agents}, layout, nu,
                          self.draw_seed_offset + seed, total_threads=threads, antithetic=self.antithetic_draws,
-                         cold_draws=self.cold_draws)
+                         cold_draws=self.cold_draws, taste_nodes=self.taste_nodes(nu))
         if self.warm_delta:
             delta_w, theta_w = self.read_warm_delta()
             model.warm_from_delta(delta_w, theta_w if theta_w is not None and theta_w.size == layout.P
@@ -333,6 +333,11 @@ class PaperSpec:
     @property
     def antithetic_draws(self) -> Sequence[str] | bool:
         return ()
+
+    def taste_nodes(self, nu: int) -> tuple[np.ndarray, np.ndarray] | None:
+        """A quadrature rule (nodes, weights) over the taste draw dimensions at ``nu`` (``PCMModel`` taste_nodes),
+        or None (the default) for the Sobol draws."""
+        return None
 
     def build_problem(self, nu: int, seed: int, threads: int | None, moments: str = "all",
                       layout_changes: dict[str, Any] | None = None, **kw: Any) -> NFPGMMProblem:

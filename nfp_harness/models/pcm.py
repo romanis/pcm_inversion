@@ -23,8 +23,10 @@ points over the taste draw dimensions (seed ``seed + t`` for the t-th market in 
 split into consecutive blocks over its A_t agents (``data.cross_agents``), so each agent keeps its
 weight (DESIGN 9, decisions 3 and 6). ``PCMSpec.draws_per_market`` overrides R_t. With ``antithetic`` (taste draw
 dimensions by name, or True for all) the R_t points are R_t / 2 Sobol points each followed by its antithetic partner
-(``data.sobol_normal_draws``); the default (none) leaves the draws unchanged. a_i has no draws: the kernel integrates
-its lognormal in closed form.
+(``data.sobol_normal_draws``); the default (none) leaves the draws unchanged. With ``taste_nodes`` (a quadrature rule
+over the taste draw dimensions) every agent is instead crossed with every node, agent-major, and a draw's weight is the
+agent's weight times the node's (Nevo's Gauss-Hermite grid). a_i has no draws: the kernel integrates its lognormal in
+closed form.
 
 Products are sorted by price within each market (the kernel needs strictly increasing prices;
 spread ties first with ``data.break_price_ties``). ``MarketIndex.rows`` holds the product rows in that
@@ -256,9 +258,15 @@ class PCMModel:
 
     def __init__(self, spec: Any, data: Any, layout: Any, nu_per_agent: int, seed: int,
                  total_threads: int | None = None, antithetic: Sequence[str] | bool = (),
-                 cold_draws: int = 0) -> None:
-        """PCMModel(spec, data, layout, nu_per_agent, seed, total_threads=None, antithetic=(), cold_draws=0). None uses
-        os.cpu_count().
+                 cold_draws: int = 0, taste_nodes: tuple[np.ndarray, np.ndarray] | None = None) -> None:
+        """PCMModel(spec, data, layout, nu_per_agent, seed, total_threads=None, antithetic=(), cold_draws=0,
+        taste_nodes=None). None uses os.cpu_count().
+
+        ``taste_nodes``: (nodes (R_q, dim), weights (R_q,)), a quadrature rule over the taste draw dimensions in the
+        order they first appear in the layout. Each market then has R_t = A_t R_q draws: agent a's draws are rows
+        a R_q ... (a + 1) R_q - 1, node k with weight w_a w_k. ``nu_per_agent``, ``seed``, ``antithetic`` and
+        ``PCMSpec.draws_per_market`` do not apply. None (the default) keeps the Sobol draws. Not part of ``PCMSpec``,
+        so spec hashes do not move.
 
         ``cold_draws``: the kernel's draw homotopy for a market with no warm start (``SolveOptions::cold_draws``):
         invert first on every k-th draw, at least ``cold_draws`` of them, then warm-start each finer level up to all
@@ -343,6 +351,16 @@ class PCMModel:
         #: taste draw dimensions drawn in antithetic pairs (empty: plain scrambled Sobol)
         self.antithetic: tuple[str, ...] = tuple(a for a in self.nu_names if a in anti)
         anti_cols = [self.nu_names.index(a) for a in self.antithetic]
+        q_nodes, q_w = np.zeros((0, 0)), np.zeros(0)
+        if taste_nodes is not None:
+            q_nodes = np.asarray(taste_nodes[0], dtype=float)
+            q_nodes = q_nodes[:, None] if q_nodes.ndim == 1 else q_nodes
+            q_w = np.asarray(taste_nodes[1], dtype=float).ravel()
+            if q_nodes.shape != (q_w.size, len(self.nu_names)) or self.antithetic:
+                raise ValueError(f"taste_nodes: nodes {q_nodes.shape} and weights {q_w.shape} must cover the taste "
+                                 f"draw dimensions {self.nu_names} (and exclude antithetic draws)")
+        #: the quadrature rule of the taste draws (None: scrambled Sobol)
+        self.taste_nodes = None if taste_nodes is None else (q_nodes, q_w)
 
         # ------------------------------------------------------------ products
         mkt = np.asarray(products[sp.market_column]).ravel()
@@ -375,13 +393,19 @@ class PCMModel:
                 assert aw is not None
                 w_agent = aw[arows]
             A = w_agent.size
-            R = sp.draws_per_market or 2 ** int(math.ceil(math.log2(A * self.nu_per_agent)))
-            if R < A:
-                raise ValueError(f"market {mid!r}: {R} draws for {A} agents")
-            nu = (sobol_normal_draws(R, len(self.nu_names), self.seed + t, antithetic=anti_cols) if self.nu_names
-                  else np.zeros((R, 0)))
-            w, idx, nu = cross_agents(w_agent, np.arange(A, dtype=float)[:, None], nu)
-            idx = idx[:, 0].astype(int)
+            if self.taste_nodes is not None:
+                R = A * q_w.size
+                idx = np.repeat(np.arange(A), q_w.size)
+                w = np.repeat(w_agent, q_w.size) * np.tile(q_w, A)
+                nu = np.tile(q_nodes, (A, 1))
+            else:
+                R = sp.draws_per_market or 2 ** int(math.ceil(math.log2(A * self.nu_per_agent)))
+                if R < A:
+                    raise ValueError(f"market {mid!r}: {R} draws for {A} agents")
+                nu = (sobol_normal_draws(R, len(self.nu_names), self.seed + t, antithetic=anti_cols)
+                      if self.nu_names else np.zeros((R, 0)))
+                w, idx, nu = cross_agents(w_agent, np.arange(A, dtype=float)[:, None], nu)
+                idx = idx[:, 0].astype(int)
             basis = np.empty((R, len(taste)))
             for m, k in enumerate(taste):
                 b = specs[k].basis
