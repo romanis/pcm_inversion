@@ -413,6 +413,10 @@ class NFPGMMProblem:
         if self.supply is not None:
             Zs = self.supply.Z
             W[self.supply_rows, self.supply_rows] = weight_from_covariance(Zs.T @ Zs / self.n)
+        for m in self.moments:   # first-difference IV blocks: 2SLS weight on their own instruments
+            if getattr(m, "is_difference", False) and m is not self.supply:
+                Zd = getattr(m, "Z")
+                W[self.blocks[m.name], self.blocks[m.name]] = weight_from_covariance(Zd.T @ Zd / self.n)
         for m in self.calibration:   # a calibration row's covariance is a declared constant
             rows = self.blocks[m.name]
             W[rows, rows] = weight_from_covariance(np.atleast_2d(m.covariance_block(None, None)))  # type: ignore

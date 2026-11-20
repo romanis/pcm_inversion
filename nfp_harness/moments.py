@@ -37,7 +37,8 @@ from .types import (
 )
 from .weighting import cluster_sums, clustered_covariance
 
-__all__ = ["Moment", "IVMoments", "SarganIVMoments", "MicroDataset", "MicroPart", "RatioMicroMoment", "MICRO_OUTPUTS",
+__all__ = ["Moment", "IVMoments", "SarganIVMoments", "DifferenceIVMoments", "DifferenceSarganIVMoments", "MicroDataset",
+           "MicroPart", "RatioMicroMoment", "MICRO_OUTPUTS",
            "product_part", "SupplyMoments", "SupplyDomainError", "MarginMoment", "GroupMomentRow", "GroupMicroMoments",
            "GROUP_OUTPUTS", "SecondChoiceMoments", "SECOND_CHOICE_OUTPUTS", "SECOND_CHOICE_ADJOINT"]
 
@@ -153,6 +154,32 @@ class SarganIVMoments(IVMoments):
 
     def cluster_terms(self, xi: np.ndarray, dxi: np.ndarray | None) -> tuple[np.ndarray, np.ndarray | None]:
         raise NotImplementedError("SarganIVMoments is not used with CUE")
+
+
+class _DifferenceBlock:
+    """Mixin of the first-difference IV blocks: a second IV block on xi beside the aggregate one. It does not
+    concentrate beta (beta comes from the aggregate block), so it is not ``is_aggregate``; ``is_difference`` asks
+    ``NFPGMMProblem.initial_weighting`` for its 2SLS weight ``(Z_d'Z_d/n)^{-1}``."""
+
+    is_aggregate = False
+    is_micro = False
+    is_difference = True
+
+
+class DifferenceIVMoments(_DifferenceBlock, IVMoments):
+    """First-difference demand moments ``E[dz dxi] = 0`` over pairs of rows of one id in successive periods, as
+    ``g = Z_d' xi / n`` with ``Z_d = instruments.difference_instruments(cur, prev, z)`` (``Z_d' xi = dZ' D xi``). xi is the
+    aggregate block's, so time-invariant characteristics and fixed effects drop out of every pair."""
+
+    def __init__(self, Z_d: np.ndarray, clustering_ids: np.ndarray | None = None, name: str = "demand_fd") -> None:
+        super().__init__(Z_d, clustering_ids, name)
+
+
+class DifferenceSarganIVMoments(_DifferenceBlock, SarganIVMoments):
+    """``DifferenceIVMoments`` in the scale-free form of ``SarganIVMoments`` (divided by ``sqrt(xi'xi/n)``)."""
+
+    def __init__(self, Z_d: np.ndarray, clustering_ids: np.ndarray | None = None, name: str = "demand_fd") -> None:
+        super().__init__(Z_d, clustering_ids, name)
 
 
 class MicroDataset:
