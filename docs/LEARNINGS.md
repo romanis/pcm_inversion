@@ -993,3 +993,25 @@ the kink spacing and every trial is rejected whatever the direction. Fixes: rese
 step on a restart, floor Delta at the secant step, make the probe a compass-search fallback, recompute the
 More scales after a restart.
 
+## 33. A cold PCM inversion costs thousands of share evaluations; run it on fewer draws, then warm-start (2026-11-19)
+
+**Finding.** At the GMY round-5 step-1 theta (sigma on z log number of trims 6.7, sigma_p 3.56, a_lo 0.2) a cold
+inversion needs 1,600 to 35,000 share evaluations per market, whatever the draw count, while a warm start needs 20
+to 60. The three 39-year a_lo runs at nu 32 x 2,000 households (65,536 draws per market) had 33 (a_lo 0.2) or 39
+(0.1, 0.3) markets cold and spent 5h50m on their first evaluation without finishing.
+
+**Worked example (1980, 161 products, nu 4, 8,192 draws).** The vertical-model guess gives 112 of the 161 products
+a share of zero at full heterogeneity, and an inside share of 0.461 against 0.315 in the data. The frontier-lift
+repair runs 60 rounds (121 evaluations): each round lifts the zero-share products onto some draw's hull, which pushes
+others off (31, 33, 27, ... 15 still at zero), so there is no feasible start. The heterogeneity continuation then
+tries lambda 0.25 and 0.125 (121 evaluations each, the same failure) and gets a feasible start at lambda 0.0625 after
+56 repair rounds, but there product 57 (data share 1.1e-3) has a model share of 9.7e-19, a log residual of -34.7,
+and another product is 2,286 times its target. Newton on the log shares takes 85 damped iterations (967 evaluations)
+to converge there; lambda 0.16, 0.30, 0.51, 0.82 and 1 take 214, 82, 75, 118 and 191 more: 2,013 evaluations in all.
+At nu 32 the count is similar (1,638) but every evaluation costs eight times as much (244 s on 16 threads).
+
+**Fix.** `SolveOptions::cold_draws`: run the cold path on every k-th draw, then warm-start each finer level (a nu 4
+solution warm-starts nu 32 in 20 to 60 evaluations). One full 39-year first evaluation with `--cold-draws 8192` on 96
+threads: 31 minutes, the slowest market (2017, 291 products) 15,711 evaluations on 8,192 draws. A delta solved at
+a_lo 0.2 warm-starts a_lo 0.1 and 0.3 in 18 to 38 evaluations, so one `run --stage warm` serves all three a_lo runs.
+The remaining cost is the cold path itself; a better cold start would need a different initial guess, not more draws.

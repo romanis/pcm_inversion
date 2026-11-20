@@ -1,6 +1,7 @@
 #ifndef __PCM_DEMAND_HPP__
 #define __PCM_DEMAND_HPP__
 
+#include <atomic>
 #include <vector>
 #include <Eigen/Dense>
 
@@ -59,6 +60,29 @@ inline bool bound_moves_with_scale(const Params & prm) {
 
 /** "alpha" or "a". */
 inline const char * bound_kind_name(BoundKind k) { return k == BoundKind::A ? "a" : "alpha"; }
+
+/**
+ * A team size another thread may change while a call runs: the calling thread installs it with
+ * ThreadBudgetScope, and shares() and frontier_lift() (and the kernel's draw loops) set the calling
+ * thread's OpenMP team size from it at their start. A market that finishes can so hand its threads to
+ * the markets still running, between two share evaluations of theirs. Results do not depend on it:
+ * every draw loop sums fixed 64-draw blocks in block order.
+ */
+using ThreadBudget = std::atomic<int>;
+
+/** Installs `budget` (nullptr: none) for the calling thread and restores the previous one on scope exit. */
+class ThreadBudgetScope {
+public:
+    explicit ThreadBudgetScope(ThreadBudget * budget);
+    ~ThreadBudgetScope();
+    ThreadBudgetScope(const ThreadBudgetScope &) = delete;
+    ThreadBudgetScope & operator=(const ThreadBudgetScope &) = delete;
+private:
+    ThreadBudget * saved_;
+};
+
+/** Sets the calling thread's OpenMP team size from its installed budget, if it has one with a value >= 1. */
+void apply_thread_budget();
 
 struct Shares {
     Eigen::ArrayXd  s;               //!< N predicted shares

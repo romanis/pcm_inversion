@@ -90,9 +90,28 @@ void append(std::string & stages, const std::string & s) {
     stages += s;
 }
 
+// Every k-th draw of mk (draws 0, k, 2k, ...), weights rescaled so they sum to the market's draw mass: a coarser
+// quadrature of the same market for the draw homotopy of the cold stage.
+pcm_demand::Market thin_draws(const pcm_demand::Market & mk, int k) {
+    const int R = static_cast<int>(mk.weights.size());
+    const int n = (R + k - 1) / k;
+    pcm_demand::Market out{mk.x, mk.p, ArrayXd(n), MatrixXd(n, mk.taste_basis.cols()), mk.taste_col,
+                           MatrixXd(n, mk.scale_basis.cols())};
+    for (int r = 0; r < n; ++r) {
+        out.weights[r] = mk.weights[r * k];
+        out.taste_basis.row(r) = mk.taste_basis.row(r * k);
+        if (mk.scale_basis.cols() > 0) out.scale_basis.row(r) = mk.scale_basis.row(r * k);
+    }
+    const double sub = out.weights.sum();
+    if (sub > 0) out.weights *= mk.weights.sum() / sub;
+    return out;
+}
+
 pcm_demand::Params interpolate(const pcm_demand::Params & a, const pcm_demand::Params & b, double tau) {
+    // the bound moves along the path only when the warm start was solved under another one (continuation in a_lo)
+    const double lo = a.lo == b.lo ? b.lo : (1.0 - tau) * a.lo + tau * b.lo;
     return pcm_demand::Params{(1.0 - tau) * a.theta + tau * b.theta, (1.0 - tau) * a.phi + tau * b.phi,
-                              (1.0 - tau) * a.sigma_p + tau * b.sigma_p, b.lo, b.bound_kind};
+                              (1.0 - tau) * a.sigma_p + tau * b.sigma_p, lo, b.bound_kind};
 }
 
 }  // namespace
@@ -128,6 +147,7 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
     const int block = 64;
     const int n_blocks = std::max(1, (R + block - 1) / block);
     std::vector<Block> part(n_blocks);
+    pcm_demand::apply_thread_budget();
 
 #pragma omp parallel for schedule(dynamic) if(n_blocks > 1)
     for (int b = 0; b < n_blocks; ++b) {
@@ -274,12 +294,13 @@ SolveResult solve_market(const ArrayXd & s_data, const pcm_demand::Market & mk,
                     "theta_warm must have the layout of theta");
             require(prm_warm->theta.allFinite() && prm_warm->phi.allFinite() && std::isfinite(prm_warm->sigma_p) &&
                     prm_warm->sigma_p > 0, "theta_warm must be finite with positive sigma_p");
-            require(prm_warm->lo == prm.lo && prm_warm->bound_kind == prm.bound_kind,
-                    "theta_warm must have the bound of theta");
+            require(prm_warm->bound_kind == prm.bound_kind && std::isfinite(prm_warm->lo) && prm_warm->lo >= 0,
+                    "theta_warm must have the bound kind of theta and a finite, non-negative bound");
         }
         if (micro) validate_micro(*micro, N, static_cast<int>(mk.weights.size()));
         require(opt.tol > 0 && opt.n_threads >= 1 && opt.rcond_min >= 0 && opt.path_seconds >= 0,
                 "options need tol > 0, n_threads >= 1, rcond_min >= 0, path_seconds >= 0");
+        require(opt.cold_draw_factor >= 2, "options need cold_draw_factor >= 2");
     } catch (const std::exception & e) {
         res.status = Status::INVALID_INPUT;
         res.stages = std::string("invalid input: ") + e.what();
@@ -289,6 +310,7 @@ SolveResult solve_market(const ArrayXd & s_data, const pcm_demand::Market & mk,
     }
 
     ThreadScope threads(opt.n_threads);
+    pcm_demand::ThreadBudgetScope budget(opt.thread_budget);
     const double inf = std::numeric_limits<double>::infinity();
     ArrayXd best_delta;
     double best_res = inf;           // finite once some stage reached a feasible delta
@@ -338,6 +360,33 @@ SolveResult solve_market(const ArrayXd & s_data, const pcm_demand::Market & mk,
             char buf[64];
             std::snprintf(buf, sizeof(buf), " tau=%.3g", tau);
             append(res.stages, fmt_stage("path", converged, seconds_since(ts), evals - e0) + buf);
+        }
+        // 4a. draw homotopy: cold on a thinned market, then each finer level warm-started from the coarser one
+        if (!converged && opt.cold_draws > 0) {
+            const long R = mk.weights.size();
+            long k = 1;
+            while (R / (k * opt.cold_draw_factor) >= static_cast<long>(opt.cold_draws)) k *= opt.cold_draw_factor;
+            ArrayXd d;
+            bool ok = k > 1;
+            for (; ok && k > 1; k /= opt.cold_draw_factor) {
+                const auto ts = Clock::now();
+                const pcm_demand::Market sub = thin_draws(mk, static_cast<int>(k));
+                const pcm_demand::InversionResult r =
+                    pcm_demand::invert(s_data, sub, prm, d, opt.tol, d.size() ? opt.warm_evals : opt.cold_evals);
+                evals += r.share_evaluations;
+                ok = r.converged;
+                char buf[160];
+                std::snprintf(buf, sizeof(buf), "draws R=%ld %s %.3gs %uev", static_cast<long>(sub.weights.size()),
+                              ok ? "ok" : "failed", seconds_since(ts), r.share_evaluations);
+                append(res.stages, buf);
+                if (ok) d = r.delta;
+            }
+            if (ok) {
+                const auto ts = Clock::now();
+                const unsigned e0 = evals;
+                record(pcm_demand::invert(s_data, mk, prm, d, opt.tol, opt.warm_evals));
+                append(res.stages, fmt_stage("draws warm", converged, seconds_since(ts), evals - e0));
+            }
         }
         // 4. cold stage
         if (!converged) {

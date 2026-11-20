@@ -64,7 +64,9 @@ purchase-rate micro rows), ``step1`` (fixed W1 from the prefit point; no gate ne
 ``step2`` (W2 = S^-1: the aggregate block updated, micro and second-choice blocks fixed), ``post`` (section 4 tables,
 comparison.txt against GMY's BLP), ``a_lo_band`` (a_lo in 0.1, 0.2, 0.4; headline 0.2), ``stability``, ``gate``. ``--years`` restricts the
 markets (development: 1980 1991 1999 2005 2015 2018); ``--warm-delta <run>/stages/<stage>.npz`` warm-starts the
-markets of another run's stage at that stage's theta, ``--start-theta`` starts the layout there (by parameter name;
+markets of another run's stage at that stage's theta (also under another a_lo: the stored a_lo is a warm start and
+the kernel's theta path moves the bound; ``run --stage warm`` inverts every market once at the starting theta and
+stores ``stages/warm.npz`` for this), ``--start-theta`` starts the layout there (by parameter name;
 ``--start-theta-except`` keeps named parameters at this layout's starts); ``--fix sigma_p=3.0`` fixes a parameter at a
 value for the whole chain (a calibration band, GMY_ROUND4 item 3; ``ParameterLayout.fixed``).
 
@@ -577,6 +579,7 @@ class GMYSpec:
         self.start_theta: str | None = None
         self.start_theta_except: tuple[str, ...] = ()
         self.max_iterations: int | None = None
+        self.cold_draws = 0
         self.prefit_rows = "price_purchase"
         self.antithetic_taste = False
         self.fixed: dict[str, float] = {}
@@ -814,6 +817,10 @@ class GMYSpec:
                                  "warm-starts every market of the same years (WP-G7 item 1)")
         parser.add_argument("--max-iterations", type=int, default=None,
                             help="trial-step limit of step1 and step2 (smoke runs); part of the run key")
+        parser.add_argument("--cold-draws", type=int, default=0,
+                            help="draw homotopy for markets with no warm start: invert first on every k-th draw (at "
+                                 "least this many draws), then warm-start each finer level (PCMModel cold_draws; 0: "
+                                 "off); part of the run key when set")
 
     def configure(self, args: Any) -> None:
         years = tuple(args.years) if getattr(args, "years", None) else ALL_YEARS
@@ -836,6 +843,7 @@ class GMYSpec:
         self.warm_delta = str(pathlib.Path(wd).resolve()) if wd else None
         mi = getattr(args, "max_iterations", None)
         self.max_iterations = None if mi is None else int(mi)
+        self.cold_draws = int(getattr(args, "cold_draws", None) or 0)
 
     def run_key(self) -> dict[str, Any]:
         """Result-changing options beyond nu and seed: years (unless all 39), instruments, moments, robustness, a_lo and
@@ -872,6 +880,8 @@ class GMYSpec:
             out["fix"] = dict(sorted(self.fixed.items()))
         if self.max_iterations is not None:
             out["max_iterations"] = self.max_iterations
+        if self.cold_draws:
+            out["cold_draws"] = self.cold_draws
         return out
 
     @property
@@ -1037,7 +1047,7 @@ class GMYSpec:
         if layout_changes:
             layout = layout.replace(layout_changes)
         model = PCMModel(self.pcm_spec(), {"products": self.products, "agents": self.agents}, layout, nu, SEED + seed,
-                         total_threads=threads, antithetic=self.antithetic_taste)
+                         total_threads=threads, antithetic=self.antithetic_taste, cold_draws=self.cold_draws)
         if self.warm_delta:
             delta_w, theta_w = self.read_warm_delta()
             model.warm_from_delta(delta_w, theta_w if theta_w is not None and theta_w.size == layout.P
@@ -1194,7 +1204,8 @@ class GMYSpec:
                 **({"income_law": {"law": self.income_law, "ybar_1000usd": self.income_law_ybar, "clip": INCOME_LAW_CLIP}}
                    if self.income_law != "gmy_blp" else {}),
                 **({"draws": {"antithetic": "every taste dimension"}} if self.antithetic_taste else {}),
-                **({"fix": dict(sorted(self.fixed.items()))} if self.fixed else {})}
+                **({"fix": dict(sorted(self.fixed.items()))} if self.fixed else {}),
+                **({"cold_draws": self.cold_draws} if self.cold_draws else {})}
 
     def _hash_layout(self) -> ParameterLayout:
         """The layout as hashed: under ``--income-basis auto`` the level variant whatever the prefit chose, so the hash

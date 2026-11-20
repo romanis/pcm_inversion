@@ -32,6 +32,20 @@ struct SolveOptions {
     bool derivatives = true;                              //!< ds/ddelta, ds/dtheta, ddelta/dtheta
     bool price_derivatives = false;                       //!< ds/dp (postestimation)
     double rcond_min = 1e-13;                             //!< below this ds/ddelta is reported singular
+    /**
+     * Draw homotopy of the cold stage (0: off, the cold stage as before). With cold_draws > 0 the cold stage first
+     * inverts on every k-th draw, k = cold_draw_factor^L with L the largest level leaving at least cold_draws draws,
+     * then warm-starts each finer level (k / cold_draw_factor, ..., 1) from the coarser solution with warm_evals. A
+     * share evaluation on R / k draws costs 1 / k of a full one, and the cold path needs thousands of evaluations
+     * where a warm start from a coarser solution needs tens. If a level fails, the plain cold stage runs.
+     */
+    unsigned cold_draws = 0;
+    int cold_draw_factor = 8;                             //!< thinning factor between the levels (at least 2)
+    /**
+     * Optional team size that another thread may change during the call (pcm_demand::ThreadBudget): read before
+     * every share evaluation, so it overrides n_threads from then on. Results are the same for every value.
+     */
+    pcm_demand::ThreadBudget * thread_budget = nullptr;
 };
 
 struct SolveResult {
@@ -51,7 +65,8 @@ struct SolveResult {
  * P = M + Q + 1 in the column order of pcm_demand::Shares::d_theta: taste, scale, sigma_p.
  *
  * Stages: warm (from delta_warm at prm), theta path (from prm_warm to prm, only if the warm stage
- * failed), cold (vertical-model guess). s and micro are evaluated at the returned delta in every
+ * failed), draws (the draw homotopy, only with opt.cold_draws > 0 and no converged stage yet), cold
+ * (vertical-model guess). s and micro are evaluated at the returned delta in every
  * status except INVALID_INPUT. The derivative fields (ds_ddelta, ds_dtheta, ddelta_dtheta, ds_dp,
  * micro_d_delta, micro_d_theta) are filled only when the inversion converged and they were
  * requested; otherwise they are empty. With status SINGULAR_DS_DDELTA, ddelta_dtheta is NaN and the
@@ -59,7 +74,8 @@ struct SolveResult {
  * reason in `stages`. Sets the calling thread's OpenMP team size to opt.n_threads for the call and
  * restores it on return.
  * @param delta_warm empty: no warm start
- * @param prm_warm   theta at which delta_warm was solved, or nullptr
+ * @param prm_warm   theta at which delta_warm was solved, or nullptr; its bound lo may differ from prm's (same
+ *                   kind): the theta path then moves the bound too, a continuation in a_lo from a solved a_lo
  * @param micro      nullptr: no micro parts
  */
 SolveResult solve_market(const Eigen::ArrayXd & s_data, const pcm_demand::Market & mk,

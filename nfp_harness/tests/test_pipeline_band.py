@@ -408,3 +408,39 @@ def test_sd_xi_blowup_warns_under_sargan_and_refuses_step2_otherwise(tmp_path: p
             assert not (pipe.path / "reports" / "step2_warning.txt").exists()
     finally:
         pipe.close()
+
+
+def test_warm_stage_writes_a_delta_file_other_runs_read(tmp_path: pathlib.Path) -> None:
+    """Stage ``warm`` inverts every market at the layout starts and stores the model state, the theta and the
+    parameter names, so ``read_stage_file`` / ``stage_theta`` of another run read it as a warm delta; a second call is
+    read back, not recomputed."""
+    from nfp_harness.checkpoint import read_stage_file, stage_parameter_names
+
+    syn = make_synthetic(2, 8, 32, 8, seed=2)
+    spec = ToySpec(syn)
+    cfg = RunConfig(base=tmp_path, nu=syn["nu"], seed=syn["seed"], threads=8)
+    pipe = Pipeline(spec, cfg)
+    try:
+        doc = pipe.warm()
+        problem = pipe.problem("all")
+        start = problem.layout.starts()
+        again = pipe.warm()
+    finally:
+        pipe.close()
+    assert doc["converged"] and again["converged"]
+    path = pipe.path / "stages" / "warm.npz"
+    st = read_stage_file(path)
+    np.testing.assert_array_equal(np.asarray(st["theta"]), start)
+    assert stage_parameter_names(path) == list(synthetic_layout().names)
+    model = st["problem_state"]["model"]
+    assert all(bool(h) for h in model["has_accepted"])
+    # the stored delta is the converged one: a model loading it is solved by its warm stage alone
+    m = PCMModel(PCMSpec(CHARS, tol=1e-12), syn["data"], problem.layout, syn["nu"], syn["seed"], total_threads=8)
+    try:
+        m.load_state_dict(model)
+        from nfp_harness.types import KernelRequests
+
+        sol = m.solve(start, KernelRequests(), False)
+    finally:
+        m.close()
+    assert all(pm["stages"].startswith("warm ok") for pm in sol.per_market)
