@@ -1,5 +1,7 @@
 #include "pcm_kernel.hpp"
-#include "pcm_market_share.hpp"
+#include "pcm_aggregate.hpp"
+#include "pcm_invert.hpp"
+#include "pcm_geometry.hpp"
 
 #include <omp.h>
 #include <algorithm>
@@ -38,7 +40,7 @@ void require(bool ok, const std::string & what) {
     if (!ok) throw std::invalid_argument(what);
 }
 
-void validate_market(const pcm_demand::Market & mk, const pcm_demand::Params & prm, int N) {
+void validate_market(const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm, int N) {
     const int R = static_cast<int>(mk.weights.size());
     const int K = static_cast<int>(mk.x.cols());
     const int M = static_cast<int>(prm.theta.size());
@@ -79,39 +81,9 @@ struct Block {
     MatrixXd micro_d_delta, micro_d_theta;
 };
 
-std::string fmt_stage(const char * name, bool ok, double secs, unsigned evals) {
-    char buf[128];
-    std::snprintf(buf, sizeof(buf), "%s %s %.3gs %uev", name, ok ? "ok" : "failed", secs, evals);
-    return buf;
-}
-
 void append(std::string & stages, const std::string & s) {
     if (!stages.empty()) stages += "; ";
     stages += s;
-}
-
-// Every k-th draw of mk (draws 0, k, 2k, ...), weights rescaled so they sum to the market's draw mass: a coarser
-// quadrature of the same market for the draw homotopy of the cold stage.
-pcm_demand::Market thin_draws(const pcm_demand::Market & mk, int k) {
-    const int R = static_cast<int>(mk.weights.size());
-    const int n = (R + k - 1) / k;
-    pcm_demand::Market out{mk.x, mk.p, ArrayXd(n), MatrixXd(n, mk.taste_basis.cols()), mk.taste_col,
-                           MatrixXd(n, mk.scale_basis.cols())};
-    for (int r = 0; r < n; ++r) {
-        out.weights[r] = mk.weights[r * k];
-        out.taste_basis.row(r) = mk.taste_basis.row(r * k);
-        if (mk.scale_basis.cols() > 0) out.scale_basis.row(r) = mk.scale_basis.row(r * k);
-    }
-    const double sub = out.weights.sum();
-    if (sub > 0) out.weights *= mk.weights.sum() / sub;
-    return out;
-}
-
-pcm_demand::Params interpolate(const pcm_demand::Params & a, const pcm_demand::Params & b, double tau) {
-    // the bound moves along the path only when the warm start was solved under another one (continuation in a_lo)
-    const double lo = a.lo == b.lo ? b.lo : (1.0 - tau) * a.lo + tau * b.lo;
-    return pcm_demand::Params{(1.0 - tau) * a.theta + tau * b.theta, (1.0 - tau) * a.phi + tau * b.phi,
-                              (1.0 - tau) * a.sigma_p + tau * b.sigma_p, lo, b.bound_kind};
 }
 
 }  // namespace
@@ -127,8 +99,8 @@ const char * status_name(Status s) {
     return "invalid_input";
 }
 
-MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market & mk,
-                                 const pcm_demand::Params & prm, const MicroRequest * micro,
+MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_aggregate::Market & mk,
+                                 const pcm_aggregate::Params & prm, const MicroRequest * micro,
                                  bool derivatives, bool price_derivatives)
 {
     const int N = static_cast<int>(delta.size());
@@ -143,15 +115,17 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
     const int Pm = micro ? static_cast<int>(micro->U.cols()) : 0;
     const bool jac = derivatives || price_derivatives;
 
-    // Same block partition as pcm_demand::shares: fixed blocks of 64 draws, summed in block order.
-    const int block = 64;
-    const int n_blocks = std::max(1, (R + block - 1) / block);
-    std::vector<Block> part(n_blocks);
-    pcm_demand::apply_thread_budget();
+    MarketEvaluation out;
+    out.s = ArrayXd::Zero(N);
+    if (derivatives) { out.ds_ddelta = MatrixXd::Zero(N, N); out.ds_dtheta = MatrixXd::Zero(N, P); }
+    if (price_derivatives) out.ds_dp = MatrixXd::Zero(N, N);
+    if (micro) {
+        out.micro = VectorXd::Zero(Pm);
+        if (derivatives) { out.micro_d_delta = MatrixXd::Zero(Pm, N); out.micro_d_theta = MatrixXd::Zero(Pm, P); }
+    }
 
-#pragma omp parallel for schedule(dynamic) if(n_blocks > 1)
-    for (int b = 0; b < n_blocks; ++b) {
-        Block & acc = part[b];
+    // The draw loop of pcm_aggregate::shares: fixed blocks of 64 draws, summed in block order.
+    pcm_aggregate::for_each_draw_block<Block>(R, [&](Block & acc, int i0, int i1) {
         acc.s = ArrayXd::Zero(N);
         if (derivatives) {
             acc.ds_ddelta = MatrixXd::Zero(N, N);
@@ -166,7 +140,7 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
             }
         }
         ArrayXd s_c = ArrayXd::Zero(N), dsig = ArrayXd::Zero(N), dlogc = ArrayXd::Zero(N);
-        const bool bound = pcm_demand::bound_moves_with_scale(prm);   // log c acts through a_lo = lo / c
+        const bool bound = pcm_aggregate::bound_moves_with_scale(prm);   // log c acts through a_lo = lo / c
         MatrixXd Jd, Jp;
         if (jac) { Jd = MatrixXd::Zero(N, N); Jp = MatrixXd::Zero(N, N); }
         VectorXd t(K);
@@ -174,19 +148,14 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
         S.reserve(N);
         MatrixXd Jc, uJ;
         VectorXd us, ud, ul, xs;
-        const int i0 = static_cast<int>((static_cast<long>(R) * b) / n_blocks);
-        const int i1 = static_cast<int>((static_cast<long>(R) * (b + 1)) / n_blocks);
+        ArrayXd dc(N);
 
         for (int i = i0; i < i1; ++i) {
-            t.setZero();
-            for (int m = 0; m < M; ++m) t[mk.taste_col[m]] += prm.theta[m] * mk.taste_basis(i, m);
-            const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
-            const double c = std::exp(log_c);
-            const ArrayXd dc = (delta + (mk.x * t).array()) / c;
+            const double c = pcm_aggregate::conditional_quality(delta, mk, prm, i, t, dc);
 
             s_c.setZero();
             if (jac) { dsig.setZero(); if (bound) dlogc.setZero(); }
-            pcm_share::cond_share(dc, mk.p, prm.sigma_p, pcm_demand::draw_a_lo(prm, c), s_c, jac ? &Jd : nullptr,
+            pcm_geometry::cond_share(dc, mk.p, prm.sigma_p, pcm_aggregate::draw_a_lo(prm, c), s_c, jac ? &Jd : nullptr,
                                               &dsig, &Jp, bound ? &dlogc : nullptr);
 
             const double w = mk.weights[i];
@@ -252,17 +221,7 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
             Jd(S, S).setZero();
             Jp(S, S).setZero();
         }
-    }
-
-    MarketEvaluation out;
-    out.s = ArrayXd::Zero(N);
-    if (derivatives) { out.ds_ddelta = MatrixXd::Zero(N, N); out.ds_dtheta = MatrixXd::Zero(N, P); }
-    if (price_derivatives) out.ds_dp = MatrixXd::Zero(N, N);
-    if (micro) {
-        out.micro = VectorXd::Zero(Pm);
-        if (derivatives) { out.micro_d_delta = MatrixXd::Zero(Pm, N); out.micro_d_theta = MatrixXd::Zero(Pm, P); }
-    }
-    for (const Block & acc : part) {
+    }, [&](const Block & acc) {
         out.s += acc.s;
         if (derivatives) { out.ds_ddelta += acc.ds_ddelta; out.ds_dtheta += acc.ds_dtheta; }
         if (price_derivatives) out.ds_dp += acc.ds_dp;
@@ -270,13 +229,13 @@ MarketEvaluation evaluate_market(const ArrayXd & delta, const pcm_demand::Market
             out.micro += acc.micro;
             if (derivatives) { out.micro_d_delta += acc.micro_d_delta; out.micro_d_theta += acc.micro_d_theta; }
         }
-    }
+    });
     return out;
 }
 
-SolveResult solve_market(const ArrayXd & s_data, const pcm_demand::Market & mk,
-                         const pcm_demand::Params & prm, const ArrayXd & delta_warm,
-                         const pcm_demand::Params * prm_warm, const MicroRequest * micro,
+SolveResult solve_market(const ArrayXd & s_data, const pcm_aggregate::Market & mk,
+                         const pcm_aggregate::Params & prm, const ArrayXd & delta_warm,
+                         const pcm_aggregate::Params * prm_warm, const MicroRequest * micro,
                          const SolveOptions & opt)
 {
     const auto t0 = Clock::now();
@@ -310,102 +269,31 @@ SolveResult solve_market(const ArrayXd & s_data, const pcm_demand::Market & mk,
     }
 
     ThreadScope threads(opt.n_threads);
-    pcm_demand::ThreadBudgetScope budget(opt.thread_budget);
+    pcm_aggregate::ThreadBudgetScope budget(opt.thread_budget);
     const double inf = std::numeric_limits<double>::infinity();
-    ArrayXd best_delta;
-    double best_res = inf;           // finite once some stage reached a feasible delta
-    bool converged = false;
-    unsigned evals = 0;
-
-    // Keeps the delta with the smallest finite residual over the stages (a converged one wins).
-    auto record = [&](const pcm_demand::InversionResult & r) {
-        evals += r.share_evaluations;
-        if (r.delta.size() != N) return;
-        const bool feasible = std::isfinite(r.max_abs_residual);
-        if (r.converged || (feasible && r.max_abs_residual < best_res) || best_delta.size() == 0) {
-            best_delta = r.delta;
-            if (feasible) best_res = r.max_abs_residual;
-        }
-        if (r.converged) converged = true;
-    };
-
+    pcm_invert::Solution sol;
+    const pcm_invert::Options iopt{opt.tol, opt.warm_evals, opt.cold_evals, opt.path_evals, opt.path_seconds,
+                                   opt.cold_draws, opt.cold_draw_factor};
     try {
-        // 2. warm stage
-        if (delta_warm.size() == N) {
-            const auto ts = Clock::now();
-            const unsigned e0 = evals;
-            record(pcm_demand::invert(s_data, mk, prm, delta_warm, opt.tol, opt.warm_evals));
-            append(res.stages, fmt_stage("warm", converged, seconds_since(ts), evals - e0));
-        }
-        // 3. theta-path continuation from the theta the warm start was solved at
-        if (!converged && prm_warm && delta_warm.size() == N) {
-            const auto ts = Clock::now();
-            const unsigned e0 = evals;
-            ArrayXd d = delta_warm;
-            double tau = 0.0, step = 0.5;
-            while (tau < 1.0 && step >= 0.01 && seconds_since(ts) < opt.path_seconds) {
-                const double target = std::min(1.0, tau + step);
-                pcm_demand::InversionResult r =
-                    pcm_demand::invert(s_data, mk, interpolate(*prm_warm, prm, target), d, opt.tol, opt.path_evals);
-                evals += r.share_evaluations;
-                if (r.converged) { d = r.delta; tau = target; step *= 2.0; }
-                else             { step *= 0.5; }
-            }
-            if (tau >= 1.0) {
-                // d passed invert's residual test at tau = 1, that is at prm itself
-                best_delta = d;
-                best_res = 0.0;
-                converged = true;
-            }
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), " tau=%.3g", tau);
-            append(res.stages, fmt_stage("path", converged, seconds_since(ts), evals - e0) + buf);
-        }
-        // 4a. draw homotopy: cold on a thinned market, then each finer level warm-started from the coarser one
-        if (!converged && opt.cold_draws > 0) {
-            const long R = mk.weights.size();
-            long k = 1;
-            while (R / (k * opt.cold_draw_factor) >= static_cast<long>(opt.cold_draws)) k *= opt.cold_draw_factor;
-            ArrayXd d;
-            bool ok = k > 1;
-            for (; ok && k > 1; k /= opt.cold_draw_factor) {
-                const auto ts = Clock::now();
-                const pcm_demand::Market sub = thin_draws(mk, static_cast<int>(k));
-                const pcm_demand::InversionResult r =
-                    pcm_demand::invert(s_data, sub, prm, d, opt.tol, d.size() ? opt.warm_evals : opt.cold_evals);
-                evals += r.share_evaluations;
-                ok = r.converged;
-                char buf[160];
-                std::snprintf(buf, sizeof(buf), "draws R=%ld %s %.3gs %uev", static_cast<long>(sub.weights.size()),
-                              ok ? "ok" : "failed", seconds_since(ts), r.share_evaluations);
-                append(res.stages, buf);
-                if (ok) d = r.delta;
-            }
-            if (ok) {
-                const auto ts = Clock::now();
-                const unsigned e0 = evals;
-                record(pcm_demand::invert(s_data, mk, prm, d, opt.tol, opt.warm_evals));
-                append(res.stages, fmt_stage("draws warm", converged, seconds_since(ts), evals - e0));
-            }
-        }
-        // 4. cold stage
-        if (!converged) {
-            const auto ts = Clock::now();
-            const unsigned e0 = evals;
-            record(pcm_demand::invert(s_data, mk, prm, ArrayXd(), opt.tol, opt.cold_evals));
-            append(res.stages, fmt_stage("cold", converged, seconds_since(ts), evals - e0));
-        }
+        pcm_invert::solve(s_data, mk, prm, delta_warm, prm_warm, iopt, sol);
     } catch (const std::exception & e) {
         res.status = Status::INVALID_INPUT;
+        res.stages = sol.stages;
         append(res.stages, std::string("invalid input: ") + e.what());
         res.max_abs_residual = inf;
-        res.share_evaluations = evals;
+        res.share_evaluations = sol.evals;
         res.seconds = seconds_since(t0);
         return res;
     }
 
+    res.stages = sol.stages;
+    ArrayXd & best_delta = sol.delta;
+    const double best_res = sol.residual;
+    const bool converged = sol.converged;
+    unsigned evals = sol.evals;
+
     // 5. status
-    if (best_delta.size() != N) best_delta = pcm_demand::detail::initial_guess(s_data, mk.p, prm);
+    if (best_delta.size() != N) best_delta = pcm_geometry::initial_guess(s_data, mk.p, prm.sigma_p, prm.lo);
     res.delta = best_delta;
     const bool feasible_seen = std::isfinite(best_res);
 
@@ -463,13 +351,11 @@ SolveResult solve_market(const ArrayXd & s_data, const pcm_demand::Market & mk,
     return res;
 }
 
-FrontierAnatomy frontier_anatomy(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm)
+FrontierAnatomy frontier_anatomy(const ArrayXd & delta, const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm)
 {
     const int N = static_cast<int>(delta.size());
     const int K = static_cast<int>(mk.x.cols());
     const int R = static_cast<int>(mk.weights.size());
-    const int M = static_cast<int>(prm.theta.size());
-    const int Q = static_cast<int>(prm.phi.size());
     validate_market(mk, prm, N);
     require(delta.allFinite(), "delta must be finite");
     FrontierAnatomy out;
@@ -477,20 +363,20 @@ FrontierAnatomy frontier_anatomy(const ArrayXd & delta, const pcm_demand::Market
     out.mass = ArrayXd::Zero(R);
     out.log_range = ArrayXd::Zero(R);
     out.mass_log_width = ArrayXd::Zero(R);
-#pragma omp parallel for schedule(dynamic, 64) if(R > 64)
-    for (int i = 0; i < R; ++i) {
-        VectorXd t = VectorXd::Zero(K);
-        for (int m = 0; m < M; ++m) t[mk.taste_col[m]] += prm.theta[m] * mk.taste_basis(i, m);
-        const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
-        const double c = std::exp(log_c);
-        const ArrayXd dc = (delta + (mk.x * t).array()) / c;
-        const pcm_demand::detail::DrawAnatomy a =
-            pcm_demand::detail::draw_anatomy(dc, mk.p, prm.sigma_p, pcm_demand::draw_a_lo(prm, c));
-        out.frontier_size[i] = a.frontier_size;
-        out.mass[i] = a.mass;
-        out.log_range[i] = a.log_range;
-        out.mass_log_width[i] = a.mass_log_width;
-    }
+    // per-draw outputs: no reduction; the calling thread's team, without a thread budget
+    pcm_aggregate::for_each_draw_block<pcm_aggregate::NoAcc>(R, [&](pcm_aggregate::NoAcc &, int i0, int i1) {
+        VectorXd t(K);
+        ArrayXd dc(N);
+        for (int i = i0; i < i1; ++i) {
+            const double c = pcm_aggregate::conditional_quality(delta, mk, prm, i, t, dc);
+            const pcm_geometry::DrawAnatomy a =
+                pcm_geometry::draw_anatomy(dc, mk.p, prm.sigma_p, pcm_aggregate::draw_a_lo(prm, c));
+            out.frontier_size[i] = a.frontier_size;
+            out.mass[i] = a.mass;
+            out.log_range[i] = a.log_range;
+            out.mass_log_width[i] = a.mass_log_width;
+        }
+    }, [](const pcm_aggregate::NoAcc &) {}, pcm_aggregate::DrawLoop{0, omp_get_max_threads()});
     return out;
 }
 

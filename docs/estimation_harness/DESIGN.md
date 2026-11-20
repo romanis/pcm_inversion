@@ -92,11 +92,16 @@ pcm_inversion/
       __init__.py                  imports pcm_kernel, explains how to build if it is missing
       pcm_kernel.cpython-312-x86_64-linux-gnu.so   build output (gitignored)
     tests/                         pytest tests, one file per module
+  market_share/
+    pcm_geometry.hpp / .cpp        layer 0: one draw's vertical choice problem (3.0)
   demand_model/
-    pcm_kernel.hpp / .cpp          solve_market (inversion + derivatives + micro parts)
+    pcm_aggregate.hpp / .cpp       layer 1: shares and derivatives over draws, the one draw loop (3.0)
+    pcm_invert.hpp / .cpp          layer 2: inversion and the solve_market stage machine (3.0)
+    pcm_kernel.hpp / .cpp          facade: solve_market (inversion + derivatives + micro parts)
     pcm_events.hpp / .cpp          max_step and frontier signatures
     pcm_welfare.hpp / .cpp         consumer surplus by frontier formula
-    pcm_kernel_test.cpp, pcm_events_test.cpp, pcm_welfare_test.cpp
+    pcm_groups.hpp / .cpp, pcm_second_choice.hpp / .cpp
+    pcm_*_test.cpp                 one gtest file per module
   python_bindings/
     pcm_kernel_python.cpp          PYBIND11_MODULE(pcm_kernel, m) calling the three bind_* functions
     bind_solve.cpp, bind_events.cpp, bind_welfare.cpp
@@ -116,8 +121,9 @@ Results go to `petrin_replication/results/harness/<run_id>/`, which `.gitignore`
 
 ### 1.2 CMake
 
-Existing targets (`pcm_market_share`, `market_inversion`, `pcm_demand`, `python_pcm_demand`, ...)
-are not changed. Additions:
+Existing targets (`pcm_market_share`, `market_inversion`, `python_pcm_demand`, ...) are not changed; the
+`pcm_demand` shared library is gone and `python_pcm_demand` links `pcm_kernel`. The kernel library (its current
+source list is in `demand_model/CMakeLists.txt`) as first added:
 
 `demand_model/CMakeLists.txt`:
 
@@ -135,7 +141,7 @@ foreach(t pcm_kernel_test pcm_events_test pcm_welfare_test)
 endforeach()
 ```
 
-The static library recompiles `pcm_demand.cpp` and `pcm_market_share.cpp` so the Python module is
+The static library recompiles `pcm_geometry.cpp` and `pcm_market_share.cpp` so the Python module is
 self-contained and does not depend on a shared library found through the build tree's RPATH.
 
 `python_bindings/CMakeLists.txt`, inside `if(pybind11_FOUND)`:
@@ -381,7 +387,56 @@ Model, per draw i in a market with N products sorted by strictly increasing pric
 `log c_i = phi . scale_basis_i`, `a_i ~ LogNormal(0, sigma_p)`. Write `y_ij = delta_j + x_j . t_i`.
 Draw i's frontier F_i is the set of vertices of the increasing part of the upper convex hull of
 `{(0, 0)} U {(p_j, y_ij)}`, excluding the origin. Product j in F_i is bought by draw i for
-`a c_i` in `(e_{next}, e_j)`, where e are the hull slopes (`cond_vertical` in `pcm_demand.cpp`).
+`a c_i` in `(e_{next}, e_j)`, where e are the hull slopes (`pcm_geometry::cond_share`).
+
+### 3.0 Kernel modules
+
+The kernel is split by purpose into three layers, four functionals built on them and one facade. Each module
+below states what it does and what it may not know. Names elsewhere in this document that predate the split
+(`pcm_demand::shares`, `pcm_demand::invert`, `cond_vertical`) are now `pcm_aggregate::shares`,
+`pcm_invert::invert` and `pcm_geometry::cond_share`.
+
+**`pcm_geometry` (layer 0, `market_share/pcm_geometry.{hpp,cpp}`).** One consumer's vertical choice problem: the
+increasing upper hull of `{(0, 0)} U {(p_j, d_j)}` with an optional lower truncation `a_lo` of the price
+sensitivity, and on it that draw's shares and `cond_share` derivatives (in d, sigma, p and log c),
+`index_positive_shares`, the per-draw hull gap behind `frontier_lift` (`frontier_gap`), `initial_guess` with and
+without a bound, `draw_anatomy`, and the truncated-lognormal `ln_terms`/`make_trunc`. Its input is one draw
+`(d, p, sigma, a_lo)`. It may not know draws, weights, `Market`, `Params`, theta or phi, inversion, moments or
+papers: a function that takes a weight or a draw index is not geometry.
+
+**`pcm_aggregate` (layer 1, `demand_model/pcm_aggregate.{hpp,cpp}`).** Integration of layer-0 per-draw
+functionals over a `Market`'s draws, through `taste_basis` and `scale_basis`, into market shares and their
+derivatives in `(delta, theta, phi, sigma_p, p)` (`shares`) and the lift of zero-share products (`frontier_lift`).
+It owns `Market`, `Params`, the bound kinds, the per-market `ThreadBudget`, `conditional_quality` (a draw's
+`(delta + x t_i) / c_i`) and the one draw loop `for_each_draw_block`: fixed blocks of 64 draws, a dynamic OpenMP
+schedule over blocks and a serial reduction in block order, so every result is bit-identical for every thread
+count. Every functional that integrates over draws runs through that loop. It may not know data shares,
+inversion or moments.
+
+**`pcm_invert` (layer 2, `demand_model/pcm_invert.{hpp,cpp}`).** Solving delta so that
+`pcm_aggregate::shares(delta) == s_data` for one market: the damped Newton core on log shares with
+Levenberg-Marquardt damping, the frontier repair, the heterogeneity and share-path continuations (`invert`), and
+the stage machine of `solve_market` (`solve`): warm, theta path (with the bound moving along), the cold-stage
+draw homotopy (`cold_draws`) and cold. It knows layer 1 and its own options. It may not know moments, GMM or
+papers.
+
+**Functionals (`pcm_welfare`, `pcm_second_choice`, `pcm_groups`, `pcm_events`).** Separate modules because their
+outputs are different objects, not columns of the share Jacobian: consumer surplus by the frontier formula (3.4),
+the exact second-choice matrix and its adjoint, per-household purchase-weighted sums for grouped micro moments,
+and first frontier events and frontier signatures for step control (3.3). Each computes its per-draw quantity
+from layer-0 geometry and integrates it with layer 1's `for_each_draw_block`; none writes its own draw loop. They
+may not know inversion, moments or papers.
+
+**`pcm_kernel` (facade, `demand_model/pcm_kernel.{hpp,cpp}`).** The binding-facing entry points: `solve_market`
+validates the input, sets the call's thread team and budget, runs `pcm_invert::solve`, then one
+`evaluate_market` pass (shares, derivatives and micro parts at the returned delta) and the `FullPivLU` solve for
+ddelta/dtheta; `evaluate_market` and `frontier_anatomy` are the draw passes at a fixed delta. It holds no
+geometry, aggregation or inversion logic of its own.
+
+**Legacy (`market_share/pcm_market_share`, `inversion_algorithm/`).** `pcm_share::unc_share` (taste integrated on
+a sparse grid) and the published-paper inversions (`invert_shares_nlopt`, `cone_newton`) are unchanged and not on
+the harness path. Their untruncated `cond_share` overloads, `initial_guess` and `index_positive_shares` forward
+to `pcm_geometry`. The Python module `python_pcm_demand` keeps its name for the Nevo script and the Nevo golden.
 
 ### 3.1 Market input
 

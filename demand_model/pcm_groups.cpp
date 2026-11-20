@@ -1,5 +1,6 @@
 #include "pcm_groups.hpp"
-#include "pcm_market_share.hpp"
+#include "pcm_aggregate.hpp"
+#include "pcm_geometry.hpp"
 
 #include <omp.h>
 #include <algorithm>
@@ -19,7 +20,7 @@ void require(bool ok, const std::string & what) {
     if (!ok) throw std::invalid_argument("group_sums: " + what);
 }
 
-void validate(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm,
+void validate(const ArrayXd & delta, const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm,
               const GroupRequest & gr) {
     const int N = static_cast<int>(delta.size());
     const int R = static_cast<int>(mk.weights.size());
@@ -54,9 +55,15 @@ void validate(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_de
     require(gr.U.allFinite(), "U must be finite");
 }
 
+// Partial sums of one block of a group's draws.
+struct GroupBlock {
+    VectorXd acc;
+    MatrixXd acc_d, acc_t;
+};
+
 }  // namespace
 
-GroupSums group_sums(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm,
+GroupSums group_sums(const ArrayXd & delta, const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm,
                      const GroupRequest & gr, bool derivatives)
 {
     validate(delta, mk, prm, gr);
@@ -84,15 +91,16 @@ GroupSums group_sums(const ArrayXd & delta, const pcm_demand::Market & mk, const
         out.d_delta.assign(G, MatrixXd::Zero(C1, N));
         out.d_theta.assign(G, MatrixXd::Zero(C1, P));
     }
-    const bool bound = pcm_demand::bound_moves_with_scale(prm);   // log c acts through a_lo = lo / c
+    const bool bound = pcm_aggregate::bound_moves_with_scale(prm);   // log c acts through a_lo = lo / c
 
 #pragma omp parallel if(G > 1)
     {
         ArrayXd s_c = ArrayXd::Zero(N), dsig = ArrayXd::Zero(N), dlogc = ArrayXd::Zero(N);
         MatrixXd Jd;
         if (derivatives) Jd = MatrixXd::Zero(N, N);
-        VectorXd t(K), us, ud, ul, acc, xs;
-        MatrixXd Jc, uJ, acc_d, acc_t;
+        VectorXd t(K), us, ud, ul, xs;
+        ArrayXd dc(N);
+        MatrixXd Jc, uJ;
         std::vector<int> S;
         S.reserve(N);
 #pragma omp for schedule(dynamic, 8)
@@ -102,22 +110,19 @@ GroupSums group_sums(const ArrayXd & delta, const pcm_demand::Market & mk, const
             if (Rg <= 0) continue;
             VectorXd tot = VectorXd::Zero(C1);
             double wsum = 0.0;
-            // the block partition of evaluate_market on a market of this group's draws
-            const int n_blocks = std::max(1, (Rg + 63) / 64);
-            for (int b = 0; b < n_blocks; ++b) {
+            // the block partition of evaluate_market on a market of this group's draws, run serially by the
+            // thread that owns the group, one block held at a time
+            pcm_aggregate::for_each_draw_block<GroupBlock>(Rg, [&](GroupBlock & blk, int i0, int i1) {
+                VectorXd & acc = blk.acc;
+                MatrixXd & acc_d = blk.acc_d;
+                MatrixXd & acc_t = blk.acc_t;
                 acc = VectorXd::Zero(C1);
                 if (derivatives) { acc_d = MatrixXd::Zero(C1, N); acc_t = MatrixXd::Zero(C1, P); }
-                const int i0 = g0 + static_cast<int>((static_cast<long>(Rg) * b) / n_blocks);
-                const int i1 = g0 + static_cast<int>((static_cast<long>(Rg) * (b + 1)) / n_blocks);
                 for (int i = i0; i < i1; ++i) {
-                    t.setZero();
-                    for (int m = 0; m < M; ++m) t[mk.taste_col[m]] += prm.theta[m] * mk.taste_basis(i, m);
-                    const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
-                    const double c = std::exp(log_c);
-                    const ArrayXd dc = (delta + (mk.x * t).array()) / c;
+                    const double c = pcm_aggregate::conditional_quality(delta, mk, prm, i, t, dc);
                     s_c.setZero();
                     if (derivatives) { dsig.setZero(); if (bound) dlogc.setZero(); }
-                    pcm_share::cond_share(dc, mk.p, prm.sigma_p, pcm_demand::draw_a_lo(prm, c), s_c,
+                    pcm_geometry::cond_share(dc, mk.p, prm.sigma_p, pcm_aggregate::draw_a_lo(prm, c), s_c,
                                           derivatives ? &Jd : nullptr, &dsig, nullptr, bound ? &dlogc : nullptr);
                     const double w = mk.weights[i];
                     us.noalias() = Up.transpose() * s_c.matrix();
@@ -155,9 +160,10 @@ GroupSums group_sums(const ArrayXd & delta, const pcm_demand::Market & mk, const
                     }
                     Jd(S, S).setZero();   // restore the zero state cond_share requires
                 }
-                tot += acc;
-                if (derivatives) { out.d_delta[g] += acc_d; out.d_theta[g] += acc_t; }
-            }
+            }, [&](const GroupBlock & blk) {
+                tot += blk.acc;
+                if (derivatives) { out.d_delta[g] += blk.acc_d; out.d_theta[g] += blk.acc_t; }
+            }, pcm_aggregate::DrawLoop{g0, -1, 1});
             for (int i = g0; i < g1; ++i) wsum += mk.weights[i];
             out.S.row(g) = tot.transpose();
             out.w[g] = wsum;

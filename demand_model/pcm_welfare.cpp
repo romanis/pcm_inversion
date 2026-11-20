@@ -1,4 +1,5 @@
 #include "pcm_welfare.hpp"
+#include "pcm_aggregate.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -17,7 +18,7 @@ constexpr double SQRT1_2 = 0.70710678118654752440;
 
 inline double Phi(double z) { return 0.5 * std::erfc(-z * SQRT1_2); }
 
-void check_input(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm) {
+void check_input(const ArrayXd & delta, const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm) {
     const auto N = mk.p.size();
     const auto R = mk.weights.size();
     const auto M = prm.theta.size();
@@ -41,40 +42,33 @@ void check_input(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm
 
 }  // namespace
 
-Surplus consumer_surplus(const ArrayXd & delta, const pcm_demand::Market & mk,
-                         const pcm_demand::Params & prm, int n_threads) {
+Surplus consumer_surplus(const ArrayXd & delta, const pcm_aggregate::Market & mk,
+                         const pcm_aggregate::Params & prm, int n_threads) {
     check_input(delta, mk, prm);
     const int N = static_cast<int>(mk.p.size());
     const int K = static_cast<int>(mk.x.cols());
     const int R = static_cast<int>(mk.weights.size());
-    const int M = static_cast<int>(prm.theta.size());
-    const int Q = static_cast<int>(prm.phi.size());
     const double s = prm.sigma_p, s2 = s * s;
     const double inv_mass_all = std::exp(0.5 * s2);                 // E(1/a)
 
     Surplus out;
     out.per_draw = ArrayXd::Zero(R);
     const int nt = std::max(1, n_threads);
-#pragma omp parallel num_threads(nt) if(nt > 1 && R > 64)
-    {
+    // per-draw outputs written by index: no reduction
+    pcm_aggregate::for_each_draw_block<pcm_aggregate::NoAcc>(R, [&](pcm_aggregate::NoAcc &, int i0, int i1) {
         VectorXd t(K);
         ArrayXd q(N);
         std::vector<int> hull;
         hull.reserve(N + 1);
-#pragma omp for schedule(dynamic, 64)
-        for (int i = 0; i < R; ++i) {
-            t.setZero();
-            for (int m = 0; m < M; ++m) t[mk.taste_col[m]] += prm.theta[m] * mk.taste_basis(i, m);
-            const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
-            const double c = std::exp(log_c);
-            q = (delta + (mk.x * t).array()) / c;
+        for (int i = i0; i < i1; ++i) {
+            const double c = pcm_aggregate::conditional_quality(delta, mk, prm, i, t, q);
             // Truncation below at a_lo = draw_a_lo(prm, c), lo / c or lo (LEARNINGS 29, 32): F and E(1/a; a < e) become
             // F_T(e) = (Phi(z) - Phi(z_lo)) / Z and E_T(e) = exp(s^2/2) [Phi((l + s^2)/s) - Phi((l_lo + s^2)/s)] / Z
             // for e > a_lo and 0 below, so the last window ends at a_lo and CS_i <= max_j q_j / a_lo - p_j.
             const bool bound = prm.lo > 0.0;
             double l_lo = 0.0, F0 = 0.0, E0 = 0.0, Z = 1.0;
             if (bound) {
-                l_lo = std::log(pcm_demand::draw_a_lo(prm, c));
+                l_lo = std::log(pcm_aggregate::draw_a_lo(prm, c));
                 F0 = Phi(l_lo / s);
                 Z = 0.5 * std::erfc(l_lo / s * SQRT1_2);
                 E0 = inv_mass_all * Phi((l_lo + s2) / s);
@@ -123,7 +117,7 @@ Surplus consumer_surplus(const ArrayXd & delta, const pcm_demand::Market & mk,
             }
             out.per_draw[i] = cs;
         }
-    }
+    }, [](const pcm_aggregate::NoAcc &) {}, pcm_aggregate::DrawLoop{0, nt});
     // weighted sum in draw order, so the total does not depend on the thread count
     double total = 0.0;
     for (int i = 0; i < R; ++i) total += mk.weights[i] * out.per_draw[i];

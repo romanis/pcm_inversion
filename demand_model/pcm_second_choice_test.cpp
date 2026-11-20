@@ -5,8 +5,10 @@
 #include <cmath>
 #include <random>
 #include <stdexcept>
-#include "pcm_market_share.hpp"
+#include "pcm_geometry.hpp"
 #include "pcm_second_choice.hpp"
+
+using pcm_geometry::index_positive_shares;
 
 using Eigen::ArrayXd;
 using Eigen::MatrixXd;
@@ -17,8 +19,8 @@ namespace {
 double F(double a, double sigma) { return 0.5 * std::erfc(-std::log(a) / (sigma * std::sqrt(2.0))); }
 
 // one draw, no heterogeneity: conditional qualities = delta
-pcm_demand::Market one_draw(const ArrayXd & p) {
-    pcm_demand::Market mk;
+pcm_aggregate::Market one_draw(const ArrayXd & p) {
+    pcm_aggregate::Market mk;
     mk.x = MatrixXd::Ones(p.size(), 1);
     mk.p = p;
     mk.weights = ArrayXd::Ones(1);
@@ -27,8 +29,8 @@ pcm_demand::Market one_draw(const ArrayXd & p) {
     return mk;
 }
 
-pcm_demand::Params params(double sigma, double lo = 0.0, pcm_demand::BoundKind kind = pcm_demand::BoundKind::A) {
-    pcm_demand::Params prm;
+pcm_aggregate::Params params(double sigma, double lo = 0.0, pcm_aggregate::BoundKind kind = pcm_aggregate::BoundKind::A) {
+    pcm_aggregate::Params prm;
     prm.theta = ArrayXd(0);
     prm.phi = ArrayXd(0);
     prm.sigma_p = sigma;
@@ -38,13 +40,13 @@ pcm_demand::Params params(double sigma, double lo = 0.0, pcm_demand::BoundKind k
 }
 
 struct Fixture {
-    pcm_demand::Market mk;
-    pcm_demand::Params prm;
+    pcm_aggregate::Market mk;
+    pcm_aggregate::Params prm;
     ArrayXd delta;
 };
 
 // N products, x = [1, z, binary], 2 taste parameters, 1 scale parameter, R draws
-Fixture random_market(unsigned seed, pcm_demand::BoundKind kind, double lo, int N = 20, int R = 50) {
+Fixture random_market(unsigned seed, pcm_aggregate::BoundKind kind, double lo, int N = 20, int R = 50) {
     std::mt19937 gen(seed);
     std::normal_distribution<double> nd(0.0, 1.0);
     std::uniform_real_distribution<double> ud(0.0, 1.0);
@@ -131,7 +133,7 @@ TEST(SecondChoice, BoundCutsTheWindows) {
 }
 
 TEST(SecondChoice, RowSumsAndRemoveAndResolve) {
-    for (auto kind : {pcm_demand::BoundKind::A, pcm_demand::BoundKind::ALPHA}) {
+    for (auto kind : {pcm_aggregate::BoundKind::A, pcm_aggregate::BoundKind::ALPHA}) {
         const Fixture f = random_market(11, kind, 0.2);
         const auto sc = pcm_kernel::second_choice(f.delta, f.mk, f.prm, nullptr);
         const int N = static_cast<int>(f.delta.size());
@@ -143,11 +145,11 @@ TEST(SecondChoice, RowSumsAndRemoveAndResolve) {
             for (int m = 0; m < 2; ++m) t[f.mk.taste_col[m]] += f.prm.theta[m] * f.mk.taste_basis(i, m);
             const double c = std::exp(f.prm.phi[0] * f.mk.scale_basis(i, 0));
             const ArrayXd dc = (f.delta + (f.mk.x * t).array()) / c;
-            const double a_lo = pcm_demand::draw_a_lo(f.prm, c);
-            const auto tr = pcm_share::detail::make_trunc(a_lo, f.prm.sigma_p);
-            auto FT = [&](double e) { return pcm_share::detail::ln_terms(e, f.prm.sigma_p, tr).F; };
+            const double a_lo = pcm_aggregate::draw_a_lo(f.prm, c);
+            const auto tr = pcm_geometry::make_trunc(a_lo, f.prm.sigma_p);
+            auto FT = [&](double e) { return pcm_geometry::ln_terms(e, f.prm.sigma_p, tr).F; };
             ArrayXd s = ArrayXd::Zero(N);
-            pcm_share::cond_share(dc, f.mk.p, f.prm.sigma_p, a_lo, s, nullptr, nullptr, nullptr, nullptr);
+            pcm_geometry::cond_share(dc, f.mk.p, f.prm.sigma_p, a_lo, s, nullptr, nullptr, nullptr, nullptr);
             sref += f.mk.weights[i] * s;
             const std::vector<int> full = index_positive_shares(dc, f.mk.p);
             for (size_t r = 0; r < full.size(); ++r) {
@@ -189,18 +191,18 @@ TEST(SecondChoice, RowSumsAndRemoveAndResolve) {
 TEST(SecondChoice, AdjointMatchesCentralDifferences) {
     // the third case has a high bound, so some buyers of a product have no inside second choice: they add to s_j
     // but not to N, and their -B ds_j term must stay in the adjoint
-    struct Case { pcm_demand::BoundKind kind; double lo; bool none; };
+    struct Case { pcm_aggregate::BoundKind kind; double lo; bool none; };
     double lo_none = 0.0;   // the smallest of these bounds with such draws on the fixture market
     for (double lo : {0.4, 0.6, 0.8, 1.0, 1.2, 1.4}) {
-        const Fixture g = random_market(12, pcm_demand::BoundKind::A, lo);
+        const Fixture g = random_market(12, pcm_aggregate::BoundKind::A, lo);
         if (pcm_kernel::second_choice(g.delta, g.mk, g.prm, nullptr).draws_with_no_inside_second > 0) {
             lo_none = lo;
             break;
         }
     }
     ASSERT_GT(lo_none, 0.0) << "no bound gives a draw without an inside second choice";
-    for (const Case cs : {Case{pcm_demand::BoundKind::A, 0.2, false}, Case{pcm_demand::BoundKind::ALPHA, 0.2, false},
-                          Case{pcm_demand::BoundKind::A, lo_none, true}}) {
+    for (const Case cs : {Case{pcm_aggregate::BoundKind::A, 0.2, false}, Case{pcm_aggregate::BoundKind::ALPHA, 0.2, false},
+                          Case{pcm_aggregate::BoundKind::A, lo_none, true}}) {
         const Fixture f = random_market(12, cs.kind, cs.lo);
         const int N = static_cast<int>(f.delta.size());
         const int K = 3;
@@ -217,7 +219,7 @@ TEST(SecondChoice, AdjointMatchesCentralDifferences) {
         }
         adj.B = MatrixXd(K, N);
         for (int c = 0; c < K; ++c) for (int j = 0; j < N; ++j) adj.B(c, j) = nd(gen);
-        auto value = [&](const ArrayXd & d, const pcm_demand::Params & prm) {
+        auto value = [&](const ArrayXd & d, const pcm_aggregate::Params & prm) {
             const auto sc = pcm_kernel::second_choice(d, f.mk, prm, nullptr);
             VectorXd v(K);
             for (int c = 0; c < K; ++c) v[c] = (adj.A[c].array() * sc.N.array()).sum() - adj.B.row(c).dot(sc.s.matrix());
@@ -234,8 +236,8 @@ TEST(SecondChoice, AdjointMatchesCentralDifferences) {
                 EXPECT_NEAR(sc.out_delta(c, l), fd[c], 1e-6 * (1.0 + std::abs(fd[c]))) << c << " " << l;
         }
         for (int k = 0; k < 4; ++k) {
-            pcm_demand::Params a = f.prm, b = f.prm;
-            auto bump = [&](pcm_demand::Params & q, double s) {
+            pcm_aggregate::Params a = f.prm, b = f.prm;
+            auto bump = [&](pcm_aggregate::Params & q, double s) {
                 if (k < 2) q.theta[k] += s; else if (k < 3) q.phi[0] += s; else q.sigma_p += s;
             };
             bump(a, h);
@@ -248,7 +250,7 @@ TEST(SecondChoice, AdjointMatchesCentralDifferences) {
 }
 
 TEST(SecondChoice, SameForEveryThreadCountAndBadInput) {
-    const Fixture f = random_market(13, pcm_demand::BoundKind::A, 0.2, 20, 700);   // 11 blocks
+    const Fixture f = random_market(13, pcm_aggregate::BoundKind::A, 0.2, 20, 700);   // 11 blocks
     pcm_kernel::SecondChoiceAdjoint adj;
     adj.A.assign(2, MatrixXd::Ones(20, 20));
     adj.B = MatrixXd::Ones(2, 20);

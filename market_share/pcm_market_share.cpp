@@ -7,7 +7,6 @@
 #include <math.h>
 #include <algorithm>    // std::is_sorted, std::prev_permutation
 #include <array>  
-#include <boost/math/distributions/lognormal.hpp>
 #include <omp.h>
 #include <Eigen/Dense>
 #include <Eigen/Core>
@@ -16,38 +15,6 @@
 
 using namespace std;
 using namespace Eigen;
-using Eigen::indexing::last;
-using pcm_share::detail::LnTerms;
-using pcm_share::detail::Trunc;
-using pcm_share::detail::ln_terms;
-using pcm_share::detail::make_trunc;
-
-std::vector<int> index_positive_shares(const ArrayXd& delta, const ArrayXd & p){
-    vector<int> ind;
-    for(int j=0; j<delta.size(); ++j){
-//            calculate upper bound on price elasticity of people who will choose product j
-        double min_upper, max_lower;
-        if(j>0){
-            ArrayXd u_alpha = (delta[j] - delta(seq(0, j-1))) / (p[j] - p(seq(0, j-1)));
-            min_upper = std::min(u_alpha.minCoeff(), delta[j]/p[j]);
-        }else{
-            min_upper = delta[j]/p[j];
-        }
-        
-        if(j < delta.size()-1){
-            ArrayXd l_alpha = (delta[j] - delta(seq(j+1, last))) / (p[j] - p(seq(j+1, last)));
-            max_lower = std::max(l_alpha.maxCoeff(), 0.0);
-        }else{
-            max_lower = 0;
-        }
-        
-//            if there is slack between up and lower, it has positive market share
-        if(min_upper > max_lower){
-            ind.push_back(j);
-        }            
-    }
-    return ind;
-}
 
 namespace pcm_share{
     Eigen::ArrayXd unc_share(const ArrayXd& delta_bar, const MatrixXd& x, const ArrayXd& p, double sigma_p, const ArrayXd& sigma_x, const ArrayXXd& grid, const ArrayXd & weights, MatrixXd & jacobian)
@@ -179,7 +146,7 @@ namespace pcm_share{
         const vector<int> ind = frontier_of(delta, p, check_positive_shares);
         Eigen::ArrayXd con_share = ArrayXd::Zero(delta.size());
         jacobian = MatrixXd::Zero(delta.size(), delta.size());
-        detail::vertical_share(ind, delta, p, sigma_p, 0.0, con_share, &jacobian, nullptr, nullptr, nullptr, true);
+        pcm_geometry::vertical_share(ind, delta, p, sigma_p, 0.0, con_share, &jacobian, nullptr, nullptr, nullptr, true);
         return con_share;
     }
 
@@ -188,89 +155,13 @@ namespace pcm_share{
     //    conditional on heterogeneity market shares of the pure vertical model
         const vector<int> ind = frontier_of(delta, p, check_positive_shares);
         Eigen::ArrayXd con_share = ArrayXd::Zero(delta.size());
-        detail::vertical_share(ind, delta, p, sigma_p, 0.0, con_share, nullptr, nullptr, nullptr, nullptr, true);
+        pcm_geometry::vertical_share(ind, delta, p, sigma_p, 0.0, con_share, nullptr, nullptr, nullptr, nullptr, true);
         return con_share;
     }
 
 
-    void detail::vertical_share(const vector<int> & ind, const ArrayXd & d, const ArrayXd & p, double sigma,
-                                double a_lo, ArrayXd & s, MatrixXd * Jd, ArrayXd * dsig, MatrixXd * Jp,
-                                ArrayXd * dlogc, bool check_order)
-    {
-        const int m = static_cast<int>(ind.size());
-        if (m == 0) return;
-
-        // endpoints e_0..e_m (e_m = 0) and the price gaps they divide by
-        std::vector<double> e(m + 1, 0.0), gap(m, 0.0);
-        gap[0] = p[ind[0]];
-        e[0] = d[ind[0]] / gap[0];
-        for (int k = 1; k < m; ++k) {
-            gap[k] = p[ind[k]] - p[ind[k - 1]];
-            e[k] = (d[ind[k]] - d[ind[k - 1]]) / gap[k];
-        }
-        if (check_order) {
-            for (int k = 0; k < m; ++k)
-                if (e[k + 1] > e[k])
-                    throw runtime_error("endpoints are not sorted properly. check which goods go to conditional market share");
-        }
-        const Trunc tr = make_trunc(a_lo, sigma);
-        std::vector<LnTerms> t(m + 1);
-        for (int k = 0; k <= m; ++k) t[k] = ln_terms(e[k], sigma, tr);
-
-        for (int k = 0; k < m; ++k) s[ind[k]] = t[k].F - t[k + 1].F;
-        if (!Jd) return;
-
-        // s_k = F(e_k) - F(e_{k+1}); e_k depends on d_k (+1/gap_k) and d_{k-1} (-1/gap_k)
-        for (int k = 0; k < m; ++k) {
-            const int gk = ind[k];
-            if (dsig) (*dsig)[gk] = t[k].g - t[k + 1].g;
-            if (dlogc) (*dlogc)[gk] = t[k].h - t[k + 1].h;
-            // through e_k
-            (*Jd)(gk, gk) += t[k].f / gap[k];
-            if (Jp) (*Jp)(gk, gk) += t[k].f * (-e[k] / gap[k]);
-            if (k > 0) {
-                (*Jd)(gk, ind[k - 1]) += -t[k].f / gap[k];
-                if (Jp) (*Jp)(gk, ind[k - 1]) += t[k].f * (e[k] / gap[k]);
-            }
-            // through e_{k+1} (absent for the last product: e_m = 0 is fixed)
-            if (k + 1 < m) {
-                const double fk1 = t[k + 1].f, g1 = gap[k + 1];
-                (*Jd)(gk, ind[k + 1]) -= fk1 / g1;
-                (*Jd)(gk, gk) -= -fk1 / g1;
-                if (Jp) {
-                    (*Jp)(gk, ind[k + 1]) -= fk1 * (-e[k + 1] / g1);
-                    (*Jp)(gk, gk) -= fk1 * (e[k + 1] / g1);
-                }
-            }
-        }
-    }
-
-
-    void cond_share(const ArrayXd & d, const ArrayXd & p, double sigma, double a_lo, ArrayXd & s, MatrixXd * Jd,
-                    ArrayXd * dsig, MatrixXd * Jp, ArrayXd * dlogc)
-    {
-        detail::vertical_share(index_positive_shares(d, p), d, p, sigma, a_lo, s, Jd, dsig, Jp, dlogc, false);
-    }
-
-
-
     Eigen::ArrayXd initial_guess(const Eigen::ArrayXd& shares_data, const Eigen::ArrayXd& p, double sigma_p){
-        ArrayXd guess(p.size());
-    //    calculate initial guess based on undisturbed model
-    //    delta_0(1) = p_sim(1) * logninv(sum(share),0,sigma_p);
-        double sum_share=shares_data.sum();
-        
-        //    create lognormal distr
-        boost::math::lognormal lognormDistr(0, sigma_p);
-    //    cout<<boost::math::quantile(lognormDistr, sum_share)<<endl;
-    //    compute the first delta guess
-        guess[0] = (p[0]*boost::math::quantile(lognormDistr, sum_share));
-    //    compute the rest guesses
-        for(int i=1; i<p.size(); ++i){
-            sum_share -= shares_data[i-1];
-            guess[i] = (guess[i-1] + (p[i] - p[i-1])*boost::math::quantile(lognormDistr, sum_share));
-        }
-        return guess;
+        return pcm_geometry::initial_guess(shares_data, p, sigma_p);
     }
 
 }

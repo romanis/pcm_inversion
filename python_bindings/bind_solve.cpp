@@ -14,16 +14,16 @@ namespace py = pybind11;
 
 namespace {
 
-pcm_demand::Market make_market(const Eigen::MatrixXd & x, const Eigen::ArrayXd & p, const Eigen::ArrayXd & w,
+pcm_aggregate::Market make_market(const Eigen::MatrixXd & x, const Eigen::ArrayXd & p, const Eigen::ArrayXd & w,
                                const Eigen::MatrixXd & taste_basis, const std::vector<int> & taste_col,
                                const Eigen::MatrixXd & scale_basis) {
-    return pcm_demand::Market{x, p, w, taste_basis, taste_col, scale_basis};
+    return pcm_aggregate::Market{x, p, w, taste_basis, taste_col, scale_basis};
 }
 
 // A pcm_kernel.Market, or any mapping or object carrying x, p, weights, taste_basis, taste_col,
 // scale_basis (the convention bind_welfare.cpp uses as well).
-pcm_demand::Market market_from(const py::handle & obj, const char * fn) {
-    if (py::isinstance<pcm_demand::Market>(obj)) return obj.cast<pcm_demand::Market>();
+pcm_aggregate::Market market_from(const py::handle & obj, const char * fn) {
+    if (py::isinstance<pcm_aggregate::Market>(obj)) return obj.cast<pcm_aggregate::Market>();
     const bool mapping = PyMapping_Check(obj.ptr()) && !py::isinstance<py::str>(obj);
     auto field = [&](const char * name) -> py::object {
         if (mapping && PyMapping_HasKeyString(obj.ptr(), name)) return obj[name];
@@ -54,21 +54,21 @@ std::unique_ptr<pcm_kernel::MicroRequest> micro_from(const py::object & obj, con
 
 // theta_warm is the stacked (P,) vector [theta, phi, sigma_p], in the column order of ds_dtheta.
 // lo_warm: the bound delta_warm was solved under (NaN: the bound of theta).
-std::unique_ptr<pcm_demand::Params> params_from_stacked(const py::object & obj, int M, int Q,
-                                                        const pcm_demand::Params & bound, double lo_warm) {
+std::unique_ptr<pcm_aggregate::Params> params_from_stacked(const py::object & obj, int M, int Q,
+                                                        const pcm_aggregate::Params & bound, double lo_warm) {
     if (obj.is_none()) return nullptr;
     const Eigen::ArrayXd v = obj.cast<Eigen::ArrayXd>();
     if (v.size() != M + Q + 1)
         throw py::value_error("solve_market: theta_warm must be the stacked vector [theta, phi, sigma_p] of length " +
                               std::to_string(M + Q + 1) + ", got " + std::to_string(v.size()));
-    return std::make_unique<pcm_demand::Params>(
-        pcm_demand::Params{v.head(M), v.segment(M, Q), v[M + Q], std::isnan(lo_warm) ? bound.lo : lo_warm,
+    return std::make_unique<pcm_aggregate::Params>(
+        pcm_aggregate::Params{v.head(M), v.segment(M, Q), v[M + Q], std::isnan(lo_warm) ? bound.lo : lo_warm,
                            bound.bound_kind});
 }
 
-// pcm_demand::ThreadBudget is a std::atomic<int>, which cannot be moved: Python holds it inside this box.
+// pcm_aggregate::ThreadBudget is a std::atomic<int>, which cannot be moved: Python holds it inside this box.
 struct ThreadBudgetBox {
-    pcm_demand::ThreadBudget n{1};
+    pcm_aggregate::ThreadBudget n{1};
 };
 
 }  // namespace
@@ -91,17 +91,17 @@ void bind_solve(py::module_ & m) {
 
     // Registered here, before bind_events and bind_welfare, so all three accept it. module_local
     // keeps it apart from python_pcm_demand.Market when both modules are loaded.
-    py::class_<pcm_demand::Market>(m, "Market", py::module_local(),
+    py::class_<pcm_aggregate::Market>(m, "Market", py::module_local(),
         "One market for the kernel: x (N x K), p (N, strictly increasing), weights (R), taste_basis (R x M), "
         "taste_col (M ints), scale_basis (R x Q). Same fields as python_pcm_demand.Market.")
         .def(py::init(&make_market), py::arg("x"), py::arg("p"), py::arg("weights"),
              py::arg("taste_basis"), py::arg("taste_col"), py::arg("scale_basis"))
-        .def_readonly("x", &pcm_demand::Market::x)
-        .def_readonly("p", &pcm_demand::Market::p)
-        .def_readonly("weights", &pcm_demand::Market::weights)
-        .def_readonly("taste_basis", &pcm_demand::Market::taste_basis)
-        .def_readonly("taste_col", &pcm_demand::Market::taste_col)
-        .def_readonly("scale_basis", &pcm_demand::Market::scale_basis);
+        .def_readonly("x", &pcm_aggregate::Market::x)
+        .def_readonly("p", &pcm_aggregate::Market::p)
+        .def_readonly("weights", &pcm_aggregate::Market::weights)
+        .def_readonly("taste_basis", &pcm_aggregate::Market::taste_basis)
+        .def_readonly("taste_col", &pcm_aggregate::Market::taste_col)
+        .def_readonly("scale_basis", &pcm_aggregate::Market::scale_basis);
 
     m.def("solve_market",
           [](const Eigen::ArrayXd & s_data, const py::object & market, const Eigen::ArrayXd & theta,
@@ -110,8 +110,8 @@ void bind_solve(py::module_ & m) {
              unsigned cold_evals, unsigned path_evals, double path_seconds, int n_threads, bool derivatives,
              bool price_derivatives, double rcond_min, double alpha_lo, double a_lo, unsigned cold_draws,
              int cold_draw_factor, const py::object & thread_budget, double lo_warm) {
-              const pcm_demand::Market mk = market_from(market, "solve_market");
-              const pcm_demand::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "solve_market");
+              const pcm_aggregate::Market mk = market_from(market, "solve_market");
+              const pcm_aggregate::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "solve_market");
               const Eigen::ArrayXd dw = delta_warm.is_none() ? Eigen::ArrayXd() : delta_warm.cast<Eigen::ArrayXd>();
               const auto pw = params_from_stacked(theta_warm, static_cast<int>(theta.size()), static_cast<int>(phi.size()),
                                                   prm, lo_warm);
@@ -183,8 +183,8 @@ void bind_solve(py::module_ & m) {
           [](const Eigen::ArrayXd & delta, const py::object & market, const Eigen::ArrayXd & theta,
              const Eigen::ArrayXd & phi, double sigma_p, const py::object & micro, bool derivatives,
              bool price_derivatives, int n_threads, double alpha_lo, double a_lo) {
-              const pcm_demand::Market mk = market_from(market, "evaluate_market");
-              const pcm_demand::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "evaluate_market");
+              const pcm_aggregate::Market mk = market_from(market, "evaluate_market");
+              const pcm_aggregate::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "evaluate_market");
               const auto mr = micro_from(micro, "evaluate_market");
               if (n_threads < 1) throw py::value_error("evaluate_market: n_threads must be at least 1");
               pcm_kernel::MarketEvaluation r;
@@ -225,8 +225,8 @@ void bind_solve(py::module_ & m) {
     m.def("frontier_anatomy",
           [](const Eigen::ArrayXd & delta, const py::object & market, const Eigen::ArrayXd & theta,
              const Eigen::ArrayXd & phi, double sigma_p, int n_threads, double alpha_lo, double a_lo) {
-              const pcm_demand::Market mk = market_from(market, "frontier_anatomy");
-              const pcm_demand::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "frontier_anatomy");
+              const pcm_aggregate::Market mk = market_from(market, "frontier_anatomy");
+              const pcm_aggregate::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "frontier_anatomy");
               if (n_threads < 1) throw py::value_error("frontier_anatomy: n_threads must be at least 1");
               pcm_kernel::FrontierAnatomy r;
               std::string error;

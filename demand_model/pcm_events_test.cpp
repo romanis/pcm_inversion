@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "pcm_geometry.hpp"
 #include "pcm_events.hpp"
 
 #include <omp.h>
@@ -13,13 +14,12 @@
 using Eigen::ArrayXd;
 using Eigen::MatrixXd;
 
-// defined in pcm_market_share.cpp: products with positive conditional share in the vertical model
-std::vector<int> index_positive_shares(const ArrayXd & delta, const ArrayXd & p);
+using pcm_geometry::index_positive_shares;   // indices of products on the vertical frontier
 
 namespace {
 
-using pcm_demand::Market;
-using pcm_demand::Params;
+using pcm_aggregate::Market;
+using pcm_aggregate::Params;
 
 ArrayXd vec(std::initializer_list<double> v) {
     ArrayXd a(v.size());
@@ -257,7 +257,7 @@ TEST(PcmEvents, Test9BruteForce) {
             if (ev.kind_draw[i] == 2) { ++n_enter; EXPECT_TRUE(after.count(ev.product_draw[i])); }
             else                      { ++n_leave; EXPECT_TRUE(before.count(ev.product_draw[i])); }
         }
-        // hull agrees with the vertical model's positive-share set (y / c_i, as pcm_demand::shares uses)
+        // hull agrees with the vertical model's positive-share set (y / c_i, as pcm_aggregate::shares uses)
         for (int g = 0; g <= 20; ++g) {
             ArrayXd d; Params pr;
             point(tau_max * g / 20.0, d, pr);
@@ -326,12 +326,12 @@ TEST(PcmEvents, PerformanceVersusShares) {
     using clk = std::chrono::steady_clock;
     const int saved = omp_get_max_threads();
     for (int T : {1, 16}) {
-        omp_set_num_threads(T);   // team size for pcm_demand::shares
+        omp_set_num_threads(T);   // team size for pcm_aggregate::shares
         double t_sh = 1e300, t_ms = 1e300;
         double frontier_sum = 0.0;
         for (int rep = 0; rep < 5; ++rep) {
             auto t0 = clk::now();
-            const auto sh = pcm_demand::shares(delta, mk, prm, false);
+            const auto sh = pcm_aggregate::shares(delta, mk, prm, false);
             auto t1 = clk::now();
             const auto ev = pcm_events::max_step(delta, dd, mk, prm, dth, 1.0, T);
             auto t2 = clk::now();

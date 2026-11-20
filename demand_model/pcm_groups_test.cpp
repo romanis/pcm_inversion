@@ -15,14 +15,14 @@ using Eigen::MatrixXd;
 namespace {
 
 struct Fixture {
-    pcm_demand::Market mk;
-    pcm_demand::Params prm;
+    pcm_aggregate::Market mk;
+    pcm_aggregate::Params prm;
     ArrayXd delta;
     pcm_kernel::GroupRequest gr;
 };
 
 // 10 products, x = [1, z, binary], 2 taste parameters, 1 scale parameter, 5 households of unequal draw counts.
-Fixture make(unsigned seed, pcm_demand::BoundKind kind, double lo) {
+Fixture make(unsigned seed, pcm_aggregate::BoundKind kind, double lo) {
     std::mt19937 gen(seed);
     std::normal_distribution<double> nd(0.0, 1.0);
     std::uniform_real_distribution<double> ud(0.0, 1.0);
@@ -73,11 +73,11 @@ Fixture make(unsigned seed, pcm_demand::BoundKind kind, double lo) {
 }
 
 // the draws of group g as a market of their own
-pcm_demand::Market sub_market(const Fixture & f, int g) {
+pcm_aggregate::Market sub_market(const Fixture & f, int g) {
     std::vector<int> idx;
     for (int i = 0; i < f.gr.group_of_draw.size(); ++i)
         if (f.gr.group_of_draw[i] == g) idx.push_back(i);
-    pcm_demand::Market m;
+    pcm_aggregate::Market m;
     m.x = f.mk.x;
     m.p = f.mk.p;
     m.weights = f.mk.weights(idx);
@@ -98,7 +98,7 @@ pcm_kernel::MicroRequest micro_ones(const Fixture & f, int R) {
     return mr;
 }
 
-struct Case { pcm_demand::BoundKind kind; double lo; };
+struct Case { pcm_aggregate::BoundKind kind; double lo; };
 
 class GroupSums : public ::testing::TestWithParam<Case> {};
 
@@ -108,7 +108,7 @@ TEST_P(GroupSums, EqualsEvaluateMarketPerHousehold) {
     const Fixture f = make(3, GetParam().kind, GetParam().lo);
     const auto gs = pcm_kernel::group_sums(f.delta, f.mk, f.prm, f.gr, true);
     for (int g = 0; g < f.gr.n_groups; ++g) {
-        const pcm_demand::Market m = sub_market(f, g);
+        const pcm_aggregate::Market m = sub_market(f, g);
         const auto mr = micro_ones(f, static_cast<int>(m.weights.size()));
         const auto ev = pcm_kernel::evaluate_market(f.delta, m, f.prm, &mr, true, false);
         for (int c = 0; c < gs.S.cols(); ++c) EXPECT_EQ(gs.S(g, c), ev.micro[c]) << "group " << g << " col " << c;
@@ -146,7 +146,7 @@ TEST_P(GroupSums, DerivativesMatchCentralDifferences) {
     const int P = static_cast<int>(f.prm.theta.size() + f.prm.phi.size() + 1);
     for (int k = 0; k < P; ++k) {
         Fixture a = f, b = f;
-        auto bump = [&](pcm_demand::Params & q, double s) {
+        auto bump = [&](pcm_aggregate::Params & q, double s) {
             if (k < 2) q.theta[k] += s; else if (k < 3) q.phi[k - 2] += s; else q.sigma_p += s;
         };
         bump(a.prm, h);
@@ -173,11 +173,11 @@ TEST_P(GroupSums, SameForEveryThreadCount) {
 }
 
 INSTANTIATE_TEST_SUITE_P(Bounds, GroupSums,
-                         ::testing::Values(Case{pcm_demand::BoundKind::A, 0.0}, Case{pcm_demand::BoundKind::A, 0.2},
-                                           Case{pcm_demand::BoundKind::ALPHA, 0.2}));
+                         ::testing::Values(Case{pcm_aggregate::BoundKind::A, 0.0}, Case{pcm_aggregate::BoundKind::A, 0.2},
+                                           Case{pcm_aggregate::BoundKind::ALPHA, 0.2}));
 
 TEST(GroupSumsInput, RejectsBadGroups) {
-    Fixture f = make(7, pcm_demand::BoundKind::A, 0.2);
+    Fixture f = make(7, pcm_aggregate::BoundKind::A, 0.2);
     Fixture dec = f;
     dec.gr.group_of_draw[5] = 3;   // 3 then back to 0: decreasing
     EXPECT_THROW(pcm_kernel::group_sums(dec.delta, dec.mk, dec.prm, dec.gr, false), std::invalid_argument);
