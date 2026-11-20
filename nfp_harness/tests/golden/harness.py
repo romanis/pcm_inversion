@@ -16,7 +16,8 @@ Cases (``CASES``):
   moments="demand_supply")`` = Sargan aggregate + group micro + second choice + supply, as Petrin. The round-4 case
   sets the two age tastes (start 0) to ``GMY_AGE_TASTES``; at 0 the two layouts give identical g and delta.
 - ``nevo_pcm``: nevo_replication/estimate_pcm.py's own ``PCMProblem`` (not the harness; legacy ``python_pcm_demand``
-  binding), 5-node Gauss-Hermite grid, ``objective(start_values())``: q, its gradient, delta, xi and G.
+  binding), 5-node Gauss-Hermite grid, ``objective(start_values())``: q, the moments g = Z'xi/n, the
+  gradient of q, delta, xi and G.
 - ``gmy_blp``: gmy_replication/estimate_blp.py ``main()`` stage ``published`` (GMY's Table 4 theta, no fit) on
   ``GMY_YEARS`` with ``GMY_HOUSEHOLDS`` households; writes go to a temporary directory.
 - ``kernel_synthetic``: the two synthetic markets of ``tests/fixtures/gmy_baseline.py`` (every ``pcm_kernel`` function,
@@ -432,7 +433,8 @@ def build_nevo_pcm(threads: int, inputs: Pins | None) -> Pins:
         q, dq = prob.objective(theta)
         last = prob.last
         pins: Pins = {"nevo.names": np.asarray(list(mod.NAMES)), "nevo.theta": np.asarray(theta),
-                      "nevo.q": np.asarray(q), "nevo.dq": np.asarray(dq), "nevo.ok": np.asarray(bool(last["ok"])),
+                      "nevo.q": np.asarray(q), "nevo.g": np.asarray(prob.Z.T @ last["xi"] / prob.n),
+                      "nevo.dq": np.asarray(dq), "nevo.ok": np.asarray(bool(last["ok"])),
                       "nevo.delta": np.asarray(last["delta"]), "nevo.xi": np.asarray(last["xi"]),
                       "nevo.G": np.asarray(last["G"]), "nevo.W": np.asarray(prob.W)}
     finally:
