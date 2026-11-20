@@ -72,3 +72,12 @@ def test_antithetic_draws_pair_each_point_with_its_negation() -> None:
         sobol_normal_draws(7, dim, seed, require_power_of_two=False, antithetic=(0,))
     with pytest.raises(ValueError, match="antithetic columns"):
         sobol_normal_draws(n, dim, seed, antithetic=(dim,))
+
+
+def test_zscore_uses_the_n_minus_1_sd() -> None:
+    from nfp_harness.data import zscore
+
+    v = np.array([1.0, 2.0, 4.0, 9.0])
+    z = zscore(v)
+    np.testing.assert_array_equal(z, (v - v.mean()) / v.std(ddof=1))
+    assert abs(z.mean()) < 1e-15 and z.std(ddof=1) == pytest.approx(1.0, abs=1e-15)

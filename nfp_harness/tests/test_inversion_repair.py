@@ -23,9 +23,8 @@ FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "gmy_inversion_
 
 @pytest.fixture(scope="module")
 def markets() -> dict:
-    from nfp_harness import gmy_data
     try:
-        gmy_data.package_root()
+        gmy_module().package_root()
     except FileNotFoundError:
         pytest.skip("GMY replication package not unpacked")
     gmy = gmy_module()

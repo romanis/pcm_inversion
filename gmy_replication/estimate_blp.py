@@ -20,7 +20,7 @@ Estimation follows the authors' three steps (Appendix A, codes/estimation.m, mom
 pyblp cannot express step 1: GMY's micro moments average each household's expected x given a purchase with household
 weights (ExjCondH.m), and their second-choice probabilities renormalise over inside goods per household, neither of
 which a pyblp MicroPart can weight; pyblp's own second-choice parts would also need (I, J, J) arrays per part. So step
-1 runs in numpy here (nfp_harness.gmy_data, nfp_harness.second_choice), and step 2 and the post-estimation run in
+1 runs in numpy here (the data layer of estimate_pcm.py, nfp_harness.micro_sets, nfp_harness.second_choice), and step 2 and the post-estimation run in
 pyblp (vendored 1.3.0) at theta_hat: a pyblp.Problem with GMY's X1 / X2 / demographics, the same agents and nodes,
 absorbed year and make2 effects and Optimization("return"), so pyblp's one-step GMM is the authors' 2SLS and its
 elasticities and Nash costs are those of the fitted model. pyblp's delta is checked against the numpy contraction.
@@ -36,12 +36,14 @@ Outputs (untracked): gmy_replication/results/blp_<stage>_h<H>[_years].{json,npz}
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
 import pathlib
 import sys
 import time
+import types
 from concurrent.futures import ThreadPoolExecutor
 
 THREADS_DEFAULT = 32
@@ -55,10 +57,25 @@ import pandas as pd  # noqa: E402
 from scipy.optimize import least_squares  # noqa: E402
 from scipy.stats import norm, qmc  # noqa: E402
 
-from nfp_harness import gmy_data  # noqa: E402
 from nfp_harness.second_choice import first_second_correlations, logit_second_choice_matrix  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
+
+
+def _gmy_pcm() -> types.ModuleType:
+    """estimate_pcm.py of this folder, which holds the GMY data layer, under its own module name (petrin_replication has
+    an estimate_pcm too)."""
+    name = "gmy_replication_estimate_pcm"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, HERE / "estimate_pcm.py")
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return sys.modules[name]
+
+
+gmy_pcm = _gmy_pcm()
 OUT = HERE / "results"
 SEED = 8673320
 log = logging.getLogger("gmy_blp")
@@ -105,7 +122,7 @@ TABLE8_MODEL = {  # Table 8 "Model" values, keyed by the code's survey label (Ta
 class GMYLogit:
     """Mixed logit of GMY spec 6 on one GMYData: contraction, micro and second-choice moments, in numpy."""
 
-    def __init__(self, data: gmy_data.GMYData, threads: int, seed: int = SEED, tol: float = 1e-13) -> None:
+    def __init__(self, data: gmy_pcm.GMYData, threads: int, seed: int = SEED, tol: float = 1e-13) -> None:
         self.data, self.tol = data, tol
         p, a = data.products, data.agents
         self.years = np.unique(p.market_ids.to_numpy())
@@ -124,8 +141,8 @@ class GMYLogit:
         self.delta = [d.copy() for d in self.delta0]
         self.pattern = [(X2.index(c), DEMOG.index(d)) for c, d in PATTERN]
         self.unobs = [X2.index(c) for c in UNOBS]
-        self.micro = gmy_data.MicroMomentEvaluator(p, a, data.micro)
-        self.sc_years = [y for y in gmy_data.SECOND_CHOICE_YEARS if y in set(self.years.tolist())]
+        self.micro = gmy_pcm.micro_evaluator(p, a, data.micro)
+        self.sc_years = [y for y in gmy_pcm.SECOND_CHOICE_YEARS if y in set(self.years.tolist())]
         self.sc_x, self.sc_s, self.sc_data = {}, {}, {}
         for y in self.sc_years:
             r = self.rows[list(self.years).index(y)]
@@ -232,7 +249,7 @@ def fit_step1(model: GMYLogit, theta0: np.ndarray, max_nfev: int) -> tuple[np.nd
 
 # ---------------------------------------------------------------- step 2 and post-estimation in pyblp
 
-def pyblp_results(data: gmy_data.GMYData, model: GMYLogit, theta: np.ndarray):
+def pyblp_results(data: gmy_pcm.GMYData, model: GMYLogit, theta: np.ndarray):
     """pyblp ProblemResults at theta: absorbed year and make2 effects, X1 = [price, STAGE2_X], ZD = [STAGE2_X,
     lag_pl_con] (just identified, so one-step GMM = 2SLS), X2 / demographics / nodes as GMYLogit."""
     import pyblp
@@ -252,7 +269,7 @@ def pyblp_results(data: gmy_data.GMYData, model: GMYLogit, theta: np.ndarray):
             f[f"nodes{k}"] = nodes[:, k]
         a_frames.append(f)
     agents = pd.concat(a_frames, ignore_index=True)
-    x1 = "0 + prices + " + " + ".join(gmy_data.STAGE2_X)
+    x1 = "0 + prices + " + " + ".join(gmy_pcm.STAGE2_X)
     x2 = "1 + " + " + ".join(order[1:])
     form = (pyblp.Formulation(x1, absorb="C(market_ids) + C(make2_do)"), pyblp.Formulation(x2))
     problem = pyblp.Problem(form, p, pyblp.Formulation("0 + " + " + ".join(DEMOG)), agents)
@@ -269,14 +286,14 @@ def pyblp_results(data: gmy_data.GMYData, model: GMYLogit, theta: np.ndarray):
     return problem, res
 
 
-def post_estimation(data: gmy_data.GMYData, model: GMYLogit, theta: np.ndarray, delta: np.ndarray) -> dict:
+def post_estimation(data: gmy_pcm.GMYData, model: GMYLogit, theta: np.ndarray, delta: np.ndarray) -> dict:
     problem, res = pyblp_results(data, model, theta)
     p = data.products
     beta = np.asarray(res.beta).ravel()
     alpha = float(beta[0])
     se = np.asarray(res.beta_se).ravel()
     out: dict = {"alpha": alpha, "alpha_se_clustered": float(se[0]),
-                 "beta": dict(zip(gmy_data.STAGE2_X, beta[1:].tolist())),
+                 "beta": dict(zip(gmy_pcm.STAGE2_X, beta[1:].tolist())),
                  "max_abs_delta_numpy_vs_pyblp": float(np.max(np.abs(np.asarray(res.delta).ravel() - delta)))}
     # alpha_i = alpha + th_inc inc + th_inc2 inc2 + th_age age (getAlphas.m)
     pr = [k for k, (c, _) in enumerate(model.pattern) if c == 0]
@@ -324,7 +341,7 @@ def main() -> None:
     tag = f"blp_{args.stage}_h{args.households}" + (f"_{len(args.years)}y" if args.years else "")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                         handlers=[logging.FileHandler(OUT / f"{tag}.log"), logging.StreamHandler()])
-    data = gmy_data.load(n_households=args.households, seed=SEED, years=args.years)
+    data = gmy_pcm.load_data(n_households=args.households, seed=SEED, years=args.years)
     model = GMYLogit(data, args.threads)
     log.info("%d products, %d markets, %d households per market", len(data.products), len(model.years),
              args.households)

@@ -809,8 +809,8 @@ class GroupMicroMoments:
     ``P_g = sum_i w_i sum_j s_ij``, ``S_g[c] = sum_i w_i sum_j x_jc s_ij``, ``m_g[c] = S_g[c] / P_g``. A household set H
     pools its households over the model's markets (each year's agent weights sum to one, so years count equally):
     ``M_H[c] = sum_{g in H+} w_g m_g[c] / D_H`` with H+ the households with P_g > 0 and D_H = sum_{H+} w_g
-    (``never_buyers="drop"``, the stated intent of ExjCondH.m, deviation D2) or sum_H w_g (``"gmy_code"``, its literal
-    code: a never-buyer keeps its weight and adds 0); ``A_H = sum_H P_g / sum_H w_g``. Row values are
+    (``never_buyers="drop"``, the stated intent of ExjCondH.m, deviation D2) or sum_H w_g (``"keep"``, the literal code of
+    ExjCondH.m: a never-buyer keeps its weight and adds 0); ``A_H = sum_H P_g / sum_H w_g``. Row values are
     ``M_a - M_b - value`` (diff) and ``A_a / A_b - value`` (ratio). Partials: ``d m_g = (d S_g - m_g d P_g) / P_g``.
 
     Kernel contract (``sol.outputs["group_sums"]``): a list with one entry per model market (None where the dataset
@@ -840,8 +840,8 @@ class GroupMicroMoments:
             raise ValueError(f"{name}: {len(self.rows)} rows, {self.values.size} values, {var.size} variances")
         if not np.all(np.isfinite(var) & (var > 0)):
             raise ValueError(f"{name}: variances must be positive and finite")
-        if never_buyers not in ("drop", "gmy_code"):
-            raise ValueError(f"never_buyers must be 'drop' or 'gmy_code', got {never_buyers!r}")
+        if never_buyers not in ("drop", "keep"):
+            raise ValueError(f"never_buyers must be 'drop' or 'keep', got {never_buyers!r}")
         for r in self.rows:
             if r.kind not in ("diff", "ratio") or (r.kind == "diff") != (r.char is not None):
                 raise ValueError(f"{name}: bad row {r}")
