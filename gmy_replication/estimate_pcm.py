@@ -68,7 +68,9 @@ markets of another run's stage at that stage's theta (also under another a_lo: t
 the kernel's theta path moves the bound; ``run --stage warm`` inverts every market once at the starting theta and
 stores ``stages/warm.npz`` for this), ``--start-theta`` starts the layout there (by parameter name;
 ``--start-theta-except`` keeps named parameters at this layout's starts); ``--fix sigma_p=3.0`` fixes a parameter at a
-value for the whole chain (a calibration band, GMY_ROUND4 item 3; ``ParameterLayout.fixed``).
+value for the whole chain (a calibration band, GMY_ROUND4 item 3; ``ParameterLayout.fixed``). These, ``--a-lo``,
+``--robustness``, ``--cold-draws``, ``--max-iterations``, ``--outer`` and ``--start-gate`` are the options every paper
+shares (nfp_harness.paper.PaperSpec).
 
 Run (results under gmy_replication/results/harness/, untracked):
   python gmy_replication/estimate_pcm.py run --stage prefit --nu 4 \\
@@ -103,20 +105,19 @@ import pandas as pd  # noqa: E402
 
 from nfp_harness import comparison, micro_sets, pipeline, twins  # noqa: E402
 from nfp_harness import instruments as iv  # noqa: E402
-from nfp_harness.checkpoint import read_stage_file, stage_parameter_names  # noqa: E402
-from nfp_harness.comparison import format_cell as _fmt, year_entry as _year_get  # noqa: E402
+from nfp_harness.comparison import format_cell as _fmt, trimmed_mean, year_entry as _year_get  # noqa: E402
 from nfp_harness.data import (INCOME_LAW_CLIP, break_price_ties, drop_small_shares, fetch_dataverse_file,  # noqa: E402
                               income_law_basis, zscore)
 from nfp_harness.micro_sets import MicroMoments  # noqa: E402
 from nfp_harness.diagnostics import at_bound_parameters  # noqa: E402
+from nfp_harness.diagnostics.identification import identification_summary  # noqa: E402
 from nfp_harness.instruments import drop_collinear, drop_collinear_columns, keep_rank, standardise  # noqa: E402
-from nfp_harness.linear import LinearIV  # noqa: E402
 from nfp_harness.models import pcm_post as pp  # noqa: E402
-from nfp_harness.models.pcm import PCMModel, PCMSpec  # noqa: E402
+from nfp_harness.models.pcm import PCMSpec  # noqa: E402
 from nfp_harness.moments import (GroupMicroMoments, GroupMomentRow, IVMoments, MicroDataset,  # noqa: E402
                                  SarganIVMoments, SecondChoiceMoments, SupplyMoments)
-from nfp_harness.params import ParameterLayout, ParameterSpec, parse_fixed  # noqa: E402
-from nfp_harness.problem import NFPGMMProblem  # noqa: E402
+from nfp_harness.paper import PaperSpec  # noqa: E402
+from nfp_harness.params import ParameterLayout, ParameterSpec  # noqa: E402
 from nfp_harness.profile import NotMonotoneDecreasing  # noqa: E402
 from nfp_harness.second_choice import first_second_correlations  # noqa: E402
 
@@ -157,7 +158,6 @@ PIS_AGE = (("z_log_footprint", "age"), ("lux", "age"))
 #: age-price rows, with phi_age and the age tastes free)
 PREFIT_ROWS = ("price_purchase", "age")
 TWIN_KEYS = ("market_ids", "firm_ids", "prices") + TASTE[1:]   # the GMY-only kernel columns; see GMYSpec.twin_keys
-TRIM = (0.05, 0.95)   # own-elasticity trimmed means
 NEAR_TWIN_GAP = 0.01   # $100 in $10k: price gap to the nearest product of the same vehicle type
 MIN_GAP = 0.001          # $10 in $10k
 MIN_SHARE = 1e-5         # products below it are bought by about one simulated consumer; dropped (D9)
@@ -535,8 +535,9 @@ def price_structure(products: pd.DataFrame, chars: Sequence[str] = TASTE[1:]) ->
     return out
 
 
-class GMYSpec:
-    """The GMY PCM spec read by nfp_harness.pipeline (interface in its module docstring; GMY spec WP-G7)."""
+class GMYSpec(PaperSpec):
+    """The GMY PCM spec read by nfp_harness.pipeline (interface in its module docstring; shared options, run key,
+    starts and problem assembly in nfp_harness.paper.PaperSpec; GMY spec WP-G7)."""
 
     name = "gmy_pcm"
     firm_column = "firm_ids"
@@ -556,6 +557,19 @@ class GMYSpec:
     band_values = (2.0, 3.0)
     band_moments = "all"
     use_max_step = False
+    a_lo_default = A_LO
+    robustness_choices = ROBUSTNESS
+    retired_robustness = RETIRED_ROBUSTNESS
+    robustness_help = ("fixed_w: fixed-W aggregate block (IVMoments) instead of Sargan; never_buyers_gmy_code: "
+                       "never-buyers keep their weight in the micro moments, as ExjCondH.m's code; no_pi_const_inc: "
+                       "GMY's constant x income taste fixed at 0 (the round-1 layout, D8); gmy_spreads_only: no spreads "
+                       "on height, curb weight and trims (D7); no_age_taste: no age x (footprint, lux) taste (the "
+                       "round-2 layout)")
+    draw_seed_offset = SEED
+    evaluate_only_moments = ("aggregate",)
+    # W2 (D6): micro and second-choice blocks keep their fixed (n V)^-1, the aggregate block is efficient on the
+    # excluded instruments only (weighting.efficient_on_excluded: beta stays at OLS)
+    step2_weighting = "efficient_on_excluded"
     # trust region and noise handling as the Petrin spec (LEARNINGS 25, 32), with the round-1 fix of the collapse on
     # the kinked second-choice and micro blocks: the radius floored at 0.05 natural units, a probe restart at least at
     # the probe's step, and probe restarts while a compass step lowers q by more than 1; round 2: and by more than 0.1%
@@ -569,20 +583,14 @@ class GMYSpec:
                  instruments: str = "gmy", moments: str = "gmy", robustness: Sequence[str] = (),
                  a_lo: float = A_LO, income_basis: str = "level", min_share: float = MIN_SHARE,
                  income_law: str = "gmy_blp") -> None:
+        super().__init__()
         self.households = int(households)
         self.min_share = float(min_share)
         self.blp_fit = pathlib.Path(blp_fit)
         self.moments = "gmy"
-        self.robustness: tuple[str, ...] = ()
         self.a_lo = float(a_lo)
-        self.warm_delta: str | None = None
-        self.start_theta: str | None = None
-        self.start_theta_except: tuple[str, ...] = ()
-        self.max_iterations: int | None = None
-        self.cold_draws = 0
         self.prefit_rows = "price_purchase"
         self.antithetic_taste = False
-        self.fixed: dict[str, float] = {}
         self.set_income_law(income_law)
         self._loaded: tuple[Any, ...] | None = None
         self.set_income_basis(income_basis)
@@ -688,16 +696,6 @@ class GMYSpec:
                              f"{moments!r}")
         self.moments = moments
 
-    def set_robustness(self, robustness: Sequence[str] | None) -> None:
-        r = tuple(sorted(set(robustness or ())))
-        retired = [RETIRED_ROBUSTNESS[x] for x in r if x in RETIRED_ROBUSTNESS]
-        if retired:
-            raise ValueError("; ".join(retired))
-        unknown = [x for x in r if x not in ROBUSTNESS]
-        if unknown:
-            raise ValueError(f"unknown robustness switches {unknown}; known: {ROBUSTNESS}")
-        self.robustness = r
-
     def set_income_basis(self, basis: str) -> None:
         if basis not in INCOME_BASES:
             raise ValueError(f"income_basis must be one of {INCOME_BASES}, got {basis!r}")
@@ -764,7 +762,7 @@ class GMYSpec:
     def never_buyers(self) -> str:
         return "keep" if "never_buyers_gmy_code" in self.robustness else "drop"
 
-    def add_arguments(self, parser: Any) -> None:
+    def add_paper_arguments(self, parser: Any) -> None:
         parser.add_argument("--years", type=int, nargs="+", default=None,
                             help="markets (default all 39 years 1980-2018); the micro sets pool over the years present "
                                  "and the second-choice block uses those of 1991, 1999, 2005, 2015 among them")
@@ -774,12 +772,6 @@ class GMYSpec:
         parser.add_argument("--moments", choices=ESTIMATION_MOMENTS + tuple(MOMENT_ALIASES), default="gmy",
                             help="gmy: Sargan + micro + second choice (default); gmy_nolinear: micro + second choice "
                                  "(GMY's nonlinear stage); demand_supply: gmy + the log-cost supply block")
-        parser.add_argument("--robustness", action="append", choices=ROBUSTNESS, default=None,
-                            help="fixed_w: fixed-W aggregate block (IVMoments) instead of Sargan; never_buyers_gmy_code: "
-                                 "never-buyers keep their weight in the micro moments, as ExjCondH.m's code; "
-                                 "no_pi_const_inc: GMY's constant x income taste fixed at 0 (the round-1 layout, D8); "
-                                 "gmy_spreads_only: no spreads on height, curb weight and trims (D7); no_age_taste: "
-                                 "no age x (footprint, lux) taste (the round-2 layout)")
         parser.add_argument("--prefit-rows", choices=PREFIT_ROWS, default="price_purchase",
                             help="micro rows of the prefit: price_purchase (the 20 price and purchase-rate rows, "
                                  "default) or age (the 8 age-price rows, phi_age and the age tastes free); part of the "
@@ -792,9 +784,6 @@ class GMYSpec:
         parser.add_argument("--income-basis", choices=INCOME_BASES, default="level",
                             help="phi_inc on inc (level, the default), on log(income / mean) (log), or auto: the "
                                  "prefit fits both and keeps the lower q")
-        parser.add_argument("--fix", action="append", default=None, metavar="NAME=VALUE",
-                            help="fix a parameter at a value for every stage, e.g. --fix sigma_p=3.0 (repeatable; the "
-                                 "bounds widen to the value); part of the run key")
         parser.add_argument("--antithetic-taste", action="store_true",
                             help="taste draws in antithetic pairs: each scrambled Sobol point followed by its negation "
                                  "on every taste dimension (a_i is integrated in closed form and has no draws); part "
@@ -803,28 +792,8 @@ class GMYSpec:
                             help="the fixed part of log alpha: gmy_blp (log c_i of GMY's BLP income-age law, default) "
                                  "or petrin_bounded (Petrin's law log(ybar / clip(y_i, 1, 150)), y_i in $1000; phi_inc, "
                                  "phi_age and pi_const_inc stay free); part of the run key")
-        parser.add_argument("--start-theta", default=None,
-                            help="a stored stage (<run dir>/stages/<stage>.npz) whose theta becomes the layout starts "
-                                 "(clipped to the bounds), matched by parameter name through the run's history.csv "
-                                 "(positional when the run has none and the layouts have the same length); a free "
-                                 "parameter the stage does not have keeps its start; part of the run key")
-        parser.add_argument("--start-theta-except", nargs="+", default=None, metavar="PARAMETER",
-                            help="free parameters that keep this layout's starts under --start-theta (e.g. the three "
-                                 "D7 spreads, to start them at 0.5); part of the run key")
-        parser.add_argument("--a-lo", type=float, default=A_LO, help="bound on the unobserved factor a_i (default 0.2)")
-        parser.add_argument("--warm-delta", default=None,
-                            help="a stored stage (<run dir>/stages/<stage>.npz) of a run on other draws whose delta "
-                                 "warm-starts every market of the same years (WP-G7 item 1)")
-        parser.add_argument("--max-iterations", type=int, default=None,
-                            help="trial-step limit of step1 and step2 (smoke runs); part of the run key")
-        parser.add_argument("--cold-draws", type=int, default=0,
-                            help="draw homotopy for markets with no warm start: invert first on every k-th draw (at "
-                                 "least this many draws), then warm-start each finer level (PCMModel cold_draws; 0: "
-                                 "off); part of the run key when set")
-
-    def configure(self, args: Any) -> None:
+    def configure_paper(self, args: Any) -> None:
         years = tuple(args.years) if getattr(args, "years", None) else ALL_YEARS
-        self.set_robustness(getattr(args, "robustness", None))   # before load: the kernel columns decide the twins
         self.households = int(getattr(args, "households", None) or 1000)
         ms = getattr(args, "min_share", None)
         self.min_share = MIN_SHARE if ms is None else float(ms)
@@ -832,38 +801,20 @@ class GMYSpec:
         self.set_prefit_rows(getattr(args, "prefit_rows", None) or "price_purchase")
         self.set_income_law(getattr(args, "income_law", None) or "gmy_blp")
         self.antithetic_taste = bool(getattr(args, "antithetic_taste", False))
-        self.fixed = parse_fixed(getattr(args, "fix", None))
-        self.load(years, getattr(args, "instruments", None) or "gmy")
-        self.set_moments(getattr(args, "moments", None) or "gmy")
-        stt = getattr(args, "start_theta", None)
-        self.start_theta = str(pathlib.Path(stt).resolve()) if stt else None
-        self.start_theta_except = tuple(sorted(set(getattr(args, "start_theta_except", None) or ())))
-        self.a_lo = float(getattr(args, "a_lo", A_LO))
-        wd = getattr(args, "warm_delta", None)
-        self.warm_delta = str(pathlib.Path(wd).resolve()) if wd else None
-        mi = getattr(args, "max_iterations", None)
-        self.max_iterations = None if mi is None else int(mi)
-        self.cold_draws = int(getattr(args, "cold_draws", None) or 0)
+        self.load(years, getattr(args, "instruments", None) or "gmy")   # after the robustness: the kernel columns
+        self.set_moments(getattr(args, "moments", None) or "gmy")       # decide the twins
 
-    def run_key(self) -> dict[str, Any]:
-        """Result-changing options beyond nu and seed: years (unless all 39), instruments, moments, robustness, a_lo and
-        its kind, the warm delta's source and a smoke-run iteration limit."""
-        out: dict[str, Any] = {"spec": "gmy_pcm", "a_lo": self.a_lo, "bound": "a"}
+    def paper_run_key(self) -> dict[str, Any]:
+        """Result-changing options beyond nu, seed and PaperSpec's shared ones: years (unless all 39), instruments,
+        moments, households, the share threshold, the income basis and law, the layout round, the prefit rows and
+        antithetic draws."""
+        out: dict[str, Any] = {"spec": "gmy_pcm"}
         if self.years != ALL_YEARS:
             out["years"] = list(self.years)
         if self.instruments != "gmy":
             out["instruments"] = self.instruments
         if self.moments != "gmy":
             out["moments"] = self.moments
-        if self.robustness:
-            out["robustness"] = list(self.robustness)
-        if self.warm_delta:
-            out["warm_delta"] = pathlib.Path(self.warm_delta).parent.parent.name + "/" + pathlib.Path(self.warm_delta).name
-        if self.start_theta:
-            out["start_theta"] = (pathlib.Path(self.start_theta).parent.parent.name + "/"
-                                  + pathlib.Path(self.start_theta).name)
-            if self.start_theta_except:
-                out["start_theta_except"] = list(self.start_theta_except)
         if self.households != 1000:
             out["households"] = self.households
         out["min_share"] = self.min_share
@@ -876,13 +827,11 @@ class GMYSpec:
             out["income_law"] = self.income_law
         if self.antithetic_taste:
             out["antithetic_taste"] = True
-        if self.fixed:
-            out["fix"] = dict(sorted(self.fixed.items()))
-        if self.max_iterations is not None:
-            out["max_iterations"] = self.max_iterations
-        if self.cold_draws:
-            out["cold_draws"] = self.cold_draws
         return out
+
+    @property
+    def antithetic_draws(self) -> bool:
+        return self.antithetic_taste
 
     @property
     def normalisations(self) -> list[str]:
@@ -943,7 +892,7 @@ class GMYSpec:
 
     # ------------------------------------------------------------------ parameters and moments
 
-    def layout(self) -> ParameterLayout:
+    def base_layout(self) -> ParameterLayout:
         th, am = self.blp["theta"], self.alpha_median
         specs = []
         for k, c in enumerate(UNOBS):
@@ -979,21 +928,7 @@ class GMYSpec:
         a = self.a_lo
         specs.append(ParameterSpec("a_lo", "bound", None, None, a, a, a, unit=0.1, free=False,
                                    note="a_i >= a_lo; fixed (LEARNINGS 32)"))
-        lay = ParameterLayout(specs)
-        if self.start_theta:
-            bad = sorted(set(self.start_theta_except) - set(lay.names))
-            if bad:
-                raise ValueError(f"--start-theta-except: {bad} are not parameters of this layout")
-            src = stage_theta(self.start_theta, lay.names)
-            lay = lay.replace({n: {"start": float(np.clip(src[n], sp.lower, sp.upper))}
-                               for n, sp in zip(lay.names, lay.specs)
-                               if sp.free and n in src and n not in self.start_theta_except})
-        if self.fixed:
-            bad = sorted(set(self.fixed) - set(lay.names))
-            if bad:
-                raise ValueError(f"--fix: {bad} are not parameters of this layout")
-            lay = lay.fixed(self.fixed)
-        return lay
+        return ParameterLayout(specs)
 
     def pcm_spec(self) -> PCMSpec:
         return PCMSpec(self.kernel_chars, track_realised_mass=False, trial_cold_evals=0, bound_kind="a")
@@ -1033,25 +968,23 @@ class GMYSpec:
                                                      if k in self.cost_keep],
                              rcond_min=1e-12, mc_floor=0.05, fd_step=1e-3, fd_scale="unit")
 
-    def build_problem(self, nu: int, seed: int, threads: int | None, moments: str = "all",
-                      layout_changes: dict[str, Any] | None = None) -> NFPGMMProblem:
-        """``moments``: ``all`` the spec's estimation set (``--moments``: gmy, gmy_nolinear, demand_supply),
-        ``prefit`` the 20 price and purchase-rate micro rows alone, ``aggregate`` the Sargan block alone (evaluation
-        only), or one of the estimation set names explicitly."""
+    def _which(self, moments: str) -> str:
+        """``all``: the spec's estimation set (``--moments``: gmy, gmy_nolinear, demand_supply); ``prefit``: the 20 price
+        and purchase-rate micro rows alone; ``aggregate``: the Sargan block alone (evaluation only); or one of the
+        estimation set names explicitly."""
         which = self.moments if moments == "all" else MOMENT_ALIASES.get(moments, moments)
         if which not in MOMENT_SETS:
             raise ValueError(f"moments must be 'all' or one of {MOMENT_SETS}, got {moments!r}")
-        layout = self.layout()
-        if which == "prefit":   # the prefit rows identify phi alone: the problem is built with the rest fixed
-            layout = layout.replace({n: {"free": n in self.prefit_free and n not in self.fixed} for n in layout.names})
-        if layout_changes:
-            layout = layout.replace(layout_changes)
-        model = PCMModel(self.pcm_spec(), {"products": self.products, "agents": self.agents}, layout, nu, SEED + seed,
-                         total_threads=threads, antithetic=self.antithetic_taste, cold_draws=self.cold_draws)
-        if self.warm_delta:
-            delta_w, theta_w = self.read_warm_delta()
-            model.warm_from_delta(delta_w, theta_w if theta_w is not None and theta_w.size == layout.P
-                                  else layout.starts())
+        return which
+
+    def layout_for(self, layout: ParameterLayout, moments: str) -> ParameterLayout:
+        """The prefit rows identify phi alone: the prefit problem is built with the rest fixed."""
+        if self._which(moments) == "prefit":
+            return layout.replace({n: {"free": n in self.prefit_free and n not in self.fixed} for n in layout.names})
+        return layout
+
+    def moment_list(self, moments: str) -> list[Any]:
+        which = self._which(moments)
         ms: list[Any] = []
         if which in ("gmy", "demand_supply", "aggregate"):
             ms.append(self.aggregate_moment())
@@ -1061,42 +994,7 @@ class GMYSpec:
             ms += self.micro_moment() + self.second_choice_moment()
         if which == "demand_supply":
             ms.append(self.supply_moment())
-        prob = NFPGMMProblem(model, ms, LinearIV(self.X1, self.Z, names=self.X1_names), layout,
-                             max_step=self.use_max_step, evaluate_only=which == "aggregate")
-        prob.normalisations = self.normalisations   # type: ignore[attr-defined]   # read by the pipeline's reports
-        return prob
-
-    def read_warm_delta(self) -> tuple[np.ndarray, np.ndarray | None]:
-        """((n,) delta in this spec's row order, the stage's theta) from ``--warm-delta``: the stage's stored model
-        state matched by year, and the theta it was solved at in this layout's order (by parameter name)."""
-        assert self.warm_delta is not None
-        st = read_stage_file(self.warm_delta)
-        model = (st.get("problem_state") or {}).get("model") or {}
-        ids = [str(x) for x in model.get("market_ids", [])]
-        out = np.full(len(self.products), np.nan)
-        mids = self.products.market_ids.to_numpy()
-        for y in self.years:
-            if str(y) not in ids:
-                continue
-            k = ids.index(str(y))
-            rows = self.market_rows(y)
-            d = np.asarray(model["delta"][k], dtype=float)
-            if d.size == rows.size:
-                out[rows] = d
-        if not np.isfinite(out[np.isin(mids, [int(i) for i in ids])]).any():
-            raise ValueError(f"--warm-delta {self.warm_delta}: no usable market state")
-        if st.get("theta") is None:
-            return out, None
-        # the theta the delta was solved at, in this layout's order: a taste or scale term the stage's layout lacks
-        # was 0 there (e.g. pi_const_inc in a no_pi_const_inc run, phi_y in a gmy_blp run); any other missing
-        # parameter takes this layout's start
-        try:
-            src = stage_theta(self.warm_delta, self._hash_layout().names)
-        except ValueError:   # no names and another length: build_problem warms at the layout starts
-            return out, None
-        lay = self.layout()
-        return out, np.array([src.get(n, 0.0 if sp.role in ("taste", "scale") else sp.start)
-                              for n, sp in zip(lay.names, lay.specs)])
+        return ms
 
     def second_choice_data(self) -> dict[int, list[float]]:
         out = {}
@@ -1106,12 +1004,6 @@ class GMYSpec:
             out[int(y)] = first_second_correlations(pr.shares, v["prob"],
                                                     pr[list(SECOND_CHOICE_CHARS)].to_numpy(float)).tolist()
         return out
-
-    def market_rows(self, year: int) -> np.ndarray:
-        """Rows of ``self.products`` of market ``year`` in the PCM model's order (price order, stable)."""
-        p = self.products
-        pos = np.flatnonzero(p.market_ids.to_numpy() == year)
-        return pos[np.argsort(p.prices.to_numpy(float)[pos], kind="stable")]
 
     def merged_second_choice_data(self, year: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(data correlations (K,), x (J, K), data shares (J,)) of ``year`` on the merged product set in the model's
@@ -1143,43 +1035,7 @@ class GMYSpec:
             corr[y], x[y], s[y] = self.merged_second_choice_data(y)
         return [SecondChoiceMoments("second_choice", years, SECOND_CHOICE_CHARS, corr, x, s, weight=weight)]
 
-    def step2_weighting(self, problem: Any, ev: Any) -> np.ndarray:
-        """W2 at the step-1 point (D6): the micro and second-choice blocks keep their fixed (n V)^-1; the aggregate block
-        is efficient on the excluded instruments only. Under the default concentration beta is OLS, so the X1 rows of
-        Z'xi are identically zero and the clustered S of the full aggregate block is singular (a make2 or model with a
-        single cluster carries a row that is exactly zero). In the basis Z~ = Z A = [X1, M_X1 Z_ex], A = [[I, -G], [0,
-        I]] with G = (X1'X1)^-1 X1'Z_ex, W_aa = A blockdiag((X1'X1/n)^-1, S_h^-1) A' with S_h the clustered covariance
-        of the residualised excluded rows (A' S A restricted to them). That W keeps beta at OLS (the excluded rows of
-        Z~'(delta - X1 b) do not depend on b), so the aggregate block is n h' S_h^-1 h with h = Z~_ex' xi / n: the
-        aggregate J on the excluded instruments' degrees of freedom."""
-        from nfp_harness.weighting import weight_from_covariance
-
-        S = problem.covariance(ev)
-        W = np.zeros_like(S)
-        agg = getattr(problem, "agg", None)
-        for name, sl in ev.blocks.items():
-            if agg is not None and name == agg.name:
-                continue
-            W[sl, sl] = weight_from_covariance(S[sl, sl])
-        if agg is not None:
-            a = problem.agg_rows
-            Z = np.asarray(agg.Z, dtype=float)
-            X1 = self.X1
-            K = X1.shape[1]
-            if not np.array_equal(Z[:, :K], X1):
-                raise ValueError("step2_weighting: the aggregate Z does not start with X1")
-            n = Z.shape[0]
-            G = np.linalg.lstsq(X1, Z[:, K:], rcond=None)[0]
-            A = np.eye(Z.shape[1])
-            A[:K, K:] = -G
-            St = A.T @ S[a, a] @ A
-            B = np.zeros_like(St)
-            B[:K, :K] = np.linalg.inv(X1.T @ X1 / n)
-            B[K:, K:] = weight_from_covariance(St[K:, K:])
-            W[a, a] = A @ B @ A.T
-        return 0.5 * (W + W.T)
-
-    def hash_payload(self) -> dict[str, Any]:
+    def payload(self) -> dict[str, Any]:
         return {"data": "GMY replication package (Dataverse doi:10.7910/DVN/CZGOKP), prices spread to a $10 gap",
                 "years": list(self.years), "households": self.households, "taste": self.kernel_chars, "unobs": UNOBS,
                 "pis": self.pis, "extra_spreads": self.extra_spreads, "income_basis": self.income_basis,
@@ -1192,8 +1048,8 @@ class GMYSpec:
                                   "weight": SC_WEIGHT, "chars": SECOND_CHOICE_CHARS},
                 "aggregate": "IVMoments" if "fixed_w" in self.robustness else "SarganIVMoments",
                 "clusters": "product_ids", "blp_start": self.blp["source"],
-                "layout": [dataclasses.asdict(s) for s in self._hash_layout().specs],
-                "start_theta": self.start_theta, "start_theta_except": list(self.start_theta_except),
+                "layout": [dataclasses.asdict(s) for s in self.hash_layout().specs],
+                "start_theta": self.start_theta_path, "start_theta_except": list(self.start_theta_except),
                 "pcm": dataclasses.asdict(self.pcm_spec()), "optimizer": self.optimizer_options,
                 "prefit": {"free": self.prefit_free, "max_iterations": self.prefit_max_iterations,
                            "moments": "20 price and purchase-rate micro rows" if self.prefit_rows == "price_purchase"
@@ -1203,31 +1059,7 @@ class GMYSpec:
                 # options added in round 4, only when set, so the payload of an older run is unchanged
                 **({"income_law": {"law": self.income_law, "ybar_1000usd": self.income_law_ybar, "clip": INCOME_LAW_CLIP}}
                    if self.income_law != "gmy_blp" else {}),
-                **({"draws": {"antithetic": "every taste dimension"}} if self.antithetic_taste else {}),
-                **({"fix": dict(sorted(self.fixed.items()))} if self.fixed else {}),
-                **({"cold_draws": self.cold_draws} if self.cold_draws else {})}
-
-    def _hash_layout(self) -> ParameterLayout:
-        """The layout as hashed: under ``--income-basis auto`` the level variant whatever the prefit chose, so the hash
-        of a run does not change when its prefit picks a basis."""
-        chosen = self.prefit_variant
-        self.prefit_variant = None
-        try:
-            return self.layout()
-        finally:
-            self.prefit_variant = chosen
-
-    def named_directions(self, theta: np.ndarray, units: np.ndarray) -> dict[str, np.ndarray]:
-        """The utility-scale direction (sigma_p up, every taste spread down in proportion, LEARNINGS 1)."""
-        names = self.layout().names
-        u = np.asarray(theta, dtype=float) / np.asarray(units, dtype=float)
-        scale = np.zeros(len(names))
-        for k, n in enumerate(names):
-            if n == "sigma_p":
-                scale[k] = u[k]
-            elif n.startswith("sigma_"):
-                scale[k] = -u[k]
-        return {"scale_direction": scale}
+                **({"draws": {"antithetic": "every taste dimension"}} if self.antithetic_taste else {})}
 
     def gate_profiles(self) -> list[tuple[str, str, dict[str, Any]]]:
         """The sigma_p ray profile (section 3): lambda in {0.5, 1, 2} times the start spreads, sigma_p in {1.5, ..,
@@ -1250,8 +1082,7 @@ class GMYSpec:
         model, theta = problem.model, np.asarray(result.theta, dtype=float)
         ev = result.evaluation
         delta = np.asarray(ev.aux["delta"], dtype=float)
-        post = pp.postestimation(model, theta, delta, firm_ids=self.firm_column, groups=self.groups,
-                                 group_other=self.group_other)
+        post = self.postestimation(model, theta, delta)
         pr = post["products"]
         mids = np.asarray(pr["market_ids"]).astype(int)
         ok_mk = {int(m["market_id"]) for m in post["markets"] if m["nash_status"] == "ok"}
@@ -1268,7 +1099,7 @@ class GMYSpec:
         out["own_elasticity_median_by_year"] = {int(y): float(np.nanmedian(own[mids == y])) for y in self.years}
         out["own_elasticity_mean_by_year"] = {int(y): float(np.nanmean(own[mids == y])) for y in self.years}
         out["own_elasticity_trimmed_mean_by_year"] = {int(y): trimmed_mean(own[mids == y]) for y in self.years}
-        out["near_twins_by_year"] = near_twins(self.products)
+        out["near_twins_by_year"] = comparison.near_twins(self.products, NEAR_TWIN_GAP, "veh_type", "prices_data")
         out["lerner_median_by_year"] = {int(y): float(np.nanmedian(margin[mids == y])) for y in self.years
                                         if y in ok_mk}
         out["nash_singular_markets"] = [int(m) for m in post["nash_singular"]]
@@ -1279,9 +1110,7 @@ class GMYSpec:
         out["margin_median_sales_weighted"] = comparison.weighted_median(
             margin[ok], self.products.quantity.to_numpy(float)[ok]) if ok_mk else float("nan")
         out["table5"] = self.quintile_elasticities(model, theta, delta)
-        out["diversion_by_vehicle_type"] = {
-            str(g): {**{str(h): float(post["group_matrix"][a, b]) for b, h in enumerate(post["group_names"])},
-                     "outside": float(post["group_matrix"][a, -1])} for a, g in enumerate(post["group_names"])}
+        out["diversion_by_vehicle_type"] = pp.group_diversion_table(post)
         out["diversion_to_own_type"] = {str(g): float(post["group_matrix"][a, a])
                                         for a, g in enumerate(post["group_names"])}
         cs = {}
@@ -1319,71 +1148,17 @@ class GMYSpec:
         """Table 5 by ``estimate_blp.py``'s definition: quintile demand s_jq = sum_{i in q} w_i s_ij, e_jq = (p_j /
         s_jq) d s_jq / d p_j, mean (and median) over the products with s_jq > 0 (in the PCM a product can have no buyer
         in a quintile; the count is reported), for 1980 and 2018 when present."""
-        k = model._k
-        th, ph, sp = model.kernel_params(theta)
-        kw = model.kernel_kwargs(theta)
-        out: dict[int, dict[str, Any]] = {}
-        for t, m in enumerate(model.markets):
-            y = int(m.market_id)
-            if y not in TABLE5_YEARS:
-                continue
-            km = model.kernel_market(t)
-            md = model.market_draws(t)
-            quint = self.agents.inc_quintile.to_numpy()[np.asarray(md["agent_rows"])][md["agent_of_draw"]]
-            row, med, trim, zeros = [], [], [], []
-            for q in range(1, 6):
-                w = np.asarray(km.weights) * (quint == q)
-                sub = k.Market(np.asarray(km.x), np.asarray(km.p), w, np.asarray(km.taste_basis), list(km.taste_col),
-                               np.asarray(km.scale_basis))
-                r = k.evaluate_market(delta[np.asarray(m.rows)], sub, th, ph, sp, derivatives=False,
-                                      price_derivatives=True, n_threads=model.total_threads, **kw)
-                s = np.asarray(r["s"])
-                pos = s > 0
-                e = np.asarray(km.p)[pos] / s[pos] * np.diag(np.asarray(r["ds_dp"]))[pos]
-                row.append(float(e.mean()))
-                med.append(float(np.median(e)))
-                trim.append(trimmed_mean(e))
-                zeros.append(int((~pos).sum()))
-            out[y] = {"mean_over_products": row, "median_over_products": med, "trimmed_mean_over_products": trim,
-                      "products_without_buyers": zeros}
-        return out
-
-    def identification_summary(self, problem: Any, result: Any) -> dict[str, Any]:
-        """The weak-identification plan of WP-G2 item 4 at an estimate: (b) the Cragg-Donald-style statistic on the
-        aggregate rows of G alone and on all rows, (c) the aggregate block's q (Sargan J at step 2), (d) for each
-        parameter the shares of ||W^1/2 G_k||^2 by block (which block pins which parameter)."""
-        from nfp_harness.diagnostics.identification import block_shares, weak_identification_block
-
-        ev = result.evaluation
-        out: dict[str, Any] = {}
-        if ev is None or ev.G is None:
-            return out
-        W = np.asarray(result.W if result.W is not None else problem.W, dtype=float)
-        free = [k for k, s in enumerate(problem.layout.specs) if s.free]
-        names = [problem.layout.names[k] for k in free]
-        G = ev.G[:, free]
-        out["block_shares"] = block_shares(G, W, ev.blocks, names)
-        units = np.asarray(problem.layout.units(), dtype=float)[free]
-        try:
-            S = problem.covariance(ev)
-            for tag, rows in (("all", slice(0, ev.g.size)),) + tuple(
-                    (f"block:{b}", s) for b, s in ev.blocks.items()):
-                blk = weak_identification_block(G[rows], S[rows, rows], problem.n, units=units)
-                out[f"cragg_donald:{tag}"] = {k: blk.values.get(k) for k in ("statistic", "dof", "critical_95",
-                                                                            "verdict")}
-        except Exception as exc:  # noqa: BLE001 - reported, not fatal for post
-            out["cragg_donald_error"] = f"{type(exc).__name__}: {exc}"
-        out["q_aggregate"] = float((ev.aux.get("q_blocks") or {}).get("aggregate", float("nan")))
-        return out
+        return pp.elasticities_by_agent_group(model, theta, delta, self.agents.inc_quintile.to_numpy(), range(1, 6),
+                                              TABLE5_YEARS, trimmed_mean)
 
     def post(self, pipe: Any, problem: Any, result: Any, out: pathlib.Path) -> dict[str, Any]:
         summ = self.summary(problem, result)
-        summ["identification"] = self.identification_summary(problem, result)
+        summ["identification"] = identification_summary(problem, result)
         inst = {"set": self.instruments, "excluded": self.Z_names[self.X1.shape[1]:], "rank_Z": int(self.Z.shape[1]),
                 "rank_X1": int(self.X1.shape[1]), "first_stage": first_stage_table(self.products, self.X1)}
         (out / "instruments.json").write_text(json.dumps(inst, indent=1))
         summ["instruments"] = inst
-        blp = {label: json.loads(f.read_text()) for label, f in BLP_SUMMARIES.items() if f.exists()}
+        blp = comparison.load_summaries(BLP_SUMMARIES)
         table = comparison_table({"PCM a_lo %g" % self.a_lo: summ}, blp, PAPER)
         (out / "comparison.txt").write_text(table + "\n")
         pipeline.log.info("comparison with GMY's BLP:\n%s", table)
@@ -1398,10 +1173,10 @@ class GMYSpec:
         row: dict[str, Any] = {k: s[k] for k in ("own_elasticity_median", "own_elasticity_trimmed_mean", "margin_median",
                                                   "own_elasticity_times_window_width", "second_choice_rmse")
                                if k in s}
-        row["at_bound"] = ";".join(s["at_bound"])
-        row.update({f"q:{b}": v for b, v in s["q_blocks"].items()})
+        est = pipeline.estimate_columns(problem, result)
+        row.update({k: v for k, v in est.items() if not k.startswith("theta:")})
         row.update({f"lerner_median_{y}": v for y, v in s["lerner_median_by_year"].items()})
-        row.update({f"theta:{n}": v for n, v in s["theta"].items()})
+        row.update({k: v for k, v in est.items() if k.startswith("theta:")})
         return row
 
     a_lo_band_row = band_row
@@ -1529,44 +1304,6 @@ def comparison_table(pcm: Mapping[str, Mapping[str, Any]], blp: Mapping[str, Map
     return "\n".join(lines)
 
 
-def stage_theta(path: str | pathlib.Path, names: Sequence[str]) -> dict[str, float]:
-    """{parameter name: value} of a stored stage's theta, named by its run's history.csv (``stage_parameter_names``);
-    a stage without names is read positionally against ``names``, which then must have its length."""
-    th = np.asarray(read_stage_file(path)["theta"], dtype=float)
-    src = stage_parameter_names(path)
-    if src is None or len(src) != th.size:
-        if th.size != len(names):
-            raise ValueError(f"{path}: {th.size} parameters without names, this layout has {len(names)}")
-        src = list(names)
-    return dict(zip(src, map(float, th)))
-
-
-def trimmed_mean(v: np.ndarray, trim: tuple[float, float] = TRIM) -> float:
-    """Mean of the finite values between the ``trim`` quantiles (5% and 95% by default): the own-elasticity tail of
-    near-twin products is a draw artefact (GMY_ROUND1 section 4), the trimmed mean is not."""
-    v = np.asarray(v, dtype=float)
-    v = v[np.isfinite(v)]
-    if not v.size:
-        return float("nan")
-    lo, hi = np.quantile(v, trim)
-    return float(v[(v >= lo) & (v <= hi)].mean())
-
-
-def near_twins(products: pd.DataFrame, gap: float = NEAR_TWIN_GAP) -> dict[int, int]:
-    """Per year, the products whose data price is within ``gap`` ($100) of another product of the same vehicle type."""
-    out = {}
-    for y, g in products.groupby("market_ids"):
-        n = 0
-        for _, h in g.groupby("veh_type"):
-            p = np.sort(h.prices_data.to_numpy(float))
-            if p.size > 1:
-                d = np.diff(p)
-                near = np.minimum(np.r_[np.inf, d], np.r_[d, np.inf]) < gap
-                n += int(near.sum())
-        out[int(y)] = n
-    return out
-
-
 def blp_sums(p: pd.DataFrame) -> np.ndarray:
     """BLP sums of the style and segment dummies and of the three continuous characteristics over the firm's other
     products and over rivals (market = year, firm = parent), (n, 18)."""
@@ -1618,19 +1355,9 @@ def evaluate(args: argparse.Namespace) -> None:
     t0 = time.time()
     ev = prob.evaluate(theta, need_jacobian=False)
     wall = time.time() - t0
-    sol = ev.aux["solution"]
-    delta = np.asarray(sol.delta)
+    delta = np.asarray(ev.aux["solution"].delta)
     W = np.eye(ev.g.size)
-    per = []
-    for m, pm in zip(model.markets, sol.per_market):
-        rows = np.asarray(m.rows)
-        s_model = np.asarray(sol.outputs["shares"])[rows]
-        s_data = spec.products.shares.to_numpy(float)[rows]
-        pm = dict(pm)
-        pm["max_rel_share_error"] = float(np.max(np.abs(s_model / s_data - 1))) if np.all(np.isfinite(s_model)) \
-            else float("nan")
-        pm["products_inverted"] = int(np.sum(np.isfinite(np.asarray(delta)[rows])))
-        per.append(pm)
+    per = pipeline.evaluation_record(prob, ev, spec.products.shares.to_numpy(float))
     anatomy = pp.window_anatomy(model, theta, delta, n_threads=args.threads) if ev.status.value == "ok" else {}
     micro_rows = []
     if ev.ok and "micro_gmy" in ev.aux.get("micro_predicted", {}):

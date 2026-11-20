@@ -21,6 +21,9 @@ __all__ = [
     "order_condition_block",
     "sqrt_psd",
     "block_shares",
+    "scale_direction",
+    "proportional_direction",
+    "identification_summary",
 ]
 
 IDENTIFICATION_DEFAULTS: dict[str, float] = {
@@ -282,4 +285,52 @@ def block_shares(G: np.ndarray, W: np.ndarray, blocks: Mapping[str, slice],
     out: dict[str, dict[str, float]] = {}
     for k, nm in enumerate(names):
         out[nm] = {b: (float(np.sum(A[s, k] ** 2) / tot[k]) if tot[k] > 0 else float("nan")) for b, s in blocks.items()}
+    return out
+
+
+def scale_direction(names: Sequence[str], theta: np.ndarray, units: np.ndarray) -> np.ndarray:
+    """The utility-scale direction in natural units at theta (DESIGN 5.2, LEARNINGS 1): sigma_p up and every taste
+    spread (a parameter named ``sigma_<column>``) down in proportion."""
+    u = np.asarray(theta, dtype=float) / np.asarray(units, dtype=float)
+    out = np.zeros(len(names))
+    for k, n in enumerate(names):
+        if n == "sigma_p":
+            out[k] = u[k]
+        elif n.startswith("sigma_"):
+            out[k] = -u[k]
+    return out
+
+
+def proportional_direction(names: Sequence[str], theta: np.ndarray, units: np.ndarray,
+                           members: Sequence[str]) -> np.ndarray:
+    """The direction in natural units at theta along which the parameters ``members`` move up in proportion."""
+    u = np.asarray(theta, dtype=float) / np.asarray(units, dtype=float)
+    members = set(members)
+    return np.array([u[k] if n in members else 0.0 for k, n in enumerate(names)])
+
+
+def identification_summary(problem: Any, result: Any) -> dict[str, Any]:
+    """Weak identification at an estimate: the Cragg-Donald-style statistic (``weak_identification_block``) on all
+    rows of G and on each moment block, the aggregate block's q (Sargan J at step 2), and for each free parameter the
+    shares of ||W^1/2 G_k||^2 by block (``block_shares``: which block pins which parameter)."""
+    ev = result.evaluation
+    out: dict[str, Any] = {}
+    if ev is None or ev.G is None:
+        return out
+    W = np.asarray(result.W if result.W is not None else problem.W, dtype=float)
+    free = [k for k, s in enumerate(problem.layout.specs) if s.free]
+    names = [problem.layout.names[k] for k in free]
+    G = ev.G[:, free]
+    out["block_shares"] = block_shares(G, W, ev.blocks, names)
+    units = np.asarray(problem.layout.units(), dtype=float)[free]
+    try:
+        S = problem.covariance(ev)
+        for tag, rows in (("all", slice(0, ev.g.size)),) + tuple(
+                (f"block:{b}", s) for b, s in ev.blocks.items()):
+            blk = weak_identification_block(G[rows], S[rows, rows], problem.n, units=units)
+            out[f"cragg_donald:{tag}"] = {k: blk.values.get(k) for k in ("statistic", "dof", "critical_95",
+                                                                        "verdict")}
+    except Exception as exc:  # noqa: BLE001 - reported, not fatal for post
+        out["cragg_donald_error"] = f"{type(exc).__name__}: {exc}"
+    out["q_aggregate"] = float((ev.aux.get("q_blocks") or {}).get("aggregate", float("nan")))
     return out

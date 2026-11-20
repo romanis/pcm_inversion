@@ -21,7 +21,7 @@ import numpy as np
 from .models.pcm_post import cs_by_group, diversion, elasticities, group_diversion, nonzero_cross
 
 __all__ = ["market_quantities", "products_from_markets", "summarise", "cs_gain_by_group", "scalar_items", "weighted_median",
-           "format_cell", "year_entry"]
+           "format_cell", "year_entry", "trimmed_mean", "near_twins", "load_summaries"]
 
 
 def market_quantities(s: np.ndarray, ds_dp: np.ndarray, p: np.ndarray, labels: np.ndarray,
@@ -164,3 +164,38 @@ def year_entry(d: Mapping[Any, Any] | None, y: int) -> Any:
     if not d:
         return None
     return d.get(y, d.get(str(y)))
+
+
+def trimmed_mean(v: np.ndarray, trim: tuple[float, float] = (0.05, 0.95)) -> float:
+    """Mean of the finite values between the ``trim`` quantiles (5% and 95% by default): an own-elasticity tail of
+    near-twin products is a draw artefact, the trimmed mean is not."""
+    v = np.asarray(v, dtype=float)
+    v = v[np.isfinite(v)]
+    if not v.size:
+        return float("nan")
+    lo, hi = np.quantile(v, trim)
+    return float(v[(v >= lo) & (v <= hi)].mean())
+
+
+def near_twins(products: Any, gap: float, group: str, price: str = "prices",
+               market: str = "market_ids") -> dict[int, int]:
+    """Per market, the products whose ``price`` is within ``gap`` of another product of the same ``group``."""
+    out = {}
+    for y, g in products.groupby(market):
+        n = 0
+        for _, h in g.groupby(group):
+            p = np.sort(h[price].to_numpy(float))
+            if p.size > 1:
+                d = np.diff(p)
+                near = np.minimum(np.r_[np.inf, d], np.r_[d, np.inf]) < gap
+                n += int(near.sum())
+        out[int(y)] = n
+    return out
+
+
+def load_summaries(files: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """{label: the JSON summary at path} for each ``files`` entry whose file exists (reference estimates, e.g. BLP)."""
+    import json
+    import pathlib
+
+    return {label: json.loads(pathlib.Path(f).read_text()) for label, f in files.items() if pathlib.Path(f).exists()}

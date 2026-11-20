@@ -39,6 +39,7 @@ __all__ = [
     "RunDirectory",
     "read_stage_file",
     "stage_parameter_names",
+    "stage_theta",
     "SpecMismatchError",
     "atomic_write",
     "hash_options",
@@ -239,6 +240,19 @@ def stage_parameter_names(path: str | pathlib.Path) -> list[str] | None:
         header = next(csv.reader(fh), [])
     names = [c[len("theta_"):] for c in header if c.startswith("theta_")]
     return names or None
+
+
+def stage_theta(path: str | pathlib.Path, names: Sequence[str]) -> dict[str, float]:
+    """stage_theta(path, names) -> {parameter name: value} of a stored stage's theta, named by its run's history.csv
+    (``stage_parameter_names``); a stage without names is read positionally against ``names``, which then must have
+    its length."""
+    th = np.asarray(read_stage_file(path)["theta"], dtype=float)
+    src = stage_parameter_names(path)
+    if src is None or len(src) != th.size:
+        if th.size != len(names):
+            raise ValueError(f"{path}: {th.size} parameters without names, this layout has {len(names)}")
+        src = list(names)
+    return dict(zip(src, map(float, th)))
 
 
 def _utc_now() -> str:
