@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 #include <Eigen/Dense>
-#include "pcm_demand.hpp"
+#include "pcm_aggregate.hpp"
 
 /**
  * Estimation harness kernel: frontier lift, inversion and derivatives of one market in one call
@@ -42,10 +42,10 @@ struct SolveOptions {
     unsigned cold_draws = 0;
     int cold_draw_factor = 8;                             //!< thinning factor between the levels (at least 2)
     /**
-     * Optional team size that another thread may change during the call (pcm_demand::ThreadBudget): read before
+     * Optional team size that another thread may change during the call (pcm_aggregate::ThreadBudget): read before
      * every share evaluation, so it overrides n_threads from then on. Results are the same for every value.
      */
-    pcm_demand::ThreadBudget * thread_budget = nullptr;
+    pcm_aggregate::ThreadBudget * thread_budget = nullptr;
 };
 
 struct SolveResult {
@@ -62,7 +62,7 @@ struct SolveResult {
 
 /**
  * Inverts one market and returns shares, derivatives and micro parts at the converged delta.
- * P = M + Q + 1 in the column order of pcm_demand::Shares::d_theta: taste, scale, sigma_p.
+ * P = M + Q + 1 in the column order of pcm_aggregate::Shares::d_theta: taste, scale, sigma_p.
  *
  * Stages: warm (from delta_warm at prm), theta path (from prm_warm to prm, only if the warm stage
  * failed), draws (the draw homotopy, only with opt.cold_draws > 0 and no converged stage yet), cold
@@ -78,9 +78,9 @@ struct SolveResult {
  *                   kind): the theta path then moves the bound too, a continuation in a_lo from a solved a_lo
  * @param micro      nullptr: no micro parts
  */
-SolveResult solve_market(const Eigen::ArrayXd & s_data, const pcm_demand::Market & mk,
-                         const pcm_demand::Params & prm, const Eigen::ArrayXd & delta_warm,
-                         const pcm_demand::Params * prm_warm, const MicroRequest * micro,
+SolveResult solve_market(const Eigen::ArrayXd & s_data, const pcm_aggregate::Market & mk,
+                         const pcm_aggregate::Params & prm, const Eigen::ArrayXd & delta_warm,
+                         const pcm_aggregate::Params * prm_warm, const MicroRequest * micro,
                          const SolveOptions & opt);
 
 /** Shares, derivatives and micro parts at a given delta (no inversion). */
@@ -93,15 +93,15 @@ struct MarketEvaluation {
 
 /**
  * One pass over the draws at a fixed delta: the draw loop solve_market uses after the inversion.
- * s, ds_ddelta, ds_dtheta and ds_dp equal pcm_demand::shares up to summation order within a draw.
+ * s, ds_ddelta, ds_dtheta and ds_dp equal pcm_aggregate::shares up to summation order within a draw.
  * Fixed blocks of 64 draws summed in block order, so results are bit-identical for every thread
  * count. Uses the calling thread's OpenMP team size. Throws std::invalid_argument on bad input.
  */
-MarketEvaluation evaluate_market(const Eigen::ArrayXd & delta, const pcm_demand::Market & mk,
-                                 const pcm_demand::Params & prm, const MicroRequest * micro,
+MarketEvaluation evaluate_market(const Eigen::ArrayXd & delta, const pcm_aggregate::Market & mk,
+                                 const pcm_aggregate::Params & prm, const MicroRequest * micro,
                                  bool derivatives, bool price_derivatives);
 
-/** Per-draw window anatomy (pcm_demand::detail::DrawAnatomy), (R,) arrays. */
+/** Per-draw window anatomy (pcm_geometry::DrawAnatomy), (R,) arrays. */
 struct FrontierAnatomy {
     Eigen::ArrayXi frontier_size;      //!< products with a window of positive mass
     Eigen::ArrayXd mass;               //!< the draw's inside share
@@ -114,8 +114,8 @@ struct FrontierAnatomy {
  * own elasticity about (p / hull gap) / (window width in log alpha). Uses the calling thread's OpenMP team
  * size. Throws std::invalid_argument on bad input.
  */
-FrontierAnatomy frontier_anatomy(const Eigen::ArrayXd & delta, const pcm_demand::Market & mk,
-                                 const pcm_demand::Params & prm);
+FrontierAnatomy frontier_anatomy(const Eigen::ArrayXd & delta, const pcm_aggregate::Market & mk,
+                                 const pcm_aggregate::Params & prm);
 
 }  // namespace pcm_kernel
 

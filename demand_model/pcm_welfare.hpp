@@ -2,7 +2,7 @@
 #define __PCM_WELFARE_HPP__
 
 #include <Eigen/Dense>
-#include "pcm_demand.hpp"
+#include "pcm_aggregate.hpp"
 
 /**
  * Consumer surplus of the exact pure characteristics model by the frontier formula
@@ -15,7 +15,7 @@
  *     CS_i = sum_k [ q_k E(1/a; e_{k+1} < a < e_k) - p_k P(e_{k+1} < a < e_k) ],
  *     E(1/a; lo < a < hi) = exp(s^2/2) [Phi((ln hi + s^2)/s) - Phi((ln lo + s^2)/s)].
  * The utility scale cancels (LEARNINGS 11), so CS is invariant to (delta, theta, c) -> kappa (...).
- * With a bound lo > 0 (pcm_demand::Params), a_i is truncated below at a_lo,i = draw_a_lo(prm, c_i) (lo / c_i
+ * With a bound lo > 0 (pcm_aggregate::Params), a_i is truncated below at a_lo,i = draw_a_lo(prm, c_i) (lo / c_i
  * for BoundKind::ALPHA, lo for A): P and E become the truncated F_T and E_T(1/a) of the window ends clipped at
  * a_lo,i, so the last window ends at a_lo,i and CS_i <= max_k q_k / a_lo,i - p_k (LEARNINGS 29). Under ALPHA
  * the bound scales with the utility, so the invariance holds with lo -> kappa lo; under A it holds with
@@ -33,8 +33,8 @@ struct Surplus {
  * Prices must be positive and strictly increasing, sigma_p > 0; dimension mismatches throw
  * std::invalid_argument. The result is bit-identical for every n_threads.
  */
-Surplus consumer_surplus(const Eigen::ArrayXd & delta, const pcm_demand::Market & mk,
-                         const pcm_demand::Params & prm, int n_threads);
+Surplus consumer_surplus(const Eigen::ArrayXd & delta, const pcm_aggregate::Market & mk,
+                         const pcm_aggregate::Params & prm, int n_threads);
 
 }  // namespace pcm_welfare
 

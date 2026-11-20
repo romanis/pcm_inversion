@@ -13,10 +13,10 @@ void bind_groups(py::module_ & m) {
           [](const Eigen::ArrayXd & delta, const py::object & market, const Eigen::ArrayXd & theta,
              const Eigen::ArrayXd & phi, double sigma_p, const Eigen::ArrayXi & group_of_draw, int n_groups,
              const Eigen::MatrixXd & U, bool derivatives, int n_threads, double alpha_lo, double a_lo) {
-              if (!py::isinstance<pcm_demand::Market>(market))
+              if (!py::isinstance<pcm_aggregate::Market>(market))
                   throw py::type_error("group_sums: market must be a pcm_kernel.Market");
-              const pcm_demand::Market mk = market.cast<pcm_demand::Market>();
-              const pcm_demand::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "group_sums");
+              const pcm_aggregate::Market mk = market.cast<pcm_aggregate::Market>();
+              const pcm_aggregate::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "group_sums");
               if (n_threads < 1) throw py::value_error("group_sums: n_threads must be at least 1");
               pcm_kernel::GroupRequest gr;
               gr.group_of_draw = group_of_draw;

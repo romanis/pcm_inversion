@@ -1,12 +1,16 @@
-#ifndef __PCM_DEMAND_HPP__
-#define __PCM_DEMAND_HPP__
+#ifndef __PCM_AGGREGATE_HPP__
+#define __PCM_AGGREGATE_HPP__
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <vector>
+#include <omp.h>
 #include <Eigen/Dense>
 
 /**
- * Pure characteristics demand with observed demographics, for one market.
+ * Layer 1 of the PCM kernel: integration of per-draw functionals over the draws of one market
+ * (docs/estimation_harness/DESIGN.md 3.0). The model:
  *
  * Consumer i (a draw with weight w_i) gets utility from product j
  *     u_ij = delta_j + x_j . t_i - c_i * a_i * p_j,     u_i0 = 0,
@@ -21,12 +25,13 @@
  *   log c_i (price-sensitivity scale) = sum_q phi_q * scale_basis(i, q)
  * Dividing utility by c_i gives a pure vertical model in "dollar" qualities
  *     delta_cond_ij = (delta_j + x_j . t_i) / c_i
- * which is what pcm_share::cond_share already solves.
+ * which is what pcm_geometry::cond_share solves for one draw (layer 0).
  *
  * The caller builds t_i and log c_i from its own parameters; this module only needs the
- * bases to return derivatives with respect to every parameter.
+ * bases to return derivatives with respect to every parameter. It knows draws, weights and the
+ * block reduction; it does not know data shares, inversion or moments.
  */
-namespace pcm_demand {
+namespace pcm_aggregate {
 
 struct Market {
     Eigen::MatrixXd x;               //!< N x K product characteristics
@@ -63,8 +68,8 @@ inline const char * bound_kind_name(BoundKind k) { return k == BoundKind::A ? "a
 
 /**
  * A team size another thread may change while a call runs: the calling thread installs it with
- * ThreadBudgetScope, and shares() and frontier_lift() (and the kernel's draw loops) set the calling
- * thread's OpenMP team size from it at their start. A market that finishes can so hand its threads to
+ * ThreadBudgetScope, and for_each_draw_block (so shares(), frontier_lift() and evaluate_market) sets the
+ * calling thread's OpenMP team size from it at its start. A market that finishes can so hand its threads to
  * the markets still running, between two share evaluations of theirs. Results do not depend on it:
  * every draw loop sums fixed 64-draw blocks in block order.
  */
@@ -97,33 +102,6 @@ struct Shares {
  */
 Shares shares(const Eigen::ArrayXd & delta, const Market & m, const Params & prm, bool with_derivatives);
 
-struct InversionResult {
-    Eigen::ArrayXd delta;
-    double max_abs_residual;
-    unsigned iterations;
-    unsigned share_evaluations;
-    bool converged;
-};
-
-/**
- * Finds delta with shares(delta) == s_data by Newton with an Armijo line search on
- * 0.5*||s - s_data||^2, kept inside the region where every share is positive and the
- * inside shares sum below one; Levenberg-Marquardt damping when Newton gives no descent.
- * @param delta0 starting point; ignored (replaced by the vertical-model guess) if empty or infeasible
- */
-InversionResult invert(const Eigen::ArrayXd & s_data, const Market & m, const Params & prm,
-                       const Eigen::ArrayXd & delta0, double tol = 1e-12,
-                       unsigned max_share_evaluations = 5000);
-
-/**
- * Per-draw building blocks, exposed for the estimation harness kernel (pcm_kernel.cpp).
- * Not part of the stable interface of this module.
- */
-namespace detail {
-
-// The vertical model of one draw (shares and derivatives, with the bound) is pcm_share::cond_share in
-// market_share/pcm_market_share.hpp, the one implementation every kernel function uses.
-
 /**
  * For every product, the smallest increase in delta_j that puts it on at least one consumer's
  * frontier with a window of positive mass (zero for products already there, +inf if none is
@@ -132,29 +110,70 @@ namespace detail {
  */
 Eigen::ArrayXd frontier_lift(const Eigen::ArrayXd & delta, const Market & mk, const Params & prm);
 
-/**
- * The vertical-model starting point at prm.sigma_p and prm.lo (c = 1, no taste heterogeneity, where both
- * bound kinds coincide), which inverts the shares exactly in that model: F_T(e_k) = sum_{j >= k} s_j.
- * lo = 0 is pcm_share::initial_guess.
- */
-Eigen::ArrayXd initial_guess(const Eigen::ArrayXd & s_data, const Eigen::ArrayXd & p, const Params & prm);
+/** Draws per block of every draw loop. Part of the numerical contract: it fixes the summation order. */
+constexpr int DRAW_BLOCK = 64;
 
-/** Window anatomy of one draw's frontier (LEARNINGS 32). */
-struct DrawAnatomy {
-    int frontier_size = 0;           //!< products with a window of positive mass
-    double mass = 0.0;               //!< sum of those windows' masses (the draw's inside share)
-    double log_range = 0.0;          //!< log(e_0 / a_lo), e_0 the cutoff of the cheapest frontier product; 0 if mass = 0
-    double mass_log_width = 0.0;     //!< sum_k m_k log(e_k / max(e_{k+1}, a_lo)) over positive-mass windows
+/** The fixed partition of R draws into n = ceil(R / 64) blocks (at least one): block b holds draws
+ *  [begin(b), end(b)), begin(b) = floor(R b / n). It does not depend on the thread count. */
+struct DrawBlocks {
+    int R, n;
+    explicit DrawBlocks(int R_) : R(R_), n(std::max(1, (R_ + DRAW_BLOCK - 1) / DRAW_BLOCK)) {}
+    int begin(int b) const { return static_cast<int>((static_cast<long>(R) * b) / n); }
+    int end(int b) const { return begin(b + 1); }
+};
+
+/** How a draw loop runs. */
+struct DrawLoop {
+    int first = 0;       //!< the loop covers draws [first, first + R)
+    /** > 0: OpenMP team of that size; 0: the calling thread's team after its ThreadBudget (apply_thread_budget);
+     *  < 0: serial, for a loop that already runs inside a parallel region. */
+    int n_threads = 0;
+    int wave = 0;        //!< > 0: at most this many block accumulators held at once (memory); 0: all blocks
 };
 
 /**
- * Anatomy of the vertical model of one draw in conditional qualities d, prices p, LogNormal(0, sigma)
- * truncated below at a_lo. Without a bound (a_lo <= 0) the range and the cheapest window are infinite.
+ * The one draw loop of the kernel. Splits draws [first, first + R) into DrawBlocks(R), runs
+ * body(acc, i0, i1) for every block in parallel (dynamic schedule, one accumulator per block, which body
+ * initialises), then calls reduce(acc) serially in block order. Results are therefore bit-identical for every
+ * thread count. Per-draw outputs written by index need no reduce: pass a no-op.
  */
-DrawAnatomy draw_anatomy(const Eigen::ArrayXd & d, const Eigen::ArrayXd & p, double sigma, double a_lo);
+template <class Acc, class Body, class Reduce>
+void for_each_draw_block(int R, Body && body, Reduce && reduce, const DrawLoop & loop = DrawLoop())
+{
+    const DrawBlocks blocks(R);
+    if (loop.n_threads == 0) apply_thread_budget();
+    const int team = loop.n_threads > 0 ? loop.n_threads : omp_get_max_threads();
+    const int held = loop.wave > 0 ? std::min(blocks.n, loop.wave) : blocks.n;
+    std::vector<Acc> part(held);
+    for (int w0 = 0; w0 < blocks.n; w0 += held) {
+        const int w1 = std::min(blocks.n, w0 + held);
+#pragma omp parallel for schedule(dynamic) num_threads(team) if(loop.n_threads >= 0 && w1 - w0 > 1)
+        for (int b = w0; b < w1; ++b)
+            body(part[b - w0], loop.first + blocks.begin(b), loop.first + blocks.end(b));
+        for (int b = w0; b < w1; ++b) reduce(part[b - w0]);
+    }
+}
 
-}  // namespace detail
+/** No accumulator: for draw loops that write per-draw outputs by index. */
+struct NoAcc {};
 
-}  // namespace pcm_demand
+/**
+ * Draw i's conditional qualities dc = (delta + x t_i) / c_i and price scale c_i = exp(phi . scale_basis_i), with
+ * t_i = sum_m theta_m taste_basis(i, m) on column taste_col[m] (``t`` is scratch of size K). Returns c_i.
+ */
+inline double conditional_quality(const Eigen::ArrayXd & delta, const Market & mk, const Params & prm, int i,
+                                  Eigen::VectorXd & t, Eigen::ArrayXd & dc)
+{
+    const int M = static_cast<int>(prm.theta.size());
+    const int Q = static_cast<int>(prm.phi.size());
+    t.setZero();
+    for (int m = 0; m < M; ++m) t[mk.taste_col[m]] += prm.theta[m] * mk.taste_basis(i, m);
+    const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
+    const double c = std::exp(log_c);
+    dc = (delta + (mk.x * t).array()) / c;
+    return c;
+}
+
+}  // namespace pcm_aggregate
 
 #endif

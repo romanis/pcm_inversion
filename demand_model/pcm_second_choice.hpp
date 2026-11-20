@@ -3,13 +3,13 @@
 
 #include <vector>
 #include <Eigen/Dense>
-#include "pcm_demand.hpp"
+#include "pcm_aggregate.hpp"
 
 /**
  * Exact second choices of the pure characteristics model (GMY spec WP-G6).
  *
  * For draw i (conditional qualities d = (delta + x t_i) / c_i, price sensitivity a ~ LogNormal(0, sigma_p) truncated at
- * a_lo,i) the first choice is the frontier product whose window holds a (pcm_share::cond_share). Removing the first
+ * a_lo,i) the first choice is the frontier product whose window holds a (pcm_geometry::cond_share). Removing the first
  * choice j = f_r changes the frontier only between its neighbours L = f_{r-1} (the origin for the cheapest) and
  * R = f_{r+1} (none for the dearest): the reduced chain L, g_1..g_q, R is the upper hull of L, the products priced
  * between them, and R (without R, the increasing hull of the products dearer than L). For a in j's window the second
@@ -41,7 +41,7 @@ struct SecondChoice {
  * processed in blocks of 64 whose partial sums are added in block order, so results do not depend on the thread
  * count. Uses the calling thread's OpenMP team size. Throws std::invalid_argument on bad input.
  */
-SecondChoice second_choice(const Eigen::ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm,
+SecondChoice second_choice(const Eigen::ArrayXd & delta, const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm,
                            const SecondChoiceAdjoint * adj);
 
 }  // namespace pcm_kernel

@@ -1,5 +1,6 @@
 #include "pcm_second_choice.hpp"
-#include "pcm_market_share.hpp"
+#include "pcm_aggregate.hpp"
+#include "pcm_geometry.hpp"
 
 #include <omp.h>
 #include <algorithm>
@@ -12,10 +13,10 @@
 using Eigen::ArrayXd;
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
-using pcm_share::detail::LnTerms;
-using pcm_share::detail::Trunc;
-using pcm_share::detail::ln_terms;
-using pcm_share::detail::make_trunc;
+using pcm_geometry::LnTerms;
+using pcm_geometry::Trunc;
+using pcm_geometry::ln_terms;
+using pcm_geometry::make_trunc;
 
 namespace pcm_kernel {
 
@@ -28,7 +29,7 @@ void require(bool ok, const std::string & what) {
     if (!ok) throw std::invalid_argument("second_choice: " + what);
 }
 
-void validate(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm,
+void validate(const ArrayXd & delta, const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm,
               const SecondChoiceAdjoint * adj) {
     const int N = static_cast<int>(delta.size());
     const int R = static_cast<int>(mk.weights.size());
@@ -76,7 +77,7 @@ struct Block {
 
 }  // namespace
 
-SecondChoice second_choice(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm,
+SecondChoice second_choice(const ArrayXd & delta, const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm,
                            const SecondChoiceAdjoint * adj)
 {
     const auto t0 = std::chrono::steady_clock::now();
@@ -88,7 +89,7 @@ SecondChoice second_choice(const ArrayXd & delta, const pcm_demand::Market & mk,
     const int Q = static_cast<int>(prm.phi.size());
     const int P = M + Q + 1;
     const int K = adj ? static_cast<int>(adj->A.size()) : 0;
-    const bool scale_bound = pcm_demand::bound_moves_with_scale(prm);   // log c acts through a_lo = lo / c
+    const bool scale_bound = pcm_aggregate::bound_moves_with_scale(prm);   // log c acts through a_lo = lo / c
     const double inf = std::numeric_limits<double>::infinity();
 
     // A'_c[j, k] for every c contiguous: Af[(j N + k) K + c]
@@ -100,20 +101,15 @@ SecondChoice second_choice(const ArrayXd & delta, const pcm_demand::Market & mk,
                 for (int j = 0; j < N; ++j) Af[(static_cast<size_t>(j) * N + k) * K + c] = adj->A[c](j, k);
     }
 
-    const int block = 64;
-    const int n_blocks = std::max(1, (R + block - 1) / block);
-    const int wave = std::min(n_blocks, 64);   // blocks held at once: memory wave x N^2
     SecondChoice out;
     out.s = ArrayXd::Zero(N);
     out.N = MatrixXd::Zero(N, N);
     if (adj) { out.out_delta = MatrixXd::Zero(K, N); out.out_theta = MatrixXd::Zero(K, P); }
-    std::vector<Block> part(wave);
 
-    for (int w0 = 0; w0 < n_blocks; w0 += wave) {
-        const int w1 = std::min(n_blocks, w0 + wave);
-#pragma omp parallel if(w1 - w0 > 1)
-        {
+    // 64 blocks held at once: memory 64 x N^2
+    pcm_aggregate::for_each_draw_block<Block>(R, [&](Block & acc, int i0, int i1) {
             VectorXd t(Kx);
+            ArrayXd dc(N);
             ArrayXd s_c = ArrayXd::Zero(N), dsig = ArrayXd::Zero(N), dlogc = ArrayXd::Zero(N);
             MatrixXd Jd;
             if (adj) Jd = MatrixXd::Zero(N, N);
@@ -126,28 +122,20 @@ SecondChoice second_choice(const ArrayXd & delta, const pcm_demand::Market & mk,
             std::vector<int> hull, V;
             std::vector<double> ec, mass;
             std::vector<Cut> c_hi, c_lo;
-#pragma omp for schedule(dynamic)
-            for (int b = w0; b < w1; ++b) {
-                Block & acc = part[b - w0];
+            {
                 acc.s = ArrayXd::Zero(N);
                 acc.N = MatrixXd::Zero(N, N);
                 acc.none = 0;
                 if (adj) { acc.od = MatrixXd::Zero(K, N); acc.ot = MatrixXd::Zero(K, P); }
-                const int i0 = static_cast<int>((static_cast<long>(R) * b) / n_blocks);
-                const int i1 = static_cast<int>((static_cast<long>(R) * (b + 1)) / n_blocks);
                 for (int i = i0; i < i1; ++i) {
-                    t.setZero();
-                    for (int m = 0; m < M; ++m) t[mk.taste_col[m]] += prm.theta[m] * mk.taste_basis(i, m);
-                    const double log_c = Q > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
-                    const double c = std::exp(log_c);
-                    const ArrayXd dc = (delta + (mk.x * t).array()) / c;
-                    const double a_lo = pcm_demand::draw_a_lo(prm, c);
-                    const std::vector<int> ind = index_positive_shares(dc, mk.p);
+                    const double c = pcm_aggregate::conditional_quality(delta, mk, prm, i, t, dc);
+                    const double a_lo = pcm_aggregate::draw_a_lo(prm, c);
+                    const std::vector<int> ind = pcm_geometry::index_positive_shares(dc, mk.p);
                     const int m = static_cast<int>(ind.size());
                     if (m == 0) continue;
                     s_c.setZero();
                     if (adj) { dsig.setZero(); if (scale_bound) dlogc.setZero(); }
-                    pcm_share::detail::vertical_share(ind, dc, mk.p, prm.sigma_p, a_lo, s_c, adj ? &Jd : nullptr,
+                    pcm_geometry::vertical_share(ind, dc, mk.p, prm.sigma_p, a_lo, s_c, adj ? &Jd : nullptr,
                                                       &dsig, nullptr, scale_bound ? &dlogc : nullptr, false);
                     const double w = mk.weights[i];
                     acc.s += w * s_c;
@@ -280,15 +268,12 @@ SecondChoice second_choice(const ArrayXd & delta, const pcm_demand::Market & mk,
                     }
                 }
             }
-        }
-        for (int b = w0; b < w1; ++b) {   // block order: results do not depend on the thread count
-            const Block & acc = part[b - w0];
-            out.s += acc.s;
-            out.N += acc.N;
-            out.draws_with_no_inside_second += acc.none;
-            if (adj) { out.out_delta += acc.od; out.out_theta += acc.ot; }
-        }
-    }
+    }, [&](const Block & acc) {   // block order: results do not depend on the thread count
+        out.s += acc.s;
+        out.N += acc.N;
+        out.draws_with_no_inside_second += acc.none;
+        if (adj) { out.out_delta += acc.od; out.out_theta += acc.ot; }
+    }, pcm_aggregate::DrawLoop{0, 0, 64});
     out.C = MatrixXd::Zero(N, N);
     for (int j = 0; j < N; ++j)
         if (out.s[j] > 0.0) out.C.row(j) = out.N.row(j) / out.s[j];

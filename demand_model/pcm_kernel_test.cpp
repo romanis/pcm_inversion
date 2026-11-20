@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
+#include "pcm_geometry.hpp"
 #include <cmath>
 #include <random>
 #include "pcm_kernel.hpp"
+#include "pcm_invert.hpp"
 #include "pcm_market_share.hpp"
 
 using Eigen::ArrayXd;
@@ -9,16 +11,15 @@ using Eigen::MatrixXd;
 using Eigen::VectorXd;
 using pcm_kernel::Status;
 
-// defined in pcm_market_share.cpp: indices of products on the vertical frontier
-std::vector<int> index_positive_shares(const ArrayXd & delta, const ArrayXd & p);
+using pcm_geometry::index_positive_shares;   // indices of products on the vertical frontier
 
 namespace {
 
-// The pcm_demand_test fixture: 12 products, characteristics [1, z1, z2], R draws of (nu x 3, two
+// The pcm_aggregate_test fixture: 12 products, characteristics [1, z1, z2], R draws of (nu x 3, two
 // demographics); 5 taste parameters (sigma on 3 columns, pi on columns 0 and 1), 2 scale parameters.
 struct Fixture {
-    pcm_demand::Market mk;
-    pcm_demand::Params prm;
+    pcm_aggregate::Market mk;
+    pcm_aggregate::Params prm;
     ArrayXd delta;
 };
 
@@ -75,8 +76,8 @@ pcm_kernel::MicroRequest make_micro(const Fixture & f, unsigned seed) {
     return mr;
 }
 
-pcm_demand::Params bump(const pcm_demand::Params & prm, int k, double h) {
-    pcm_demand::Params out = prm;
+pcm_aggregate::Params bump(const pcm_aggregate::Params & prm, int k, double h) {
+    pcm_aggregate::Params out = prm;
     const int M = prm.theta.size(), Q = prm.phi.size();
     if (k < M) out.theta[k] += h;
     else if (k < M + Q) out.phi[k - M] += h;
@@ -84,9 +85,9 @@ pcm_demand::Params bump(const pcm_demand::Params & prm, int k, double h) {
     return out;
 }
 
-// Every draw's frontier (products with positive conditional share), as in pcm_demand::shares.
-std::vector<std::vector<int>> frontiers(const ArrayXd & delta, const pcm_demand::Market & mk,
-                                        const pcm_demand::Params & prm) {
+// Every draw's frontier (products with positive conditional share), as in pcm_aggregate::shares.
+std::vector<std::vector<int>> frontiers(const ArrayXd & delta, const pcm_aggregate::Market & mk,
+                                        const pcm_aggregate::Params & prm) {
     const int R = mk.weights.size(), M = prm.theta.size(), Q = prm.phi.size();
     std::vector<std::vector<int>> out(R);
     for (int i = 0; i < R; ++i) {
@@ -117,15 +118,15 @@ bool same(const MatrixXd & a, const MatrixXd & b) {
 // 3.6 kernel test 1: without heterogeneity the vertical-model guess is the exact inverse.
 TEST(PcmKernel, NoHeterogeneityReturnsInitialGuess) {
     Fixture f = make_fixture(11);
-    pcm_demand::Market mk = f.mk;
+    pcm_aggregate::Market mk = f.mk;
     const int R = 1;
     mk.weights = ArrayXd::Ones(R);
     mk.taste_basis = MatrixXd(R, 0);
     mk.taste_col = {};
     mk.scale_basis = MatrixXd(R, 0);
-    pcm_demand::Params prm{ArrayXd(0), ArrayXd(0), 0.6};
+    pcm_aggregate::Params prm{ArrayXd(0), ArrayXd(0), 0.6};
     const ArrayXd delta = 2.0 * mk.p - 5.0 * mk.p.square();    // concave: every product on the frontier
-    const ArrayXd s_data = pcm_demand::shares(delta, mk, prm, false).s;
+    const ArrayXd s_data = pcm_aggregate::shares(delta, mk, prm, false).s;
     ASSERT_TRUE((s_data > 0).all() && s_data.sum() < 1.0);
     const ArrayXd guess = pcm_share::initial_guess(s_data, mk.p, prm.sigma_p);
 
@@ -151,7 +152,7 @@ TEST(PcmKernel, NoHeterogeneityReturnsInitialGuess) {
 // 3.6 kernel test 2: ddelta/dtheta against central finite differences of the inversion.
 TEST(PcmKernel, DdeltaDthetaMatchesFiniteDifferences) {
     Fixture f = make_fixture(2);
-    const ArrayXd s_data = pcm_demand::shares(f.delta, f.mk, f.prm, false).s;
+    const ArrayXd s_data = pcm_aggregate::shares(f.delta, f.mk, f.prm, false).s;
     ASSERT_TRUE((s_data > 0).all());
     pcm_kernel::SolveOptions opt;
     opt.tol = 1e-13;
@@ -159,8 +160,8 @@ TEST(PcmKernel, DdeltaDthetaMatchesFiniteDifferences) {
     ASSERT_EQ(r.status, Status::OK) << r.stages;
     EXPECT_LT((r.delta - f.delta).abs().maxCoeff(), 1e-9);
 
-    // same derivatives as pcm_demand::shares at the solution
-    auto sh = pcm_demand::shares(r.delta, f.mk, f.prm, true);
+    // same derivatives as pcm_aggregate::shares at the solution
+    auto sh = pcm_aggregate::shares(r.delta, f.mk, f.prm, true);
     EXPECT_EQ((r.s - sh.s).abs().maxCoeff(), 0.0);
     EXPECT_LT(rel_err(r.ds_ddelta, sh.d_delta), 1e-13);
     EXPECT_LT(rel_err(r.ds_dtheta, sh.d_theta), 1e-13);
@@ -178,8 +179,8 @@ TEST(PcmKernel, DdeltaDthetaMatchesFiniteDifferences) {
     for (int k = 0; k < P; ++k) {
         double h = 1e-5;
         for (;; h *= 0.1) {
-            auto up = pcm_demand::invert(s_data, f.mk, bump(f.prm, k, h), r.delta, 1e-13, 5000);
-            auto dn = pcm_demand::invert(s_data, f.mk, bump(f.prm, k, -h), r.delta, 1e-13, 5000);
+            auto up = pcm_invert::invert(s_data, f.mk, bump(f.prm, k, h), r.delta, 1e-13, 5000);
+            auto dn = pcm_invert::invert(s_data, f.mk, bump(f.prm, k, -h), r.delta, 1e-13, 5000);
             ASSERT_TRUE(up.converged && dn.converged) << "parameter " << k;
             fd.col(k) = (up.delta - dn.delta).matrix() / (2 * h);
             const bool smooth = frontiers(up.delta, f.mk, bump(f.prm, k, h)) == F0 &&
@@ -200,7 +201,7 @@ TEST(PcmKernel, DdeltaDthetaMatchesFiniteDifferences) {
 TEST(PcmKernel, MicroPartsMatchSharesBruteForceAndFiniteDifferences) {
     Fixture f = make_fixture(5);
     const pcm_kernel::MicroRequest mr = make_micro(f, 17);
-    const ArrayXd s_data = pcm_demand::shares(f.delta, f.mk, f.prm, false).s;
+    const ArrayXd s_data = pcm_aggregate::shares(f.delta, f.mk, f.prm, false).s;
     pcm_kernel::SolveOptions opt;
     opt.tol = 1e-13;
     auto r = pcm_kernel::solve_market(s_data, f.mk, f.prm, f.delta, nullptr, &mr, opt);
@@ -221,11 +222,11 @@ TEST(PcmKernel, MicroPartsMatchSharesBruteForceAndFiniteDifferences) {
     const int R = f.mk.weights.size();
     double brute = 0.0;
     for (int i = 0; i < R; ++i) {
-        pcm_demand::Market mi = f.mk;
+        pcm_aggregate::Market mi = f.mk;
         mi.weights = ArrayXd::Ones(1);
         mi.taste_basis = f.mk.taste_basis.row(i);
         mi.scale_basis = f.mk.scale_basis.row(i);
-        const ArrayXd si = pcm_demand::shares(r.delta, mi, f.prm, false).s;
+        const ArrayXd si = pcm_aggregate::shares(r.delta, mi, f.prm, false).s;
         brute += f.mk.weights[i] * mr.H(i, 1) * (mr.U.col(4).array() * si).sum();
     }
     EXPECT_NEAR(r.micro[4], brute, 1e-14);
@@ -258,7 +259,7 @@ TEST(PcmKernel, MicroPartsMatchSharesBruteForceAndFiniteDifferences) {
 TEST(PcmKernel, BitIdenticalAcrossThreadCounts) {
     Fixture f = make_fixture(7, 12, 3000);
     const pcm_kernel::MicroRequest mr = make_micro(f, 3);
-    const ArrayXd s_data = pcm_demand::shares(f.delta, f.mk, f.prm, false).s;
+    const ArrayXd s_data = pcm_aggregate::shares(f.delta, f.mk, f.prm, false).s;
     const ArrayXd warm = f.delta + 2e-4;
     pcm_kernel::SolveOptions opt;
     opt.price_derivatives = true;
@@ -286,11 +287,11 @@ TEST(PcmKernel, BitIdenticalAcrossThreadCounts) {
 // 3.6 kernel test 5: a product below every frontier in the warm start is lifted by the warm stage.
 TEST(PcmKernel, WarmStageLiftsProductBelowEveryFrontier) {
     Fixture f = make_fixture(3);
-    const ArrayXd s_data = pcm_demand::shares(f.delta, f.mk, f.prm, false).s;
+    const ArrayXd s_data = pcm_aggregate::shares(f.delta, f.mk, f.prm, false).s;
     ASSERT_TRUE((s_data > 0).all());
     ArrayXd warm = f.delta;
     warm[6] -= 1.0;
-    ASSERT_EQ(pcm_demand::shares(warm, f.mk, f.prm, false).s[6], 0.0) << "product 6 must be off every frontier";
+    ASSERT_EQ(pcm_aggregate::shares(warm, f.mk, f.prm, false).s[6], 0.0) << "product 6 must be off every frontier";
     pcm_kernel::SolveOptions opt;
     opt.tol = 1e-12;
     auto r = pcm_kernel::solve_market(s_data, f.mk, f.prm, warm, nullptr, nullptr, opt);
@@ -313,7 +314,7 @@ TEST(PcmKernel, NearDuplicateProductsNeverGiveSilentNaN) {
         const double s56 = (f.delta[a] - f.delta[a - 1]) / (f.mk.p[a] - f.mk.p[a - 1]);
         const double s68 = (f.delta[b + 1] - f.delta[a]) / (f.mk.p[b + 1] - f.mk.p[a]);
         f.delta[b] = f.delta[a] + gap * 0.5 * (s56 + s68);
-        const ArrayXd s_data = pcm_demand::shares(f.delta, f.mk, f.prm, false).s;
+        const ArrayXd s_data = pcm_aggregate::shares(f.delta, f.mk, f.prm, false).s;
         ASSERT_TRUE((s_data > 0).all()) << "gap " << gap;
 
         pcm_kernel::SolveOptions opt;
@@ -344,11 +345,11 @@ TEST(PcmKernel, NearDuplicateProductsNeverGiveSilentNaN) {
 // Theta-path stage (DESIGN 3.2 step 3): with the warm stage starved, the path from theta_warm solves it.
 TEST(PcmKernel, ThetaPathStageSolvesWhenWarmStageFails) {
     Fixture f = make_fixture(4);
-    const ArrayXd s_data = pcm_demand::shares(f.delta, f.mk, f.prm, false).s;
-    pcm_demand::Params prm_warm = f.prm;
+    const ArrayXd s_data = pcm_aggregate::shares(f.delta, f.mk, f.prm, false).s;
+    pcm_aggregate::Params prm_warm = f.prm;
     prm_warm.theta *= 0.5;
     prm_warm.sigma_p = 0.5;
-    auto w = pcm_demand::invert(s_data, f.mk, prm_warm, f.delta, 1e-12, 5000);
+    auto w = pcm_invert::invert(s_data, f.mk, prm_warm, f.delta, 1e-12, 5000);
     ASSERT_TRUE(w.converged);
     pcm_kernel::SolveOptions opt;
     opt.warm_evals = 1;
@@ -362,7 +363,7 @@ TEST(PcmKernel, ThetaPathStageSolvesWhenWarmStageFails) {
 
 TEST(PcmKernel, InvalidInputIsAStatusNotAnException) {
     Fixture f = make_fixture(1);
-    ArrayXd s_data = pcm_demand::shares(f.delta, f.mk, f.prm, false).s;
+    ArrayXd s_data = pcm_aggregate::shares(f.delta, f.mk, f.prm, false).s;
     s_data[3] = 0.0;
     pcm_kernel::SolveOptions opt;
     auto r = pcm_kernel::solve_market(s_data, f.mk, f.prm, ArrayXd(), nullptr, nullptr, opt);

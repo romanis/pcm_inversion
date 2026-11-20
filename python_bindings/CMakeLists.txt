@@ -45,7 +45,7 @@ if(pybind11_FOUND)
 
     # pybind11 strips Release modules after linking; keep the symbols for core-dump debugging.
     set(CMAKE_STRIP "")
-    pybind11_add_module(python_market_share "${ROOT}/market_share/pcm_market_share.cpp" "${ROOT}/python_bindings/market_share_python.cpp")
+    pybind11_add_module(python_market_share "${ROOT}/market_share/pcm_geometry.cpp" "${ROOT}/market_share/pcm_market_share.cpp" "${ROOT}/python_bindings/market_share_python.cpp")
     target_include_directories(python_market_share PUBLIC ${Python_INCLUDE_DIRS})
     target_include_directories(python_market_share PUBLIC ${Boost_INCLUDE_DIR} )
     target_include_directories(python_market_share PUBLIC "${ROOT}/market_share/")
@@ -61,7 +61,7 @@ if(pybind11_FOUND)
 
     pybind11_add_module(python_pcm_demand "${ROOT}/python_bindings/pcm_demand_python.cpp")
     target_include_directories(python_pcm_demand PUBLIC "${ROOT}/market_share/" "${ROOT}/demand_model/")
-    target_link_libraries(python_pcm_demand PUBLIC pcm_demand Eigen3::Eigen)
+    target_link_libraries(python_pcm_demand PUBLIC pcm_kernel Eigen3::Eigen)
 
     # Estimation harness kernel module (docs/estimation_harness/DESIGN.md 1.2), written into the package.
     pybind11_add_module(pcm_kernel_py

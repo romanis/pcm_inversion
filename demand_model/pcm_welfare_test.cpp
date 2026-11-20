@@ -2,7 +2,7 @@
 #include <cmath>
 #include <random>
 #include <stdexcept>
-#include "pcm_demand.hpp"
+#include "pcm_aggregate.hpp"
 #include "pcm_welfare.hpp"
 
 using Eigen::ArrayXd;
@@ -13,8 +13,8 @@ namespace {
 double Phi(double z) { return 0.5 * std::erfc(-z / std::sqrt(2.0)); }
 
 struct Fixture {
-    pcm_demand::Market mk;
-    pcm_demand::Params prm;
+    pcm_aggregate::Market mk;
+    pcm_aggregate::Params prm;
     ArrayXd delta;
 };
 
@@ -55,8 +55,8 @@ Fixture make_fixture(unsigned seed, int N, int R) {
     return f;
 }
 
-pcm_demand::Market single_draw_market(const ArrayXd & p) {
-    pcm_demand::Market mk;
+pcm_aggregate::Market single_draw_market(const ArrayXd & p) {
+    pcm_aggregate::Market mk;
     mk.x = MatrixXd::Zero(p.size(), 1);
     mk.p = p;
     mk.weights = ArrayXd::Ones(1);
@@ -65,8 +65,8 @@ pcm_demand::Market single_draw_market(const ArrayXd & p) {
     return mk;
 }
 
-pcm_demand::Params vertical_params(double sigma_p) {
-    pcm_demand::Params prm;
+pcm_aggregate::Params vertical_params(double sigma_p) {
+    pcm_aggregate::Params prm;
     prm.theta = ArrayXd(0);
     prm.phi = ArrayXd(0);
     prm.sigma_p = sigma_p;
@@ -143,7 +143,7 @@ TEST(PcmWelfare, DominatedProductRemoved) {
     const int j = 13;
     f.delta[j] = -1e3;                      // far below the origin edge for every draw
     const auto r0 = pcm_welfare::consumer_surplus(f.delta, f.mk, f.prm, 1);
-    const ArrayXd s = pcm_demand::shares(f.delta, f.mk, f.prm, false).s;
+    const ArrayXd s = pcm_aggregate::shares(f.delta, f.mk, f.prm, false).s;
     ASSERT_EQ(s[j], 0.0);
     const Fixture g = drop_product(f, j);
     const auto r1 = pcm_welfare::consumer_surplus(g.delta, g.mk, g.prm, 1);
@@ -151,7 +151,7 @@ TEST(PcmWelfare, DominatedProductRemoved) {
     EXPECT_LE((r1.per_draw - r0.per_draw).abs().maxCoeff(), 1e-12 * std::max(1.0, r0.per_draw.abs().maxCoeff()));
 
     // removing a product that is bought lowers CS
-    const ArrayXd s1 = pcm_demand::shares(g.delta, g.mk, g.prm, false).s;
+    const ArrayXd s1 = pcm_aggregate::shares(g.delta, g.mk, g.prm, false).s;
     int k = 0;
     s1.maxCoeff(&k);
     const auto r2 = pcm_welfare::consumer_surplus(drop_product(g, k).delta, drop_product(g, k).mk, g.prm, 1);
@@ -176,7 +176,7 @@ TEST(PcmWelfare, NoProductGivesZero) {
 // Roy's identity in price units: dCS/dp_j = -s_j, against the existing share code.
 TEST(PcmWelfare, PriceDerivativeEqualsMinusShare) {
     Fixture f = make_fixture(3, 30, 500);
-    const ArrayXd s = pcm_demand::shares(f.delta, f.mk, f.prm, false).s;
+    const ArrayXd s = pcm_aggregate::shares(f.delta, f.mk, f.prm, false).s;
     const double h = 1e-6;
     int n_bought = 0;
     for (int j = 0; j < f.mk.p.size(); ++j) {

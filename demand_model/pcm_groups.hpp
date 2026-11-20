@@ -3,7 +3,7 @@
 
 #include <vector>
 #include <Eigen/Dense>
-#include "pcm_demand.hpp"
+#include "pcm_aggregate.hpp"
 
 /**
  * Per-household purchase-weighted sums for GMY's micro moments (GMY spec WP-G5).
@@ -36,7 +36,7 @@ struct GroupSums {
  * do not depend on the thread count. Uses the calling thread's OpenMP team size. Throws std::invalid_argument on
  * bad input (sizes, a decreasing or out-of-range group_of_draw).
  */
-GroupSums group_sums(const Eigen::ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm,
+GroupSums group_sums(const Eigen::ArrayXd & delta, const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm,
                      const GroupRequest & gr, bool derivatives);
 
 }  // namespace pcm_kernel

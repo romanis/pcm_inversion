@@ -10,13 +10,13 @@ namespace py = pybind11;
 
 namespace {
 
-// The market argument is a pcm_demand::Market instance when some loaded module registers that type
+// The market argument is a pcm_aggregate::Market instance when some loaded module registers that type
 // (bind_solve.cpp or python_pcm_demand), or any mapping or object carrying the fields
 // x, p, weights, taste_basis, taste_col, scale_basis.
-pcm_demand::Market market_from(const py::handle & obj) {
-    if (py::detail::get_type_info(typeid(pcm_demand::Market))) {
+pcm_aggregate::Market market_from(const py::handle & obj) {
+    if (py::detail::get_type_info(typeid(pcm_aggregate::Market))) {
         try {
-            return obj.cast<pcm_demand::Market>();
+            return obj.cast<pcm_aggregate::Market>();
         } catch (const py::cast_error &) {
         }
     }
@@ -27,7 +27,7 @@ pcm_demand::Market market_from(const py::handle & obj) {
         throw py::type_error(std::string("consumer_surplus: market has no field '") + name +
                              "' (needs x, p, weights, taste_basis, taste_col, scale_basis)");
     };
-    pcm_demand::Market mk;
+    pcm_aggregate::Market mk;
     mk.x = field("x").cast<Eigen::MatrixXd>();
     mk.p = field("p").cast<Eigen::ArrayXd>();
     mk.weights = field("weights").cast<Eigen::ArrayXd>();
@@ -43,8 +43,8 @@ void bind_welfare(py::module_ & m) {
     m.def("consumer_surplus",
           [](const Eigen::ArrayXd & delta, const py::object & market, const Eigen::ArrayXd & theta,
              const Eigen::ArrayXd & phi, double sigma_p, int n_threads, double alpha_lo, double a_lo) {
-              const pcm_demand::Market mk = market_from(market);
-              const pcm_demand::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "consumer_surplus");
+              const pcm_aggregate::Market mk = market_from(market);
+              const pcm_aggregate::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "consumer_surplus");
               pcm_welfare::Surplus r;
               {
                   py::gil_scoped_release release;

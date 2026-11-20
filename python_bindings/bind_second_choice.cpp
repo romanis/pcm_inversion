@@ -14,10 +14,10 @@ void bind_second_choice(py::module_ & m) {
           [](const Eigen::ArrayXd & delta, const py::object & market, const Eigen::ArrayXd & theta,
              const Eigen::ArrayXd & phi, double sigma_p, const py::object & adjoint, int n_threads, double alpha_lo,
              double a_lo) {
-              if (!py::isinstance<pcm_demand::Market>(market))
+              if (!py::isinstance<pcm_aggregate::Market>(market))
                   throw py::type_error("second_choice: market must be a pcm_kernel.Market");
-              const pcm_demand::Market mk = market.cast<pcm_demand::Market>();
-              const pcm_demand::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "second_choice");
+              const pcm_aggregate::Market mk = market.cast<pcm_aggregate::Market>();
+              const pcm_aggregate::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "second_choice");
               if (n_threads < 1) throw py::value_error("second_choice: n_threads must be at least 1");
               std::unique_ptr<pcm_kernel::SecondChoiceAdjoint> adj;
               if (!adjoint.is_none()) {
