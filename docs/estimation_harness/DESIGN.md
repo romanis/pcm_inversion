@@ -230,13 +230,17 @@ theta is (pi on (characteristic, demographic) pairs, sigma on characteristics), 
 every market inverted by the BLP contraction with SQUAREM from the accepted delta (`commit`, `restore`,
 `warm_from_delta`), in parallel over markets. `solve` returns `shares`, `probabilities` and, when moments ask, the
 logit second-choice matrices of `SecondChoiceMoments` and the household sums of `GroupMicroMoments`, so an
-`NFPGMMProblem` takes the BLP model and the PCM interchangeably at the problem boundary. It has no derivatives yet
-(`need_jacobian=True` raises): a BLP problem is evaluated, or fitted by finite differences.
+`NFPGMMProblem` takes the BLP model and the PCM interchangeably at the problem boundary. With `need_jacobian=True` it
+returns the analytic Jacobian: D_t = -(ds/ddelta)^{-1} ds/dtheta per market by the implicit function theorem from the
+logit probabilities, the partials of the household sums, the second-choice adjoint, and `ds_dp` (with the caller's
+linear price coefficient), so the Gauss-Newton optimizer fits a BLP problem as it fits a PCM one. The formulas are in
+the module docstring; `tests/test_blp_model.py` checks each against central differences, on synthetic markets and on
+GMY 1999, and recovers a known theta by `optimizer.minimize`. It does not serve micro parts (`RatioMicroMoment`).
 `gmy_replication/estimate_blp.py` solves its contraction through it, and `GMYLogit.problem()` builds GMY's step-1
 objective as an `NFPGMMProblem` with the harness's micro and second-choice moments; its q under W1 equals the
 script's sum of squared residuals (`tests/test_blp_model.py`). The script's outputs still come from the authors'
 residual formulas, so the `gmy_blp` golden is unchanged. `petrin_replication/estimate_blp.py` stays on pyblp (demand
-and supply estimated jointly by pyblp's optimizer, which needs derivatives this model does not have).
+and supply estimated jointly by pyblp's optimizer; the harness's supply block is PCM-specific).
 
 ## 2. Problem, moments and parameters
 
@@ -490,7 +494,8 @@ geometry, aggregation or inversion logic of its own.
 **Legacy (`market_share/pcm_market_share`, `inversion_algorithm/`).** `pcm_share::unc_share` (taste integrated on
 a sparse grid) and the published-paper inversions (`invert_shares_nlopt`, `cone_newton`) are unchanged and not on
 the harness path. Their untruncated `cond_share` overloads, `initial_guess` and `index_positive_shares` forward
-to `pcm_geometry`. The Python module `python_pcm_demand` keeps its name for the Nevo script and the Nevo golden.
+to `pcm_geometry`. The Python module `python_pcm_demand` keeps its name; no paper script uses it since Nevo moved onto
+the harness.
 
 ### 3.1 Market input
 
@@ -1159,7 +1164,10 @@ spec = Spec(
 )
 ```
 
-No new estimation code: the same model adapter, optimizer, diagnostics and report.
+No new estimation code: the same model adapter, optimizer, diagnostics and report. As built,
+`nevo_replication/estimate_pcm.py` is `NevoSpec(PaperSpec)`: the Gauss-Hermite grid crossed with each market's 20
+agents enters through `PaperSpec.taste_nodes` (`PCMModel(taste_nodes=...)`), the scale bases are the raw agent
+columns as in the pre-harness script, and the `nevo_pcm` golden holds that script's delta, xi and g bit for bit.
 
 ## 7. Work packages
 

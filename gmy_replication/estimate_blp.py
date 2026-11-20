@@ -105,6 +105,7 @@ TABLE4_ALPHA = -3.200
 LOWER = np.r_[-25, -25, -25, np.full(8, -np.inf), np.zeros(11)]   # estimation.m bounds
 UPPER = np.r_[25, 25, 25, np.full(8, np.inf), np.full(11, 15.0)]
 SC_WEIGHT = 30.0   # mom_fnc.m: second-choice residuals x 30
+PARAMETER_UNIT = 0.1   # natural unit of every theta entry on the harness's problem path (optimizer scaling only)
 SC_CHARS_PRODUCT = ("van", "suv", "truck", "log_footprint", "log_hp", "log_mpg", "lux", "sport", "electric",
                     "regionEU", "regionUS")   # raw columns for the correlations (xTerms, not z-scored)
 # Headline numbers of the paper (working paper text; the published QJE version could not be fetched here)
@@ -206,7 +207,8 @@ class GMYLogit:
         self.model.product_columns = {c: p[c].to_numpy(float) for c in set(gmy_pcm.MICRO_CHAR.values())}
         self.model.agents = agents
         self.model.agent_rows = [np.flatnonzero(agents.market_ids.to_numpy() == y) for y in self.years]
-        layout = ParameterLayout([ParameterSpec(n.replace(" ", "_"), "taste", None, None, float(v), float(lo), float(hi))
+        layout = ParameterLayout([ParameterSpec(n.replace(" ", "_"), "taste", None, None, float(v), float(lo), float(hi),
+                                                unit=PARAMETER_UNIT)
                                   for n, v, lo, hi in zip(NAMES, TABLE4_THETA, LOWER, UPPER)])
         n = self.model.n_products
         return NFPGMMProblem(self.model, ms, LinearIV(np.ones((n, 1)), np.ones((n, 1))), layout, max_step=False)
