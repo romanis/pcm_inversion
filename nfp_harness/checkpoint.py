@@ -230,7 +230,11 @@ def stage_parameter_names(path: str | pathlib.Path) -> list[str] | None:
     no history. For mapping another run's theta onto a layout by name."""
     hist = pathlib.Path(path).resolve().parent.parent / "history.csv"
     if not hist.exists():
-        return None
+        try:   # a stage that stores its names (pipeline stage ``warm``) and has no history
+            names = read_stage_file(path).get("parameter_names")
+        except (OSError, ValueError, KeyError, RuntimeError):
+            names = None
+        return [str(n) for n in names] if isinstance(names, (list, tuple)) and names else None
     with open(hist, newline="") as fh:
         header = next(csv.reader(fh), [])
     names = [c[len("theta_"):] for c in header if c.startswith("theta_")]

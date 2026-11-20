@@ -38,7 +38,7 @@ import logging
 import math
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -238,7 +238,8 @@ class PCMModel:
     """Exact PCM inner model.
 
     Markets run in a ``ThreadPoolExecutor`` with one Python thread per market; each ``solve_market``
-    call gets its own OpenMP team size from ``allocate_threads``. Keeps an accepted state (per market
+    call starts with its OpenMP team size from ``allocate_threads`` and holds a ``pcm_kernel.ThreadBudget``: when a
+    market finishes, its threads go to the markets still running (``_rebalance``). Keeps an accepted state (per market
     delta and the theta it was solved at) and a trial state: ``solve`` warm-starts from the accepted
     state and writes the trial state; ``commit`` promotes it; ``restore`` discards it (F3).
     ``max_step`` uses ``pcm_kernel.max_step``; trial points are checked with ``frontier_signature`` and
@@ -254,9 +255,14 @@ class PCMModel:
     n_products: int
 
     def __init__(self, spec: Any, data: Any, layout: Any, nu_per_agent: int, seed: int,
-                 total_threads: int | None = None, antithetic: Sequence[str] | bool = ()) -> None:
-        """PCMModel(spec, data, layout, nu_per_agent, seed, total_threads=None, antithetic=()). None uses
+                 total_threads: int | None = None, antithetic: Sequence[str] | bool = (),
+                 cold_draws: int = 0) -> None:
+        """PCMModel(spec, data, layout, nu_per_agent, seed, total_threads=None, antithetic=(), cold_draws=0). None uses
         os.cpu_count().
+
+        ``cold_draws``: the kernel's draw homotopy for a market with no warm start (``SolveOptions::cold_draws``):
+        invert first on every k-th draw, at least ``cold_draws`` of them, then warm-start each finer level up to all
+        draws. 0 (the default) is the plain cold stage. Not part of ``PCMSpec``, so spec hashes do not move.
 
         ``antithetic``: taste draw dimensions (the layout's taste ``basis`` names that are not agent columns, e.g.
         "nu0") whose draws come in antithetic pairs, or True for every one; off by default. Not part of ``PCMSpec``,
@@ -278,6 +284,10 @@ class PCMModel:
         self.total_threads = int(total_threads or os.cpu_count() or 1)
         if self.nu_per_agent < 1:
             raise ValueError(f"nu_per_agent must be at least 1, got {nu_per_agent}")
+        if int(cold_draws) < 0:
+            raise ValueError(f"cold_draws must be non-negative, got {cold_draws}")
+        #: draw homotopy of the kernel's cold stage (0: off)
+        self.cold_draws = int(cold_draws)
         sp = self.spec
         products, agents = _frames(data)
         self.products, self.agents = products, agents
@@ -531,8 +541,11 @@ class PCMModel:
 
     def _solve_one(self, m: _Market, th: np.ndarray, ph: np.ndarray, sp: float, parts: tuple[MicroPartRequest, ...],
                    need_jacobian: bool, price_derivatives: bool, n_threads: int, a_lo: float,
-                   requests: KernelRequests | None = None, theta: np.ndarray | None = None) -> dict[str, Any]:
-        r = self._solve_kernel(m, th, ph, sp, parts, need_jacobian, price_derivatives, n_threads, a_lo)
+                   requests: KernelRequests | None = None, theta: np.ndarray | None = None,
+                   budget: Any = None) -> dict[str, Any]:
+        r = self._solve_kernel(m, th, ph, sp, parts, need_jacobian, price_derivatives, n_threads, a_lo, budget)
+        if budget is not None:
+            n_threads = int(budget.value)   # the threads this market holds now (finished markets hand theirs on)
         if requests is not None and theta is not None and r["status"] == "ok":
             if requests.group_sums:
                 r["group"] = self.group_sums(m.t, r["delta"], theta, tuple(requests.group_sums), need_jacobian,
@@ -559,24 +572,47 @@ class PCMModel:
 
     def _solve_kernel(self, m: _Market, th: np.ndarray, ph: np.ndarray, sp: float,
                       parts: tuple[MicroPartRequest, ...], need_jacobian: bool, price_derivatives: bool,
-                      n_threads: int, a_lo: float) -> dict[str, Any]:
+                      n_threads: int, a_lo: float, budget: Any = None) -> dict[str, Any]:
         acc = self._accepted[m.t]
-        if acc is not None and acc.a_lo != a_lo:
-            acc = None   # a warm start solved under another bound is not a warm start
+        # A state solved under another bound is a warm START: the theta path moves the bound from its a_lo to this
+        # one, and a failed path still leaves the full cold stage (with the draw homotopy when it is on).
+        other_bound = acc is not None and acc.a_lo != a_lo
         micro = self._micro_for(m, parts)[0] if parts else None
         s = self.spec
-        cold = s.cold_evals if acc is None or s.trial_cold_evals is None else s.trial_cold_evals
+        cold = s.cold_evals if acc is None or other_bound or s.trial_cold_evals is None else s.trial_cold_evals
+        extra: dict[str, Any] = {}
+        if self.cold_draws > 0:
+            extra["cold_draws"] = self.cold_draws
+        if budget is not None:
+            extra["thread_budget"] = budget
+        if other_bound:
+            assert acc is not None
+            extra["lo_warm"] = float(acc.a_lo)
         return self._k.solve_market(
             m.s_data, m.kernel, th, ph, sp,
             None if acc is None else acc.delta, None if acc is None else acc.theta, micro,
             tol=s.tol, warm_evals=s.warm_evals, cold_evals=int(cold), path_evals=s.path_evals,
             path_seconds=s.path_seconds, n_threads=int(n_threads), derivatives=bool(need_jacobian),
-            price_derivatives=bool(price_derivatives), rcond_min=s.rcond_min, **self.bound_kwargs(a_lo))
+            price_derivatives=bool(price_derivatives), rcond_min=s.rcond_min, **self.bound_kwargs(a_lo), **extra)
 
     def solve(self, theta: np.ndarray, requests: KernelRequests, need_jacobian: bool) -> InnerSolution:
         """solve(theta, requests, need_jacobian) -> InnerSolution. Never raises for model failures."""
         with self._lock:
             return self._solve(theta, requests, need_jacobian)
+
+    def _rebalance(self, futures: list[Any], budgets: list[Any]) -> None:
+        """As markets finish, give all ``total_threads`` to the markets still running, by ``allocate_threads`` on
+        their weights (largest weight first), so the last market does not run on one thread while the rest idle."""
+        index = {f: t for t, f in enumerate(futures)}
+        running = set(range(self.T))
+        for f in as_completed(futures):
+            running.discard(index[f])
+            if not running:
+                break
+            live = sorted(running)
+            share = allocate_threads(self._weights[live], max(self.total_threads, len(live)))
+            for t, n in zip(live, share):
+                budgets[t].value = int(n)
 
     def _solve(self, theta: np.ndarray, requests: KernelRequests, need_jacobian: bool) -> InnerSolution:
         theta = np.array(theta, dtype=float).ravel()
@@ -589,9 +625,16 @@ class PCMModel:
         threads = allocate_threads(self._weights, self.total_threads)
         self.last_threads = threads
         log.info("PCM threads per market: %s", dict(zip([str(m.market_id) for m in self._mk], threads.tolist())))
+        # Each market holds a ThreadBudget the kernel reads before every share evaluation: when a market finishes,
+        # its threads go to the markets still running, by their weights (results do not depend on thread counts).
+        budgets = ([self._k.ThreadBudget(int(n)) for n in threads] if hasattr(self._k, "ThreadBudget")
+                   else [None] * self.T)
         futures = [self._pool.submit(self._solve_one, m, th, ph, sp, parts, need_jacobian,
-                                     requests.price_derivatives, int(threads[m.t]), al, requests, theta)
+                                     requests.price_derivatives, int(threads[m.t]), al, requests, theta,
+                                     budgets[m.t])
                    for m in self._mk]
+        if budgets[0] is not None:
+            self._rebalance(futures, budgets)
         results = [f.result() for f in futures]
 
         delta = np.full(self.n_products, np.nan)

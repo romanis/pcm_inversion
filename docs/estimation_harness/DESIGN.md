@@ -445,8 +445,14 @@ Algorithm (moves `_solve_market` from Python into C++, all with the GIL released
 3. Theta-path stage, if step 2 failed and `prm_warm` is given: solve along
    `theta(tau) = theta_warm + tau (theta - theta_warm)` with tau stepping from 0 to 1 (start step 0.5,
    double on success, halve on failure, stop below 0.01 or when `path_seconds` is spent), each solve
-   warm-started from the last converged tau.
-4. Cold stage: `invert(s_data, mk, prm, empty, tol, cold_evals)`.
+   warm-started from the last converged tau. A warm start solved under another bound (`prm_warm->lo != prm.lo`,
+   same kind) moves the bound along the same path, a continuation in a_lo: a delta solved at a_lo 0.2 is a warm
+   start at 0.1 and 0.3 (`PCMModel` passes the stored state's a_lo as `lo_warm`).
+4. Cold stage: `invert(s_data, mk, prm, empty, tol, cold_evals)`. With `cold_draws > 0` (off by default) a draw
+   homotopy runs first: the same cold path on every k-th draw (k a power of `cold_draw_factor`, 8, with at least
+   `cold_draws` draws left), then each finer level warm-started from the coarser solution with `warm_evals`, up to
+   all draws; the plain cold stage runs only if a level fails. At the GMY round-5 step-1 theta a cold GMY market at
+   65,536 draws needed thousands of share evaluations; from a solution on 8,192 draws it needs 20 to 60.
 5. Status: `OK` if the residual is below tol, `INFEASIBLE_START` if no feasible delta was ever
    found, else `NOT_CONVERGED`.
 6. Derivatives at the converged delta: one `pcm_demand::shares(..., true)` pass (with ds/dp only if
@@ -563,7 +569,11 @@ Petrin). Each `solve_market` call gets `n_threads`. Allocation with total T = `o
 - afterwards: weight = exponential moving average (factor 0.5) of measured CPU work
   `seconds_t * n_threads_t` from previous evaluations;
 - `n_t = max(1, floor(T w_t / sum w))`, leftover threads to the markets with the largest weight.
-The allocation is written to the run log every evaluation. `OMP_WAIT_POLICY=PASSIVE` (section 1.3)
+The allocation is written to the run log every evaluation. It is only the starting team size: each market's call
+holds a `pcm_kernel.ThreadBudget` that the kernel reads before every share evaluation, and when a market finishes
+its threads go to the markets still running (`allocate_threads` on their weights), so the last market of an
+evaluation runs on all T threads instead of the one it started with (39 GMY markets on 60 threads started with one
+each). Results do not depend on it (fixed 64-draw blocks). `OMP_WAIT_POLICY=PASSIVE` (section 1.3)
 stops idle teams from spinning.
 
 ### 3.6 Kernel unit tests (tiny markets with hand-computed answers)

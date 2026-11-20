@@ -22,6 +22,24 @@ bool feasible(const ArrayXd & s) { return (s > 0).all() && s.sum() < 1.0; }
 
 }  // namespace
 
+namespace pcm_demand {
+
+namespace {
+thread_local ThreadBudget * current_budget = nullptr;
+}  // namespace
+
+ThreadBudgetScope::ThreadBudgetScope(ThreadBudget * budget) : saved_(current_budget) { current_budget = budget; }
+ThreadBudgetScope::~ThreadBudgetScope() { current_budget = saved_; }
+
+void apply_thread_budget()
+{
+    if (!current_budget) return;
+    const int n = current_budget->load(std::memory_order_relaxed);
+    if (n >= 1 && n != omp_get_max_threads()) omp_set_num_threads(n);
+}
+
+}  // namespace pcm_demand
+
 namespace pcm_demand::detail {
 
 // For every product, the smallest increase in delta_j that puts it on at least one consumer's
@@ -37,6 +55,7 @@ ArrayXd frontier_lift(const ArrayXd & delta, const Market & mk, const Params & p
     const int M = static_cast<int>(prm.theta.size());
     const int Q = static_cast<int>(prm.phi.size());
     ArrayXd lift = ArrayXd::Constant(N, std::numeric_limits<double>::infinity());
+    apply_thread_budget();
     const int n_blocks = std::max(1, (R + 63) / 64);
     std::vector<ArrayXd> part(n_blocks, lift);
 #pragma omp parallel for schedule(dynamic) if(n_blocks > 1)
@@ -173,6 +192,7 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
     }
 
     const bool scale_bound = bound_moves_with_scale(prm);
+    apply_thread_budget();
 
     // Draws are independent: fixed blocks of 64 draws each accumulate partial sums in parallel,
     // and the blocks are added in index order, so results are bit-identical for any thread count.

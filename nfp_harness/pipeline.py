@@ -53,6 +53,10 @@ latest one is also copied to the run directory root):
   the last estimate (Hansen's J at step 2). Rows go to ``margin_band/band.csv`` (plus
   ``spec.band_reference_rows()``); each point is checkpointed (``mband.<m*>.step1|step2|row``) and the points
   run one after another, each on all threads.
+- ``warm``: every market inverted once at the layout's starting theta (no moments, no optimizer step), the model state
+  stored as ``stages/warm.npz`` with the theta and the parameter names: a warm delta for other runs on the same
+  markets and draws (a spec's ``--warm-delta``), e.g. one per value of a fixed bound (a state solved under another
+  bound is a warm start, ``PCMModel``).
 
 Every W the estimation stages minimise (W1, W2, band W) passes through ``spec.binding_weighting(problem, W)``
 when the spec has it, e.g. to make a calibration row bind. A spec with ``step2_weighting(problem, ev1) -> W2`` forms
@@ -101,7 +105,7 @@ from .diagnostics.economics import economics_block
 from .diagnostics.report import to_jsonable
 from .optimizer import OptimizerOptions, minimize
 from .profile import ray_profile
-from .types import OptimizeResult
+from .types import KernelRequests, OptimizeResult
 from .weighting import Fixed, TwoStep, weight_from_covariance
 
 __all__ = ["Pipeline", "RunConfig", "StageRefused", "GateFailed", "STAGES", "CHAIN", "main", "run_dir_path", "run_key_options"]
@@ -109,7 +113,7 @@ __all__ = ["Pipeline", "RunConfig", "StageRefused", "GateFailed", "STAGES", "CHA
 log = logging.getLogger("nfp_harness.pipeline")
 
 STAGES = ("prefit", "gate", "extensive", "step1", "step2", "post", "stability", "sigma_p_band", "a_lo_band",
-          "margin_band")
+          "margin_band", "warm")
 CHAIN = ("extensive", "step1", "step2", "post", "stability")
 STABILITY_SEED_OFFSET = 100_000
 STABILITY_ITERATIONS = 20
@@ -374,6 +378,32 @@ class Pipeline:
         return np.asarray(res.theta, dtype=float)
 
     # ---------------------------------------------------------------- stages
+
+    def warm(self) -> dict[str, Any]:
+        """Stage ``warm``: invert every market once at the layout's starting theta (no moments, no step) and store
+        the model state, so ``<run>/stages/warm.npz`` is a warm delta for other runs on the same markets and draws
+        (a spec's ``--warm-delta``), e.g. one per value of a fixed bound. Markets that did not converge keep no
+        state there. The stage stores ``theta``, ``parameter_names``, ``problem_state`` and the per-market solve
+        records; with every market OK its ``converged`` is True."""
+        if self.rd.stage_done("warm"):
+            return self._stage_state("warm")
+        problem = self.problem("all")
+        model = problem.model
+        theta = np.asarray(problem.layout.starts(), dtype=float)
+        sol = model.solve(theta, KernelRequests(), need_jacobian=False)
+        if hasattr(model, "commit"):
+            model.commit(theta)
+        per = list(sol.per_market or [])
+        ok = sum(1 for r in per if r.get("status") == "ok")
+        seconds = max((float(r.get("seconds", 0.0)) for r in per), default=0.0)
+        log.info("warm: %d of %d markets inverted at the starting theta (slowest %.1fs): %s", ok, len(per), seconds,
+                 "; ".join(f"{r['market_id']}: {r['status']} {float(r['seconds']):.1f}s {r['stages']}" for r in per))
+        state = getattr(model, "state_dict", None)
+        doc = {"theta": theta, "parameter_names": list(problem.layout.names),
+               "problem_state": {"model": state() if callable(state) else None},
+               "converged": ok == len(per), "per_market": json.dumps(to_jsonable(per))}
+        self.rd.save_stage("warm", doc)
+        return doc
 
     def prefit(self) -> np.ndarray:
         """Theta at the end of the prefit stage (runs it if needed).
