@@ -55,12 +55,14 @@ class NFPGMMProblem:
     layout: ParameterLayout
 
     def __init__(self, model: InnerModel, moments: Sequence[Moment], linear: Any, layout: ParameterLayout,
-                 W: np.ndarray | None = None, max_step: bool = True) -> None:
-        """NFPGMMProblem(model, moments, linear, layout, W=None, max_step=True).
+                 W: np.ndarray | None = None, max_step: bool = True, evaluate_only: bool = False) -> None:
+        """NFPGMMProblem(model, moments, linear, layout, W=None, max_step=True, evaluate_only=False).
 
         W defaults to the aggregate block of ``linear`` (``(Z'Z/n)^{-1}`` for ``LinearIV``) and the
         identity on micro rows; ``initial_weighting(theta0)`` gives pyblp's W1. ``max_step=False`` hides
         the model's ``max_step`` from the optimizer, so steps are controlled by the trust region alone.
+        ``evaluate_only=True`` builds a problem that fails the order condition (for evaluation, never estimation):
+        ``identification`` then holds the count with ``refused`` and the reason instead of raising.
         """
         self.model = model
         self.moments = list(moments)
@@ -92,10 +94,12 @@ class NFPGMMProblem:
         if len(set(datasets)) != len(datasets):
             raise ValueError(f"one micro moment object per dataset (cross-object covariances are taken as zero): "
                              f"{datasets}")
-        if len(self.aggregate) != 1:
-            raise ValueError(f"exactly one aggregate (IV) moment block is required, got {len(self.aggregate)}")
-        self.agg = self.aggregate[0]
-        self.agg_rows = self.blocks[self.agg.name]
+        if len(self.aggregate) > 1:
+            raise ValueError(f"at most one aggregate (IV) moment block, got {len(self.aggregate)}")
+        # Without an aggregate block (GMY's nonlinear stage: micro and second-choice moments only) beta is not a GMM
+        # unknown: ``linear`` still fits it at every delta (its own default weighting) for xi and the reports.
+        self.agg: Any = self.aggregate[0] if self.aggregate else None
+        self.agg_rows = self.blocks[self.agg.name] if self.agg is not None else slice(0, 0)
         supply = [m for m in self.moments if getattr(m, "is_supply", False)]
         if len(supply) > 1:
             raise ValueError(f"at most one supply moment block, got {len(supply)}")
@@ -104,7 +108,8 @@ class NFPGMMProblem:
         # the step-2 W keeps the aggregate-supply cross terms of S only where they can be concentrated jointly
         # (plain IVMoments); with SarganIVMoments W2 is block diagonal across the two blocks
         self.coupled_blocks: tuple[tuple[str, ...], ...] = (
-            ((self.agg.name, self.supply.name),) if self.supply is not None and type(self.agg) is IVMoments else ())
+            ((self.agg.name, self.supply.name),) if self.supply is not None and self.agg is not None
+            and type(self.agg) is IVMoments else ())
         self._joint: dict[str, Any] | None = None
         if self.supply is not None:
             try:
@@ -114,12 +119,18 @@ class NFPGMMProblem:
             self.supply.bind(model, self.P, units=units)
             if self.supply.n != self.n:
                 raise ValueError(f"supply block has {self.supply.n} rows, model has {self.n} products")
-        if isinstance(linear, LinearIV):
+        if isinstance(linear, LinearIV) and self.agg is not None:
             Z = getattr(self.agg, "Z")
             if Z.shape != linear.Z.shape or not np.array_equal(Z, linear.Z):
                 raise ValueError("the aggregate moments and LinearIV must use the same Z")
-        for m in self.micro:
-            m.bind(model.markets, self.n, self.P)  # type: ignore[attr-defined]
+        for m in self.moments:
+            if m in self.micro:
+                m.bind(model.markets, self.n, self.P)  # type: ignore[attr-defined]
+            if hasattr(m, "bind_agents"):   # household-level micro moments (GroupMicroMoments)
+                agents, draws = getattr(model, "agents", None), getattr(model, "market_draws", None)
+                if agents is None or draws is None:
+                    raise ValueError(f"moment {m.name!r} needs a model with an agent table and market_draws")
+                m.bind_agents(agents, [np.asarray(draws(t)["agent_rows"]) for t in range(len(model.markets))])
 
         requests = KernelRequests()
         for m in self.moments:
@@ -130,13 +141,16 @@ class NFPGMMProblem:
             cov_requests = cov_requests.merge(m.covariance_requests())  # type: ignore[attr-defined]
         self.covariance_requests = cov_requests
 
-        self.identification = self.check_identification()
+        self.evaluate_only = bool(evaluate_only)
+        self.identification = self.check_identification(raise_error=not self.evaluate_only)
 
         self.W: np.ndarray
         self.W_provenance = ""
         if W is None:
             W = np.eye(self.k)
-            W[self.agg_rows, self.agg_rows] = getattr(linear, "W_aa", np.eye(self.agg_rows.stop - self.agg_rows.start))
+            if self.agg is not None:
+                W[self.agg_rows, self.agg_rows] = getattr(linear, "W_aa",
+                                                          np.eye(self.agg_rows.stop - self.agg_rows.start))
             if self.supply is not None:
                 W[self.supply_rows, self.supply_rows] = self.supply.W_ss
             self.set_weighting(W)
@@ -151,18 +165,19 @@ class NFPGMMProblem:
 
     # ------------------------------------------------------------------ setup checks
 
-    def check_identification(self) -> dict[str, Any]:
+    def check_identification(self, raise_error: bool = True) -> dict[str, Any]:
         """Count moments against unknowns and refuse (``IdentificationError``) when they cannot identify them.
 
         Effective moment count = rank of the aggregate instrument matrix + number of micro rows.
         Unknowns = free nonlinear parameters + concentrated linear coefficients. LinearIV itself
-        refuses when rank(Z'X1) < K at construction.
+        refuses when rank(Z'X1) < K at construction. Without an aggregate block rank(Z) counts 0 and beta is no
+        unknown of this problem (it is fitted outside the GMM, as GMY's linear stage).
         """
-        Z = getattr(self.agg, "Z")
+        Z = getattr(self.agg, "Z") if self.agg is not None else np.zeros((self.n, 0))
         rank_z = matrix_rank(Z)
         k_micro = sum(int(getattr(m, "k")) for m in self.moments if m is not self.agg and m is not self.supply)
         p_free = self.layout.n_free()
-        k_linear = int(getattr(self.linear, "n_linear", 0))
+        k_linear = int(getattr(self.linear, "n_linear", 0)) if self.agg is not None else 0
         k_supply = 0
         if self.supply is not None:
             k_supply = matrix_rank(self.supply.Z)
@@ -179,11 +194,14 @@ class NFPGMMProblem:
         if rank_z < Z.shape[1]:
             info["note"] = f"aggregate instruments have rank {rank_z} < {Z.shape[1]} columns"
         if effective < unknowns:
-            raise IdentificationError(
+            exc = IdentificationError(
                 f"moment conditions cannot identify the unknowns: rank(Z) {rank_z} + {k_micro} micro moments"
                 + (f" + rank(Z_s) {k_supply}" if self.supply is not None else "")
                 + f" = {effective} < {p_free} free nonlinear + {k_linear} linear parameters = {unknowns}. "
                 f"Use Z = [X1, excluded instruments] (LEARNINGS 16), add moments, or fix parameters.")
+            if raise_error:
+                raise exc
+            info.update(refused=True, note=str(exc))
         return info
 
     # ------------------------------------------------------------------ evaluation
@@ -287,6 +305,10 @@ class NFPGMMProblem:
             summary = getattr(m, "summary", None)
             if callable(summary):
                 aux[m.name] = summary(sol)
+        for m in self.moments:
+            extra = getattr(m, "aux_summary", None)
+            if callable(extra):
+                aux[m.name] = extra(sol)
         aux["q"] = self.objective(g)
         aux["q_blocks"] = {name: float(self.n * g[s] @ self.W[s, s] @ g[s]) for name, s in self.blocks.items()}
         return Evaluation(theta=theta, g=g, G=G, status=EvalStatus.OK, blocks=dict(self.blocks), aux=aux,
@@ -384,9 +406,10 @@ class NFPGMMProblem:
         block order (the supply block only with supply moments)."""
         from .weighting import weight_from_covariance
 
-        Z = getattr(self.agg, "Z")
         W = np.zeros((self.k, self.k))
-        W[self.agg_rows, self.agg_rows] = weight_from_covariance(Z.T @ Z / self.n)
+        if self.agg is not None:
+            Z = getattr(self.agg, "Z")
+            W[self.agg_rows, self.agg_rows] = weight_from_covariance(Z.T @ Z / self.n)
         if self.supply is not None:
             Zs = self.supply.Z
             W[self.supply_rows, self.supply_rows] = weight_from_covariance(Zs.T @ Zs / self.n)
@@ -426,17 +449,18 @@ class NFPGMMProblem:
         lin[a] = True
         if self.supply_rows is not None:
             lin[self.supply_rows] = True
-        if (~lin).any() and np.max(np.abs(W[lin][:, ~lin])) > 1e-12 * scale:
+        if (~lin).any() and lin.any() and np.max(np.abs(W[lin][:, ~lin])) > 1e-12 * scale:
             raise ValueError("W couples aggregate (or supply) and micro rows; concentrated linear parameters need "
                              "block-diagonal W between them")
         self.W = 0.5 * (W + W.T)
-        self.linear.set_weighting(self.W[a, a])
+        if self.agg is not None:
+            self.linear.set_weighting(self.W[a, a])
         self._joint = None
         if self.supply is not None:
             s = self.supply_rows
             assert s is not None
             self.supply.set_weighting(self.W[s, s])
-            if np.max(np.abs(self.W[a, s])) > 1e-12 * scale:
+            if self.agg is not None and np.max(np.abs(self.W[a, s])) > 1e-12 * scale:
                 self._joint = self._joint_projection()
         self.W_provenance = "set_weighting"
 
@@ -463,13 +487,13 @@ class NFPGMMProblem:
         are ``[0, -Z_s'w/n, G_supply]``. Returns (k, K [+ K_s] + P) and the column names."""
         if ev.G is None:
             raise ValueError("full_jacobian needs an evaluation with G")
-        K = int(getattr(self.linear, "K", 0))
+        K = int(getattr(self.linear, "K", 0)) if self.agg is not None else 0
         Ks = int(self.supply.K) if self.supply is not None else 0
         J = np.zeros((self.k, K + Ks + self.P))
         J[:, K + Ks:] = ev.G
         if K:
             J[self.agg_rows, :K] = self.linear.full_jacobian_linear_block()
-        names = list(getattr(self.linear, "names", ()))
+        names = list(getattr(self.linear, "names", ())) if self.agg is not None else []
         if self.supply is not None:
             J[self.supply_rows, K:K + Ks] = -self.supply.ZtW
             names += list(self.supply.names)
@@ -486,6 +510,8 @@ class NFPGMMProblem:
         """
         if self.supply is not None:
             raise NotImplementedError("CUE with supply moments is not implemented")
+        if self.agg is None:
+            raise NotImplementedError("CUE needs an aggregate moment block")
         if not ev.ok or ev.G is None or ev.aux.get("D") is None:
             raise ValueError("cue_terms needs an OK evaluation with a Jacobian")
         fit: LinearFit = ev.aux["linear_fit"]

@@ -21,7 +21,8 @@ Kernel output contract for micro parts (what an ``InnerModel`` puts in ``InnerSo
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from dataclasses import dataclass
+from typing import Any, Literal, Sequence
 
 import numpy as np
 
@@ -37,7 +38,8 @@ from .types import (
 from .weighting import cluster_sums, clustered_covariance
 
 __all__ = ["Moment", "IVMoments", "SarganIVMoments", "MicroDataset", "MicroPart", "RatioMicroMoment", "MICRO_OUTPUTS",
-           "product_part", "SupplyMoments", "SupplyDomainError", "MarginMoment"]
+           "product_part", "SupplyMoments", "SupplyDomainError", "MarginMoment", "GroupMomentRow", "GroupMicroMoments",
+           "GROUP_OUTPUTS", "SecondChoiceMoments", "SECOND_CHOICE_OUTPUTS", "SECOND_CHOICE_ADJOINT"]
 
 #: A micro part, a pair (agent weight h, product weight v with outside value v0); see ``types.MicroPartRequest``.
 MicroPart = MicroPartRequest
@@ -66,6 +68,7 @@ class IVMoments:
     name: str
     is_aggregate = True
     is_micro = False
+    scale_free = False   # q of the block changes with the scale of xi (SarganIVMoments: it does not)
 
     def __init__(self, Z: np.ndarray, clustering_ids: np.ndarray | None = None, name: str = "aggregate") -> None:
         """IVMoments(Z, clustering_ids=None, name="aggregate"). No clustering means one cluster per product."""
@@ -124,6 +127,8 @@ class SarganIVMoments(IVMoments):
     ``d_delta = (Z'M/n)/s - g (xi'M/n) / s^2`` with g the scaled value. The covariance block is the
     clustered S of IVMoments divided by s^2. Not for CUE.
     """
+
+    scale_free = True
 
     def evaluate(self, sol: InnerSolution, linear: LinearFit, need_jacobian: bool) -> MomentBlock:
         """evaluate(sol, linear, need_jacobian) -> MomentBlock of the scaled moments and their delta Jacobian."""
@@ -441,7 +446,10 @@ class SupplyMoments:
             raise ValueError(f"{len(self.names)} names for {self.K} cost coefficients")
         if matrix_rank(self.Z) < self.k:
             raise IdentificationError(f"supply instruments have rank {matrix_rank(self.Z)} < {self.k} columns")
-        if matrix_rank(self.Z.T @ self.w) < self.K:
+        # rank(Z_s' w) is a property of the column spaces; scaling Z's columns first keeps instruments in large units
+        # (e.g. lagged exchange rates, steel weight) from making a full-rank product look rank-deficient
+        zn = np.linalg.norm(self.Z, axis=0)
+        if matrix_rank((self.Z / np.where(zn > 0, zn, 1.0)).T @ self.w) < self.K:
             raise IdentificationError("rank(Z_s' w) < K_s: the supply moments do not identify gamma; Z_s must "
                                       "contain the cost basis")
         self.firm_ids = np.asarray(firm_ids).ravel()
@@ -775,3 +783,350 @@ class MarginMoment:
     def binding_block(self) -> float:
         """The binding W entry ``binding_weight / (n sd^2)``: a deviation of one ``sd`` costs ``binding_weight``."""
         return self.binding_weight / (self.supply.n * self.sd ** 2)
+
+
+#: Key of ``InnerSolution.outputs`` holding the per-market household sums (contract in ``GroupMicroMoments``).
+GROUP_OUTPUTS = "group_sums"
+
+
+@dataclass(frozen=True)
+class GroupMomentRow:
+    """One GMY micro moment (ExjCondH.m): ``diff`` = E[x_char | buy, set_a] - E[x_char | buy, set_b] with each side the
+    household-weighted mean of the households' own conditional means; ``ratio`` = purchase rate in set_a / in set_b.
+    ``set_a`` and ``set_b`` are 0/1 agent columns (the survey years are part of the set); ``char`` is a product column
+    (None for a ratio row)."""
+
+    kind: Literal["diff", "ratio"]
+    char: str | None
+    set_a: str
+    set_b: str
+
+
+class GroupMicroMoments:
+    """Micro moments built from per-household sums (GMY spec WP-G3; ExjCondH.m, getMicroMoments.m).
+
+    For household g with draws i (weights w_i, sum w_g) and exact PCM choice probabilities s_ij:
+    ``P_g = sum_i w_i sum_j s_ij``, ``S_g[c] = sum_i w_i sum_j x_jc s_ij``, ``m_g[c] = S_g[c] / P_g``. A household set H
+    pools its households over the model's markets (each year's agent weights sum to one, so years count equally):
+    ``M_H[c] = sum_{g in H+} w_g m_g[c] / D_H`` with H+ the households with P_g > 0 and D_H = sum_{H+} w_g
+    (``never_buyers="drop"``, the stated intent of ExjCondH.m, deviation D2) or sum_H w_g (``"gmy_code"``, its literal
+    code: a never-buyer keeps its weight and adds 0); ``A_H = sum_H P_g / sum_H w_g``. Row values are
+    ``M_a - M_b - value`` (diff) and ``A_a / A_b - value`` (ratio). Partials: ``d m_g = (d S_g - m_g d P_g) / P_g``.
+
+    Kernel contract (``sol.outputs["group_sums"]``): a list with one entry per model market (None where the dataset
+    has no households) of a dict with ``columns`` (the product columns of S after P, in order), ``S`` (G_t, C+1)
+    (column 0 = P_g, then S_g[c]), ``d_delta`` (G_t, C+1, J_t) partials in delta_t (price order), ``d_theta``
+    (G_t, C+1, P) partials in theta (layout order), both None without a Jacobian, and ``w`` (G_t,) agent weights.
+
+    The covariance is fixed, ``diag(variances)``, so W1 = (n V)^{-1} and a row contributes (f / sd)^2 to q (GMY's
+    weight diag(1 / variance), deviation D6). ``bind(markets, n, P)`` and ``bind_agents(agents, agent_rows)``
+    (``agent_rows[t]`` = the agent-table rows of market t's households in group order) are called by
+    ``NFPGMMProblem``. ``last_info`` holds the never-buyer counts of the last evaluation.
+    """
+
+    name: str
+    is_aggregate = False
+    is_micro = True
+
+    def __init__(self, name: str, dataset: MicroDataset, rows: Sequence[GroupMomentRow], values: np.ndarray,
+                 variances: np.ndarray, labels: Sequence[str] | None = None, never_buyers: str = "drop") -> None:
+        """GroupMicroMoments(name, dataset, rows, values, variances, labels=None, never_buyers="drop")."""
+        self.name = name
+        self.dataset = dataset
+        self.rows = tuple(rows)
+        self.values = np.asarray(values, dtype=float).ravel()
+        var = np.asarray(variances, dtype=float).ravel()
+        if not len(self.rows) == self.values.size == var.size:
+            raise ValueError(f"{name}: {len(self.rows)} rows, {self.values.size} values, {var.size} variances")
+        if not np.all(np.isfinite(var) & (var > 0)):
+            raise ValueError(f"{name}: variances must be positive and finite")
+        if never_buyers not in ("drop", "gmy_code"):
+            raise ValueError(f"never_buyers must be 'drop' or 'gmy_code', got {never_buyers!r}")
+        for r in self.rows:
+            if r.kind not in ("diff", "ratio") or (r.kind == "diff") != (r.char is not None):
+                raise ValueError(f"{name}: bad row {r}")
+        self.never_buyers = never_buyers
+        self.k = len(self.rows)
+        self.variances = var
+        self.fixed_covariance = np.diag(var)
+        self.labels = tuple(labels) if labels is not None else tuple(
+            f"{r.kind} {r.char} {r.set_a} vs {r.set_b}" for r in self.rows)
+        chars: list[str] = []
+        for r in self.rows:
+            if r.char is not None and r.char not in chars:
+                chars.append(r.char)
+        self.chars = tuple(chars)
+        self.sets = tuple(dict.fromkeys([s for r in self.rows for s in (r.set_a, r.set_b)]))
+        self._markets: list[MarketIndex] | None = None
+        self._n: int | None = None
+        self._P: int | None = None
+        self._member: list[dict[str, np.ndarray]] | None = None
+        self.last_info: dict[str, Any] = {}
+
+    # ------------------------------------------------------------------ setup
+
+    def bind(self, markets: Sequence[MarketIndex], n_products: int, P: int | None = None) -> None:
+        self._markets = list(markets)
+        self._n = int(n_products)
+        self._P = None if P is None else int(P)
+        self._in = [t for t, m in enumerate(self._markets) if self.dataset.includes(m.market_id)]
+        if not self._in:
+            raise ValueError(f"{self.name}: dataset {self.dataset.name!r} covers none of the model's markets")
+
+    def bind_agents(self, agents: Any, agent_rows: Sequence[np.ndarray]) -> None:
+        """Set membership per market: ``agent_rows[t]`` are the agent-table rows of market t's households in the
+        kernel's group order; ``agents`` holds the 0/1 set columns."""
+        cols = {}
+        for s in self.sets:
+            try:
+                cols[s] = np.asarray(agents[s], dtype=float).ravel()
+            except (KeyError, IndexError):
+                raise KeyError(f"{self.name}: the agent table has no set column {s!r}") from None
+            if not np.all(np.isin(cols[s], (0.0, 1.0))):
+                raise ValueError(f"{self.name}: set column {s!r} is not 0/1")
+        self._member = [{s: cols[s][np.asarray(r, dtype=int)] > 0.5 for s in self.sets} for r in agent_rows]
+
+    def requests(self) -> KernelRequests:
+        return KernelRequests(group_sums=self.chars)
+
+    def covariance_requests(self) -> KernelRequests:
+        return self.requests()
+
+    # ------------------------------------------------------------------ evaluation
+
+    def _outputs(self, sol: InnerSolution) -> list[dict[str, Any]]:
+        if self._markets is None or self._member is None:
+            raise RuntimeError(f"{self.name}: bind(...) and bind_agents(...) were not called")
+        table = sol.outputs.get(GROUP_OUTPUTS)
+        if not isinstance(table, list) or len(table) != len(self._markets):
+            raise KeyError(f"{self.name}: the solution carries no per-market {GROUP_OUTPUTS!r} list")
+        out = []
+        for t in self._in:
+            e = table[t]
+            if e is None:
+                raise KeyError(f"{self.name}: no group sums for market {self._markets[t].market_id}")
+            out.append(e)
+        return out
+
+    def _column(self, entry: dict[str, Any], char: str | None) -> int:
+        if char is None:
+            return 0
+        cols = list(entry["columns"])
+        if char not in cols:
+            raise KeyError(f"{self.name}: group sums lack product column {char!r} (have {cols})")
+        return 1 + cols.index(char)
+
+    def moments(self, sol: InnerSolution, need_jacobian: bool) -> tuple[np.ndarray, np.ndarray | None,
+                                                                         np.ndarray | None]:
+        """(model values (k,), d_delta (k, n), d_theta (k, P)): the GMY quantities M_a - M_b and A_a / A_b."""
+        entries = self._outputs(sol)
+        assert self._member is not None and self._markets is not None and self._n is not None
+        mem = [self._member[t] for t in self._in]
+        # pooled set statistics
+        W, Wp, never = {}, {}, {}
+        for s in self.sets:
+            W[s] = sum(float(e["w"][m[s]].sum()) for e, m in zip(entries, mem))
+            Wp[s] = sum(float(e["w"][m[s] & (np.asarray(e["S"])[:, 0] > 0)].sum()) for e, m in zip(entries, mem))
+            never[s] = sum(int(np.sum(m[s] & ~(np.asarray(e["S"])[:, 0] > 0))) for e, m in zip(entries, mem))
+            if not W[s] > 0:
+                raise ValueError(f"{self.name}: set {s!r} has no households in the dataset's markets")
+        den = Wp if self.never_buyers == "drop" else W
+        n_hh = {s: sum(int(m[s].sum()) for m in mem) for s in self.sets}
+        self.last_info = {"micro_never_buyers": never, "micro_households": n_hh,
+                          "micro_never_buyer_share_max": max(never[s] / max(n_hh[s], 1) for s in self.sets)}
+        stats: dict[tuple[str, str | None], float] = {}
+        coefs: list[list[np.ndarray]] = [[] for _ in entries]   # per market: list over rows of (G, C+1)
+
+        def side(s: str, char: str | None) -> float:
+            key = (s, char)
+            if key not in stats:
+                tot = 0.0
+                for e, m in zip(entries, mem):
+                    S = np.asarray(e["S"])
+                    if char is None:
+                        tot += float(S[m[s], 0].sum())
+                    else:
+                        c = self._column(e, char)
+                        buy = m[s] & (S[:, 0] > 0)
+                        tot += float(np.sum(e["w"][buy] * S[buy, c] / S[buy, 0]))
+                stats[key] = tot / (W[s] if char is None else den[s])
+            return stats[key]
+
+        value = np.empty(self.k)
+        for r_i, r in enumerate(self.rows):
+            a, b = side(r.set_a, r.char), side(r.set_b, r.char)
+            value[r_i] = a - b if r.kind == "diff" else a / b
+            if not need_jacobian:
+                continue
+            for t_i, (e, m) in enumerate(zip(entries, mem)):
+                S = np.asarray(e["S"])
+                K = np.zeros_like(S)
+                if r.kind == "diff":
+                    c = self._column(e, r.char)
+                    for s, sign in ((r.set_a, 1.0), (r.set_b, -1.0)):
+                        buy = m[s] & (S[:, 0] > 0)
+                        coef = sign * e["w"][buy] / (den[s] * S[buy, 0])
+                        K[buy, c] += coef
+                        K[buy, 0] -= coef * S[buy, c] / S[buy, 0]
+                else:
+                    K[m[r.set_a], 0] += (1.0 / b) / W[r.set_a]
+                    K[m[r.set_b], 0] += -(a / b ** 2) / W[r.set_b]
+                coefs[t_i].append(K)
+        if not need_jacobian:
+            return value, None, None
+        d_delta = np.zeros((self.k, self._n))
+        d_theta: np.ndarray | None = None
+        for t_i, (t, e) in enumerate(zip(self._in, entries)):
+            if e.get("d_delta") is None or e.get("d_theta") is None:
+                raise ValueError(f"{self.name}: group sums without derivatives (solve with need_jacobian=True)")
+            Kt = np.stack([K.ravel() for K in coefs[t_i]])                 # (k, G (C+1))
+            dD = np.asarray(e["d_delta"], dtype=float)
+            dT = np.asarray(e["d_theta"], dtype=float)
+            d_delta[:, self._markets[t].rows] += Kt @ dD.reshape(-1, dD.shape[-1])
+            part = Kt @ dT.reshape(-1, dT.shape[-1])
+            d_theta = part if d_theta is None else d_theta + part
+        assert d_theta is not None
+        return value, d_delta, d_theta
+
+    def evaluate(self, sol: InnerSolution, linear: LinearFit, need_jacobian: bool) -> MomentBlock:
+        model, dd, dt = self.moments(sol, need_jacobian)
+        return MomentBlock(name=self.name, value=model - self.values, d_delta=dd, d_theta=dt, data=self.values.copy())
+
+    def predicted(self, sol: InnerSolution) -> np.ndarray:
+        """Model values of the rows (for display next to ``values``)."""
+        return self.moments(sol, False)[0]
+
+    def aux_summary(self, sol: InnerSolution) -> dict[str, Any]:
+        """Never-buyer counts per set of the last evaluation (``Evaluation.aux[name]``)."""
+        return dict(self.last_info)
+
+    def covariance_block(self, sol: InnerSolution | None, linear: LinearFit | None) -> np.ndarray:
+        return self.fixed_covariance.copy()
+
+
+#: Keys of ``InnerSolution.outputs`` for second choices (contract in ``SecondChoiceMoments``).
+SECOND_CHOICE_OUTPUTS = "second_choice"
+SECOND_CHOICE_ADJOINT = "second_choice_adjoint"
+
+
+class SecondChoiceMoments:
+    """Second-choice correlation moments (GMY spec WP-G4; ComputeSecondChoiceMoments.m, mom_fnc.m).
+
+    For each year y and characteristic c with a finite data correlation: ``g = corr_c(model) - corr_c(data)`` where the
+    model joint law is ``(s_j^data / S^data) C[j, k]`` renormalised (D3) and C the model's matrix of P(second = k | first
+    = j, second inside), first choices in rows, in the model market's (price) order. Rows with a NaN data correlation
+    (electric before EVs) are dropped. Weight: the fixed covariance ``I / weight^2`` so that a row contributes
+    ``(weight (corr_model - corr_data))^2`` to q (GMY's 30 x residual, mom_fnc.m line 109; D6).
+
+    Model contract: ``sol.outputs["second_choice"]`` is a list with one entry per model market (None outside the
+    requested years) holding ``C`` (J, J) and ``s`` (J,) model shares, with ``C = N / s`` row by row (rows of products
+    with s_j = 0 zero); and ``sol.outputs["second_choice_adjoint"]`` is a callable ``(t, A, B) -> (out_delta (K, J),
+    out_theta (K, P) layout order)`` returning ``sum_jk A[c, j, k] dN_jk - sum_j B[c, j] ds_j`` in delta_t and theta.
+    With ``dC = (dN - C ds) / s`` the moment passes ``A' = A / s_j`` (row scaling) and ``B[c, j] = sum_k A'[c, j, k]
+    C[j, k]``, so the Jacobian costs two kernel passes per market.
+    """
+
+    name: str
+    is_aggregate = False
+    is_micro = True
+
+    def __init__(self, name: str, years: Sequence[Any], chars: Sequence[str], data_corr: dict[Any, np.ndarray],
+                 products_x: dict[Any, np.ndarray], s_data: dict[Any, np.ndarray], weight: float = 30.0) -> None:
+        """SecondChoiceMoments(name, years, chars, data_corr, products_x, s_data, weight=30.0): per year the (K,) data
+        correlations, the (J, K) characteristics and the (J,) data shares in the model's price order."""
+        self.name = name
+        self.years = tuple(years)
+        self.chars = tuple(chars)
+        if not self.years:
+            raise ValueError(f"{name}: no years")
+        if not weight > 0:
+            raise ValueError(f"{name}: weight must be positive")
+        self.weight = float(weight)
+        self.data_corr = {y: np.asarray(data_corr[y], dtype=float).ravel() for y in self.years}
+        self.x = {y: np.asarray(products_x[y], dtype=float) for y in self.years}
+        self.s_data = {y: np.asarray(s_data[y], dtype=float).ravel() for y in self.years}
+        K = len(self.chars)
+        for y in self.years:
+            if self.data_corr[y].size != K or self.x[y].shape != (self.s_data[y].size, K):
+                raise ValueError(f"{name}: year {y}: shapes of data_corr {self.data_corr[y].shape}, x {self.x[y].shape}, "
+                                 f"shares {self.s_data[y].shape} do not fit {K} characteristics")
+        self.keep = {y: np.flatnonzero(np.isfinite(self.data_corr[y])) for y in self.years}
+        self.labels = tuple(f"{y} {self.chars[c]}" for y in self.years for c in self.keep[y])
+        self.values = np.concatenate([self.data_corr[y][self.keep[y]] for y in self.years])
+        self.k = self.values.size
+        self.dataset = MicroDataset(f"{name}_survey", 1, market_ids=self.years)
+        self.fixed_covariance = np.eye(self.k) / self.weight ** 2
+        self._t: dict[Any, int] | None = None
+        self._markets: list[MarketIndex] | None = None
+        self._n: int | None = None
+        self._P: int | None = None
+
+    def bind(self, markets: Sequence[MarketIndex], n_products: int, P: int | None = None) -> None:
+        self._markets = list(markets)
+        self._n, self._P = int(n_products), (None if P is None else int(P))
+        ids = [m.market_id for m in self._markets]
+        missing = [y for y in self.years if y not in ids]
+        if missing:
+            raise ValueError(f"{self.name}: years {missing} are not markets of the model")
+        self._t = {y: ids.index(y) for y in self.years}
+        for y in self.years:
+            J = np.size(self._markets[self._t[y]].rows)
+            if self.s_data[y].size != J:
+                raise ValueError(f"{self.name}: year {y} has {self.s_data[y].size} products, the model market {J}")
+
+    def requests(self) -> KernelRequests:
+        return KernelRequests(second_choice=True, second_choice_markets=self.years)
+
+    def covariance_requests(self) -> KernelRequests:
+        return self.requests()
+
+    def correlations(self, sol: InnerSolution, need_jacobian: bool
+                     ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
+        """(model correlations of the kept rows (k,), d_delta (k, n), d_theta (k, P))."""
+        from .second_choice import correlation_adjoint
+
+        if self._t is None or self._markets is None or self._n is None:
+            raise RuntimeError(f"{self.name}: bind(...) was not called")
+        table = sol.outputs.get(SECOND_CHOICE_OUTPUTS)
+        if not isinstance(table, list) or len(table) != len(self._markets):
+            raise KeyError(f"{self.name}: the solution carries no per-market {SECOND_CHOICE_OUTPUTS!r} list")
+        adj = sol.outputs.get(SECOND_CHOICE_ADJOINT) if need_jacobian else None
+        if need_jacobian and not callable(adj):
+            raise KeyError(f"{self.name}: the solution carries no {SECOND_CHOICE_ADJOINT!r} callable")
+        vals, dds, dts = [], [], []
+        for y in self.years:
+            t = self._t[y]
+            e = table[t]
+            if e is None:
+                raise KeyError(f"{self.name}: no second choices for market {y}")
+            C = np.asarray(e["C"], dtype=float)
+            keep = self.keep[y]
+            corr, A = correlation_adjoint(self.s_data[y], C, self.x[y])
+            vals.append(corr[keep])
+            if not need_jacobian:
+                continue
+            s = np.asarray(e["s"], dtype=float)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                inv = np.where(s > 0, 1.0 / s, 0.0)
+            Ap = A[keep] * inv[None, :, None]
+            B = np.einsum("cjk,jk->cj", Ap, C)
+            assert callable(adj)
+            od, ot = adj(t, Ap, B)
+            dd = np.zeros((keep.size, self._n))
+            dd[:, self._markets[t].rows] = np.asarray(od, dtype=float)
+            dds.append(dd)
+            dts.append(np.asarray(ot, dtype=float))
+        value = np.concatenate(vals)
+        if not need_jacobian:
+            return value, None, None
+        return value, np.vstack(dds), np.vstack(dts)
+
+    def evaluate(self, sol: InnerSolution, linear: LinearFit, need_jacobian: bool) -> MomentBlock:
+        model, dd, dt = self.correlations(sol, need_jacobian)
+        return MomentBlock(name=self.name, value=model - self.values, d_delta=dd, d_theta=dt, data=self.values.copy())
+
+    def predicted(self, sol: InnerSolution) -> np.ndarray:
+        return self.correlations(sol, False)[0]
+
+    def covariance_block(self, sol: InnerSolution | None, linear: LinearFit | None) -> np.ndarray:
+        return self.fixed_covariance.copy()

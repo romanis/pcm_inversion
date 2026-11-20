@@ -521,6 +521,10 @@ def _log_a_lo(model: Any, theta: np.ndarray, c: np.ndarray) -> np.ndarray | None
     return np.log(a) if np.all(a > 0) and a.size else None
 
 
+#: frontier-size bins of ``window_anatomy``'s buyer-mass histogram; the last bin holds every larger size
+FRONTIER_SIZE_BINS = ("1", "2", "3", "4+")
+
+
 def window_anatomy(model: Any, theta: np.ndarray, delta: np.ndarray, markets: Sequence[Any] | None = None,
                    n_threads: int | None = None) -> dict[str, Any]:
     """window_anatomy(model, theta, delta, markets=None, n_threads=None) -> the inputs of the bounded elasticity
@@ -528,15 +532,18 @@ def window_anatomy(model: Any, theta: np.ndarray, delta: np.ndarray, markets: Se
 
     ``frontier_products_per_buying_draw``: products with a window of positive mass; ``log_alpha_range_buyers``:
     log(e_0 / a_lo,i) with e_0 the cutoff of the draw's cheapest frontier product (inf without a bound);
-    ``window_width_log_alpha``: the sales-weighted width of a product's window in log alpha. ``by_market`` holds
-    the same three per market id. Own elasticity is about (p / hull gap) / window width.
+    ``window_width_log_alpha``: the sales-weighted width of a product's window in log alpha;
+    ``frontier_size_mass``: the buyer mass by frontier size, {"1", "2", "3", "4+"} -> share of the sales-weighted
+    buying mass, and ``single_frontier_buyer_share`` its "1" entry (a draw whose only frontier product faces the
+    outside good on its cheap side, so p / hull gap = 1, GMY round 2). ``by_market`` holds the same per market id.
+    Own elasticity is about (p / hull gap) / window width.
     """
     th, ph, sp = model.kernel_params(theta)
     bound = _bound(model, theta)
     nt = _threads(model, n_threads)
     delta = np.asarray(delta, dtype=float)
     ids = None if markets is None else {str(x) for x in markets}
-    tot = {"wm": 0.0, "n": 0.0, "range": 0.0, "width": 0.0}
+    tot = {"wm": 0.0, "n": 0.0, "range": 0.0, "width": 0.0, **{f"size:{b}": 0.0 for b in FRONTIER_SIZE_BINS}}
     by_market: dict[str, dict[str, float]] = {}
     for t, m in enumerate(model.markets):
         if ids is not None and str(m.market_id) not in ids:
@@ -546,9 +553,13 @@ def window_anatomy(model: Any, theta: np.ndarray, delta: np.ndarray, markets: Se
         w = np.asarray(km.weights, dtype=float)
         wm = w * np.asarray(r["mass"])
         buy = wm > 0
-        part = {"wm": float(wm.sum()), "n": float(wm @ np.asarray(r["frontier_size"], dtype=float)),
+        size = np.asarray(r["frontier_size"], dtype=float)
+        part = {"wm": float(wm.sum()), "n": float(wm @ size),
                 "range": float(wm[buy] @ np.asarray(r["log_range"])[buy]),
                 "width": float(w[buy] @ np.asarray(r["mass_log_width"])[buy])}
+        top = len(FRONTIER_SIZE_BINS)
+        for k, b in enumerate(FRONTIER_SIZE_BINS, start=1):
+            part[f"size:{b}"] = float(wm[size >= k].sum() if k == top else wm[size == k].sum())
         for k in tot:
             tot[k] += part[k]
         by_market[str(m.market_id)] = _anatomy_stats(part)
@@ -557,12 +568,14 @@ def window_anatomy(model: Any, theta: np.ndarray, delta: np.ndarray, markets: Se
     return out
 
 
-def _anatomy_stats(a: Mapping[str, float]) -> dict[str, float]:
+def _anatomy_stats(a: Mapping[str, float]) -> dict[str, Any]:
     d = a["wm"]
     nan = float("nan")
+    hist = {b: a[f"size:{b}"] / d if d > 0 else nan for b in FRONTIER_SIZE_BINS}
     return {"frontier_products_per_buying_draw": a["n"] / d if d > 0 else nan,
             "log_alpha_range_buyers": a["range"] / d if d > 0 else nan,
-            "window_width_log_alpha": a["width"] / d if d > 0 else nan}
+            "window_width_log_alpha": a["width"] / d if d > 0 else nan,
+            "frontier_size_mass": hist, "single_frontier_buyer_share": hist[FRONTIER_SIZE_BINS[0]]}
 
 
 def spread_in_buyer_dollars(model: Any, theta: np.ndarray, delta: np.ndarray) -> dict[str, Any]:

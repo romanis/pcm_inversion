@@ -11,109 +11,18 @@ using Eigen::ArrayXd;
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
 
-// defined in pcm_market_share.cpp: indices of products on the vertical frontier
-std::vector<int> index_positive_shares(const ArrayXd & delta, const ArrayXd & p);
+using pcm_share::detail::LnTerms;
+using pcm_share::detail::Trunc;
+using pcm_share::detail::ln_terms;
+using pcm_share::detail::make_trunc;
 
 namespace {
-
-constexpr double INV_SQRT_2PI = 0.39894228040143267794;
-
-// LogNormal(0, sigma) cdf F, pdf f and dF/dsigma g at e > 0. All are 0 at e <= 0. h = dF/dlog c is
-// zero without truncation.
-struct LnTerms { double F, f, g, h; };
-
-// Lower truncation of a ~ LogNormal(0, sigma) at a_lo for one draw: z_lo = log(a_lo) / sigma, the mass
-// kept Z = 1 - Phi(z_lo) and phi(z_lo). Off when a_lo <= 0 (the untruncated model, exactly the old code).
-struct Trunc {
-    bool on = false;
-    double a_lo = 0.0, z_lo = 0.0, Phi_lo = 0.0, Z = 1.0, phi_lo = 0.0;
-};
-
-inline Trunc make_trunc(double a_lo, double sigma) {
-    Trunc tr;
-    if (!(a_lo > 0.0)) return tr;
-    tr.on = true;
-    tr.a_lo = a_lo;
-    tr.z_lo = std::log(a_lo) / sigma;
-    tr.Phi_lo = 0.5 * std::erfc(-tr.z_lo / std::sqrt(2.0));
-    tr.Z = 0.5 * std::erfc(tr.z_lo / std::sqrt(2.0));
-    tr.phi_lo = INV_SQRT_2PI * std::exp(-0.5 * tr.z_lo * tr.z_lo);
-    return tr;
-}
-
-inline LnTerms ln_terms(double e, double sigma, const Trunc & tr) {
-    if (!tr.on) {
-        if (e <= 0.0) return {0.0, 0.0, 0.0, 0.0};
-        const double z = std::log(e) / sigma;
-        const double phi = INV_SQRT_2PI * std::exp(-0.5 * z * z);
-        return {0.5 * std::erfc(-z / std::sqrt(2.0)), phi / (e * sigma), -phi * z / sigma, 0.0};
-    }
-    // F_T(e) = (Phi(z) - Phi(z_lo)) / Z for e > a_lo, else 0 (SPEC_ANALYSIS v4 section 2). Z underflowing
-    // to 0 means no mass above the bound at all: every window is empty.
-    if (e <= tr.a_lo || !(tr.Z > 0.0)) return {0.0, 0.0, 0.0, 0.0};
-    const double z = std::log(e) / sigma;
-    const double phi = INV_SQRT_2PI * std::exp(-0.5 * z * z);
-    const double Qz = 0.5 * std::erfc(z / std::sqrt(2.0));          // 1 - Phi(z)
-    // the difference of the two cdfs taken in the tail where it is accurate
-    const double num = tr.z_lo < 0.0 ? 0.5 * std::erfc(-z / std::sqrt(2.0)) - tr.Phi_lo : tr.Z - Qz;
-    const double one_minus_F = Qz / tr.Z;
-    const double sZ = sigma * tr.Z;
-    return {num / tr.Z, phi / (e * sZ), (-phi * z + tr.phi_lo * tr.z_lo * one_minus_F) / sZ,
-            tr.phi_lo * one_minus_F / sZ};
-}
 
 bool feasible(const ArrayXd & s) { return (s > 0).all() && s.sum() < 1.0; }
 
 }  // namespace
 
 namespace pcm_demand::detail {
-
-// Vertical model for one draw, written into global-index outputs (which must be zeroed).
-// Products off the frontier get zero share and zero derivatives.
-void cond_vertical(const ArrayXd & d, const ArrayXd & p, double sigma, double a_lo,
-                   ArrayXd & s, MatrixXd * Jd, ArrayXd * dsig, MatrixXd * Jp, ArrayXd * dlogc)
-{
-    const std::vector<int> ind = index_positive_shares(d, p);
-    const int m = static_cast<int>(ind.size());
-    if (m == 0) return;
-
-    // endpoints e_0..e_m (e_m = 0) and the price gaps they divide by
-    std::vector<double> e(m + 1, 0.0), gap(m, 0.0);
-    gap[0] = p[ind[0]];
-    e[0] = d[ind[0]] / gap[0];
-    for (int k = 1; k < m; ++k) {
-        gap[k] = p[ind[k]] - p[ind[k - 1]];
-        e[k] = (d[ind[k]] - d[ind[k - 1]]) / gap[k];
-    }
-    const Trunc tr = make_trunc(a_lo, sigma);
-    std::vector<LnTerms> t(m + 1);
-    for (int k = 0; k <= m; ++k) t[k] = ln_terms(e[k], sigma, tr);
-
-    for (int k = 0; k < m; ++k) s[ind[k]] = t[k].F - t[k + 1].F;
-    if (!Jd) return;
-
-    // s_k = F(e_k) - F(e_{k+1}); e_k depends on d_k (+1/gap_k) and d_{k-1} (-1/gap_k)
-    for (int k = 0; k < m; ++k) {
-        const int gk = ind[k];
-        (*dsig)[gk] = t[k].g - t[k + 1].g;
-        if (dlogc) (*dlogc)[gk] = t[k].h - t[k + 1].h;
-        // through e_k
-        (*Jd)(gk, gk) += t[k].f / gap[k];
-        (*Jp)(gk, gk) += t[k].f * (-e[k] / gap[k]);
-        if (k > 0) {
-            (*Jd)(gk, ind[k - 1]) += -t[k].f / gap[k];
-            (*Jp)(gk, ind[k - 1]) += t[k].f * (e[k] / gap[k]);
-        }
-        // through e_{k+1} (absent for the last product: e_m = 0 is fixed)
-        if (k + 1 < m) {
-            const double fk1 = t[k + 1].f, g1 = gap[k + 1];
-            (*Jd)(gk, ind[k + 1]) -= fk1 / g1;
-            (*Jd)(gk, gk) -= -fk1 / g1;
-            (*Jp)(gk, ind[k + 1]) -= fk1 * (-e[k + 1] / g1);
-            (*Jp)(gk, gk) -= fk1 * (e[k + 1] / g1);
-        }
-    }
-}
 
 // For every product, the smallest increase in delta_j that puts it on at least one consumer's
 // frontier. For draw i the frontier is the increasing part of the upper convex hull of the points
@@ -295,7 +204,7 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
 
             s_c.setZero();
             if (with_derivatives) { Jd.setZero(); Jp.setZero(); dsig.setZero(); dlogc.setZero(); }
-            detail::cond_vertical(dc, mk.p, prm.sigma_p, draw_a_lo(prm, c), s_c,
+            pcm_share::cond_share(dc, mk.p, prm.sigma_p, draw_a_lo(prm, c), s_c,
                                   with_derivatives ? &Jd : nullptr, &dsig, &Jp, scale_bound ? &dlogc : nullptr);
 
             const double w = mk.weights[i];
@@ -327,8 +236,11 @@ Shares shares(const ArrayXd & delta, const Market & mk, const Params & prm, bool
     return out;
 }
 
+// robust_restart: a second attempt with the robust repair when a repaired start does not converge (the caller's warm
+// start only; the continuation steps below keep the original repair)
 InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Params & prm,
-                            const ArrayXd & delta0, double tol, unsigned max_evals, unsigned & evals);
+                            const ArrayXd & delta0, double tol, unsigned max_evals, unsigned & evals,
+                            bool robust_restart = false);
 
 InversionResult invert(const ArrayXd & s_data, const Market & mk, const Params & prm,
                        const ArrayXd & delta0, double tol, unsigned max_evals)
@@ -336,7 +248,7 @@ InversionResult invert(const ArrayXd & s_data, const Market & mk, const Params &
     if ((s_data <= 0).any() || s_data.sum() >= 1.0)
         throw std::runtime_error("pcm_demand::invert: data shares must be positive and sum below one");
     unsigned evals = 0;
-    InversionResult res = invert_from(s_data, mk, prm, delta0, tol, max_evals, evals);
+    InversionResult res = invert_from(s_data, mk, prm, delta0, tol, max_evals, evals, delta0.size() == s_data.size());
     if (res.converged) { res.share_evaluations = evals; return res; }
 
     // Continuation in the heterogeneity: at lambda = 0 (no taste or scale heterogeneity) the
@@ -392,81 +304,135 @@ InversionResult invert(const ArrayXd & s_data, const Market & mk, const Params &
 }
 
 InversionResult invert_from(const ArrayXd & s_data, const Market & mk, const Params & prm,
-                            const ArrayXd & delta0, double tol, unsigned max_evals, unsigned & evals)
+                            const ArrayXd & delta0, double tol, unsigned max_evals, unsigned & evals,
+                            bool robust_restart)
 {
     const int N = static_cast<int>(s_data.size());
-    InversionResult res{ArrayXd(), 0.0, 0, 0, false};
     auto S = [&](const ArrayXd & d) { ++evals; return shares(d, mk, prm, false).s; };
     const ArrayXd log_sd = s_data.log();
     // Residual in log shares: a 0.1% brand weighs as much as a 10% brand.
     auto logres = [&](const ArrayXd & s) { return (s.log() - log_sd).eval(); };
 
-    // starting point: caller's warm start, else the no-heterogeneity vertical guess; either is
-    // repaired if some products have zero share
-    ArrayXd delta = delta0.size() == N ? delta0 : detail::initial_guess(s_data, mk.p, prm);
-    ArrayXd s = S(delta);
-    {
-        // repair: lift every zero-share product onto some consumer's frontier plus a margin that
-        // grows with each round; if the outside good has vanished lower everything
+    // repair: lift every zero-share product onto some consumer's frontier plus a margin that grows with each round; if
+    // the outside good has vanished lower everything. ``robust`` adds the two rules of the second attempt (below).
+    auto repair = [&](ArrayXd & delta, ArrayXd & s, bool robust) {
         double margin = 1e-5;
+        std::vector<char> lifted(N, 0);
+        bool repaired = false;
         for (int k = 0; k < 60 && !feasible(s) && evals < max_evals; ++k) {
             const double span = std::max(delta.maxCoeff() - delta.minCoeff(), 1e-3 * delta.abs().maxCoeff() + 1e-8);
             if (s.sum() >= 1.0) delta -= 0.05 * span;
             const ArrayXd lift = detail::frontier_lift(delta, mk, prm);
             ++evals;
-            for (int j = 0; j < N; ++j)
-                if (s[j] <= 0 && std::isfinite(lift[j])) delta[j] += lift[j] + margin * span;
+            bool cycling = false;
+            if (robust)
+                for (int j = 0; j < N; ++j) cycling |= s[j] <= 0 && lifted[j];
+            for (int j = 0; j < N; ++j) {
+                if (s[j] <= 0 && std::isfinite(lift[j])) {
+                    delta[j] += lift[j] + margin * span;
+                    lifted[j] = 1;
+                } else if (cycling && lifted[j]) {
+                    delta[j] += margin * span;
+                }
+            }
+            repaired = true;
             s = S(delta);
             if (k % 10 == 9) margin *= 3.0;
         }
-        if (!feasible(s)) { res.delta = delta; res.max_abs_residual = INFINITY; return res; }
-    }
-
-    double mu = 0.0;
-    for (unsigned iter = 0; iter < 150 && evals < max_evals; ++iter) {
-        res.iterations = iter;
-        Shares sh = shares(delta, mk, prm, true);
-        ++evals;
-        res.max_abs_residual = (sh.s - s_data).abs().maxCoeff();
-        if (res.max_abs_residual < tol) { res.converged = true; break; }
-        const ArrayXd r = logres(sh.s);
-        const double merit = 0.5 * r.matrix().squaredNorm();
-        // Jacobian of log shares: rows of ds/d delta divided by s
-        const MatrixXd J = sh.s.inverse().matrix().asDiagonal() * sh.d_delta;
-
-        bool accepted = false;
-        for (int attempt = 0; attempt < 6 && !accepted && evals < max_evals; ++attempt) {
-            VectorXd step;
-            if (mu == 0.0) {
-                step = J.partialPivLu().solve(-r.matrix());
-                if (!step.allFinite()) { mu = 1e-8; continue; }
-            } else {
-                MatrixXd A = J.transpose() * J;
-                A.diagonal().array() += mu * std::max(A.diagonal().maxCoeff(), 1e-300);
-                step = A.ldlt().solve(-(J.transpose() * r.matrix()));
-            }
-            const double slope = r.matrix().dot(J * step);
-            double lambda = 1.0;
-            for (int k = 0; k < 14 && evals < max_evals; ++k, lambda *= 0.5) {
-                const ArrayXd cand = delta + lambda * step.array();
-                const ArrayXd sc = S(cand);
-                if (!feasible(sc)) continue;
-                const double mc = 0.5 * logres(sc).matrix().squaredNorm();
-                if (mc < (slope < 0 ? merit + 1e-4 * lambda * slope : merit)) {
-                    delta = cand; accepted = true; break;
-                }
-            }
-            if (accepted) { mu = mu / 10.0; if (mu < 1e-10) mu = 0.0; }
-            else          { mu = (mu == 0.0) ? 1e-8 : mu * 100.0; }
+        if (!robust || !repaired || !feasible(s)) return;
+        // A product lifted onto a hull by the margin alone holds a sliver of one draw's window (shares of 1e-19 against
+        // targets of 1e-6): its row of the log-share Jacobian is 1e17 times the others, so the Newton step is no use
+        // and every damped step is negligible. Raise each product whose share is below 1% of its target by an
+        // increment that doubles while it stays below (halved for all when a round would make some share zero).
+        const double span = std::max(delta.maxCoeff() - delta.minCoeff(), 1e-3 * delta.abs().maxCoeff() + 1e-8);
+        ArrayXd inc = ArrayXd::Constant(N, margin * span);
+        for (int k = 0; k < 60 && evals < max_evals; ++k) {
+            const Eigen::Array<bool, Eigen::Dynamic, 1> low = s < 1e-2 * s_data;
+            if (!low.any()) break;
+            const ArrayXd cand = delta + low.cast<double>() * inc;
+            const ArrayXd sc = S(cand);
+            if (!feasible(sc)) { inc *= 0.5; continue; }
+            delta = cand;
+            s = sc;
+            inc = low.select(2.0 * inc, inc);
         }
-        if (!accepted) break;
-    }
-    if (!res.converged) {
-        const ArrayXd r = S(delta) - s_data;
-        res.max_abs_residual = r.abs().maxCoeff();
-        res.converged = res.max_abs_residual < tol;
-    }
-    res.delta = delta;
+    };
+
+    // damped Newton on the log shares from a feasible delta
+    auto newton = [&](ArrayXd delta) {
+        InversionResult res{ArrayXd(), 0.0, 0, 0, false};
+        double mu = 0.0;
+        for (unsigned iter = 0; iter < 150 && evals < max_evals; ++iter) {
+            res.iterations = iter;
+            Shares sh = shares(delta, mk, prm, true);
+            ++evals;
+            res.max_abs_residual = (sh.s - s_data).abs().maxCoeff();
+            if (res.max_abs_residual < tol) { res.converged = true; break; }
+            const ArrayXd r = logres(sh.s);
+            const double merit = 0.5 * r.matrix().squaredNorm();
+            // Jacobian of log shares: rows of ds/d delta divided by s
+            const MatrixXd J = sh.s.inverse().matrix().asDiagonal() * sh.d_delta;
+
+            bool accepted = false;
+            for (int attempt = 0; attempt < 6 && !accepted && evals < max_evals; ++attempt) {
+                VectorXd step;
+                if (mu == 0.0) {
+                    step = J.partialPivLu().solve(-r.matrix());
+                    if (!step.allFinite()) { mu = 1e-8; continue; }
+                } else {
+                    MatrixXd A = J.transpose() * J;
+                    A.diagonal().array() += mu * std::max(A.diagonal().maxCoeff(), 1e-300);
+                    step = A.ldlt().solve(-(J.transpose() * r.matrix()));
+                }
+                const double slope = r.matrix().dot(J * step);
+                double lambda = 1.0;
+                for (int k = 0; k < 14 && evals < max_evals; ++k, lambda *= 0.5) {
+                    const ArrayXd cand = delta + lambda * step.array();
+                    const ArrayXd sc = S(cand);
+                    if (!feasible(sc)) continue;
+                    const double mc = 0.5 * logres(sc).matrix().squaredNorm();
+                    if (mc < (slope < 0 ? merit + 1e-4 * lambda * slope : merit)) {
+                        delta = cand; accepted = true; break;
+                    }
+                }
+                if (accepted) { mu = mu / 10.0; if (mu < 1e-10) mu = 0.0; }
+                else          { mu = (mu == 0.0) ? 1e-8 : mu * 100.0; }
+            }
+            if (!accepted) break;
+        }
+        if (!res.converged) {
+            const ArrayXd r = S(delta) - s_data;
+            res.max_abs_residual = r.abs().maxCoeff();
+            res.converged = res.max_abs_residual < tol;
+        }
+        res.delta = delta;
+        return res;
+    };
+
+    // starting point: caller's warm start, else the no-heterogeneity vertical guess; either is
+    // repaired if some products have zero share
+    const ArrayXd start = delta0.size() == N ? delta0 : detail::initial_guess(s_data, mk.p, prm);
+    ArrayXd delta = start;
+    ArrayXd s = S(delta);
+    const bool needed_repair = !feasible(s);
+    repair(delta, s, false);
+    InversionResult res{delta, INFINITY, 0, 0, false};
+    if (feasible(s)) res = newton(delta);
+    if (res.converged || !needed_repair || !robust_restart || evals >= max_evals) return res;
+
+    // Second attempt, only from a caller's warm start that needed a repair and did not converge (a cold start keeps the
+    // continuation of ``invert``, so every inversion that converged before is unchanged). Products of shares near 1e-7 are bought by one draw each; two of them on the same draw
+    // displace each other, so lifting one onto that draw's hull drops the other below the new chord, round after
+    // round (GMY 2015 at a 2e-5 step: 60 rounds and no feasible start). Once a product lifted before is at zero again,
+    // every product lifted so far is raised by the margin too, and the pair moves up together onto the hull; then the
+    // products the lift left with a sliver of a window are raised toward their targets before Newton starts.
+    ArrayXd delta2 = start;
+    ArrayXd s2 = S(delta2);
+    repair(delta2, s2, true);
+    if (!feasible(s2)) return res;
+    InversionResult res2 = newton(delta2);
+    if (res2.converged || !std::isfinite(res.max_abs_residual) || res2.max_abs_residual < res.max_abs_residual)
+        return res2;
     return res;
 }
 

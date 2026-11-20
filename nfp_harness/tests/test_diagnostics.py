@@ -328,6 +328,35 @@ def test_se_gate_and_sandwich() -> None:
 # ------------------------------------------------------------------------------------------------
 
 
+def test_integration_stability_failed_rerun_is_inconclusive() -> None:
+    """The round-4 GMY stability stage: the doubled-draw re-run could not invert 1991 at its start point, so it ended
+    INVERSION_FAILED with q nan, no accepted step and theta unchanged. Every parameter "moved" 0, which must not read
+    as STABLE."""
+    base = result([1.0, 2.0], 940.0)
+    why = ("start point could not be evaluated (status inversion_failed; markets 1991: not_converged (warm failed "
+           "2.21e+03s 2502ev; path failed 731s 842ev tau=0.5; cold failed 1.34s 2ev))")
+    failed_rec = HistoryRecord(iteration=0, accepted=False, q=float("nan"), q_fixed=float("nan"), q_cue=float("nan"),
+                               sd_xi=float("nan"), rho=float("nan"), Delta=0.1, tau_cap=1.0,
+                               status=EvalStatus.INVERSION_FAILED, seconds=2940.0, theta=np.array([1.0, 2.0]))
+
+    def rerun(t):
+        r = result(t, float("nan"), cls=ConvergenceClass.INVERSION_FAILED, history=[failed_rec])
+        r.accepted_steps, r.message = 0, why
+        return r
+
+    b = integration_stability(base, rerun, np.ones(2), names=["a", "b"])
+    assert b.values["status"] == "INCONCLUSIVE" and b.status == "flag"
+    assert b.values["rerun_class"] == "INVERSION_FAILED" and b.values["changes"] == {} and b.values["dq"] is None
+    assert len(b.messages) == 1 and "STABLE" not in b.messages[0].replace("INCONCLUSIVE", "")
+    assert b.messages[0].startswith("FLAG: Integration INCONCLUSIVE with doubled draws: the re-run ended "
+                                    "INVERSION_FAILED after 0 accepted steps")
+    assert "markets 1991: not_converged" in b.messages[0]
+    json.dumps(to_jsonable(b), allow_nan=False)
+    # a finished re-run whose q is not finite is inconclusive too
+    nan_q = integration_stability(base, lambda t: result(t, float("nan")), np.ones(2))
+    assert nan_q.values["status"] == "INCONCLUSIVE" and "q = nan" in nan_q.values["reason"]
+
+
 def test_integration_stability_and_multistart() -> None:
     base = result([1.0, 2.0], 10.0)
     stable = integration_stability(base, lambda t: result(t + 0.01, 10.2, history=[rec(0, 10.1, theta=t)]),

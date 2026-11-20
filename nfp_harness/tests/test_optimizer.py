@@ -316,6 +316,25 @@ def test_failing_start_is_inversion_failed() -> None:
     assert res.convergence is ConvergenceClass.INVERSION_FAILED and res.evaluation is None
 
 
+def test_failing_start_names_the_failed_markets() -> None:
+    """A start point whose inversion fails in some markets says which in the result message (read by the stability
+    report)."""
+    class MarketToy(ToyProblem):
+        def evaluate(self, theta: np.ndarray, need_jacobian: bool = True) -> Evaluation:
+            ev = super().evaluate(theta, need_jacobian)
+            ev.aux["per_market"] = [{"market_id": 1980, "status": "ok", "kernel_status": "ok", "stages": "warm ok"},
+                                    {"market_id": 1991, "status": "inversion_failed", "kernel_status": "not_converged",
+                                     "stages": "warm failed; path failed; cold failed"}]
+            return ev
+
+    p = MarketToy(lambda t: (t, np.eye(1)), [spec("t", 2.0)], fails=lambda t: True)
+    res = minimize(p, np.eye(1), OptimizerOptions())
+    assert res.convergence is ConvergenceClass.INVERSION_FAILED and res.accepted_steps == 0
+    assert res.message.startswith("start point could not be evaluated (status inversion_failed; markets 1991: "
+                                  "not_converged (warm failed; path failed; cold failed))")
+    assert "1980" not in res.message
+
+
 # ------------------------------------------------------------------------------------------------
 # 9. two-step on a linear IV toy
 # ------------------------------------------------------------------------------------------------
@@ -668,3 +687,124 @@ def test_compass_probe_stops_at_the_first_winning_step() -> None:
     *_, nev0, _, win0 = _terminal_probe(p, obj, theta, q, np.array([0.0, 1.0]), arr, (0.01, 0.03, 0.1),
                                         gain_needed=1e9)
     assert win0 == 0.0 and nev0 == 18
+
+
+# ------------------------------------------------------------------------------------------------
+# GMY round 1: the trust-region collapse on a kinked objective (radius floor relative to the parameter scale, restart
+# radius at the probe step, probe restarts while the compass still finds real decreases)
+# ------------------------------------------------------------------------------------------------
+
+
+def kinked_bowl(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Five residuals, each a slope 1 plus a sawtooth of period 0.01 and amplitude 0.1; G is the active-piece slope
+    11 (the analytic Jacobian of a kinked law, like the second choices'), exact inside a piece and 11 times too steep
+    over steps that cross many pieces."""
+    t = np.asarray(theta, dtype=float)
+    saw = 0.1 * (((t / 0.01) % 1.0) - 0.5)
+    return (t - 1.0) + saw, 11.0 * np.eye(t.size)
+
+
+def test_radius_floor_relative_to_scale_avoids_the_crawl() -> None:
+    """From 2 units away, a floor of 1e-3 lets the radius collapse onto the sawtooth and the stage ends far from the
+    optimum (40 trials end near t = 0.16, accepted steps of 1e-3); a floor of 0.05 natural units keeps the steps at
+    the scale where they cross many pieces and reaches the optimum."""
+    specs = [spec(f"t{k}", -0.9973, unit=1.0) for k in range(5)]
+    base = replace(NOISE_OPTS, Delta_0=0.1, max_iterations=40, more_scaling=True)
+    lo = minimize(ToyProblem(kinked_bowl, specs), np.eye(5), base)
+    hi = minimize(ToyProblem(kinked_bowl, specs), np.eye(5),
+                  replace(base, noise_Delta_floor=0.05, probe_restart_at_step=True))
+    assert all(h.Delta >= 0.05 * (1 - 1e-12) for h in hi.history)
+    assert hi.q < 0.1 * lo.q
+    assert np.max(np.abs(hi.theta - 1.0)) < 0.1
+
+
+def test_probe_restarts_continue_while_the_gain_is_real() -> None:
+    """G misses y entirely (zero column), so only the compass moves it, at most 0.1 per restart; y must travel 0.5.
+    With max_probe_restarts = 2 the stage ends CONVERGED_NOISE at y = -0.2 although a 0.1 step still lowers q by 5;
+    with probe_restart_gain = 0.5 it keeps restarting while the gain exceeds 0.5 and ends at the optimum."""
+    def fn(t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        x, y = float(t[0]), float(t[1])
+        g = np.array([x - 1.0 + 0.003 * np.sin(1e7 * x), 10.0 * (y + 0.5)])
+        return g, np.array([[1.0, 0.0], [0.0, 0.0]])
+
+    opts = OptimizerOptions(pg_tol=1e-12, gn_tol=1e-16, max_rejections=40, flat_window=200, noise_probe=1e-5,
+                            noise_converge=True, probe_steps=(0.01, 0.03, 0.1), max_probe_restarts=2)
+    capped = minimize(ToyProblem(fn, [spec("x", 0.0), spec("y", 0.0)]), np.eye(2), opts)
+    assert capped.convergence is ConvergenceClass.CONVERGED_NOISE
+    assert capped.theta[1] == pytest.approx(-0.2, abs=1e-12)
+    free = minimize(ToyProblem(fn, [spec("x", 0.0), spec("y", 0.0)]), np.eye(2),
+                    replace(opts, probe_restart_gain=0.5))
+    assert free.convergence is ConvergenceClass.CONVERGED_NOISE
+    assert free.theta[1] == pytest.approx(-0.5, abs=1e-12)
+    assert sum(1 for h in free.history[1:] if math.isnan(h.rho) and h.accepted) == 5
+
+
+def test_probe_restart_gain_relative_to_q() -> None:
+    """The toy of the previous test: y = 0, -0.1, .., -0.5 has q = 25, 16, 9, 4, 1, 0 (x contributes about 1e-5), so
+    the restarts gain 9, 7, 5, 3, 1, i.e. 0.36, 0.44, 0.56, 0.75 and 1.0 of q at their origin. probe_restart_gain_rel =
+    0.4 refuses the first restart although the cap allows ten; 0.3 restarts past a cap of 2 to the optimum; unset, the
+    cap of ten is the only rule, as before."""
+    def fn(t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        x, y = float(t[0]), float(t[1])
+        g = np.array([x - 1.0 + 0.003 * np.sin(1e7 * x), 10.0 * (y + 0.5)])
+        return g, np.array([[1.0, 0.0], [0.0, 0.0]])
+
+    def run(**kw: Any) -> Any:
+        opts = OptimizerOptions(pg_tol=1e-12, gn_tol=1e-16, max_rejections=40, flat_window=200, noise_probe=1e-5,
+                                noise_converge=True, probe_steps=(0.01, 0.03, 0.1), **kw)
+        return minimize(ToyProblem(fn, [spec("x", 0.0), spec("y", 0.0)]), np.eye(2), opts)
+
+    def restarts(res: Any) -> int:
+        return sum(1 for h in res.history[1:] if math.isnan(h.rho) and h.accepted)
+
+    unset = run(max_probe_restarts=10)
+    assert unset.theta[1] == pytest.approx(-0.5, abs=1e-12) and restarts(unset) == 5
+    refused = run(max_probe_restarts=10, probe_restart_gain_rel=0.4)
+    assert refused.convergence is ConvergenceClass.CONVERGED_NOISE
+    assert refused.theta[1] == 0.0 and restarts(refused) == 0
+    assert "does not restart" in refused.message
+    past_cap = run(max_probe_restarts=2, probe_restart_gain_rel=0.3)
+    assert past_cap.theta[1] == pytest.approx(-0.5, abs=1e-12) and restarts(past_cap) == 5
+    # with an absolute gain as well, past the cap the gain must exceed both: 2 restarts, then gains of 5 > 0.3 x 9 but
+    # not > 6
+    both = run(max_probe_restarts=2, probe_restart_gain_rel=0.3, probe_restart_gain=6.0)
+    assert both.theta[1] == pytest.approx(-0.2, abs=1e-12) and restarts(both) == 2
+    assert "probe_restart_gain_rel" not in repr(OptimizerOptions(probe_restart_gain_rel=0.1))
+
+
+def test_restart_radius_is_at_least_the_probe_step_under_more_scaling() -> None:
+    """With More scaling a coordinate whose weight is small would restart at (weight x 0.1); with
+    probe_restart_at_step the restart radius is at least the 0.1 the probe measured."""
+    def fn(t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        x, y = float(t[0]), float(t[1])
+        g = np.array([100.0 * (x - 1.0) + 0.3 * np.sin(1e7 * x), 10.0 * (y + 0.5), 0.0])
+        return g, np.array([[100.0, 0.0], [0.0, 0.0], [0.0, 0.01]])
+
+    opts = OptimizerOptions(pg_tol=1e-12, gn_tol=1e-16, max_rejections=40, flat_window=200, noise_probe=1e-5,
+                            noise_converge=True, probe_steps=(0.01, 0.03, 0.1), more_scaling=True, Delta_0=0.004,
+                            max_probe_restarts=1)
+    res = minimize(ToyProblem(fn, [spec("x", 1.0), spec("y", 0.0)]), np.eye(3),
+                   replace(opts, probe_restart_at_step=True))
+    restarts = [h for h in res.history[1:] if math.isnan(h.rho) and h.accepted]
+    assert restarts and restarts[0].Delta >= 0.1 * (1 - 1e-12)
+
+
+def test_failed_evaluations_lower_the_radius_floor() -> None:
+    """A warm-started inversion fails when the step from the accepted point is too long (GMY 2015/2018 at a 0.05 floor:
+    every trial failed and the floor reset the radius to the same failing length). Here a trial fails when it moves
+    more than 0.02 from the accepted point; the optimum is 1 unit away. With the floor at 0.05 a failure must lower the
+    floor below the failing radius, so the stage keeps accepting steps and reaches the optimum, and the terminal probe
+    never polls steps longer than the failing length."""
+    def fn(t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return np.array([float(t[0]) - 1.0]), np.array([[1.0]])
+
+    p = ToyProblem(fn, [spec("x", 0.0, unit=1.0)])
+    p.fails = lambda th: p.accepted is not None and abs(float(th[0]) - float(p.accepted[0])) > 0.02 + 1e-12
+    p.accepted = np.array([0.0])
+    opts = replace(NOISE_OPTS, Delta_0=0.1, max_iterations=400, noise_Delta_floor=0.05, probe_restart_at_step=True)
+    res = minimize(p, np.eye(1), opts)
+    accepted = [h for h in res.history[1:] if h.accepted]
+    failed = [h for h in res.history[1:] if h.status is EvalStatus.INVERSION_FAILED]
+    assert len(accepted) >= 40                  # 1 unit in steps of at most 0.02
+    assert len(failed) <= 10                    # the floor drops after a failure instead of repeating it
+    assert res.theta[0] == pytest.approx(1.0, abs=0.02)

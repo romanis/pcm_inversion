@@ -23,11 +23,13 @@ latest one is also copied to the run directory root):
   the ``--gate-nu`` run, then ``spec.start_concentrate`` re-solved alone with
   ``spec.start_concentrate_weighting``), and W1 is formed there.
 - ``step2``: W2 = S(theta_hat_1)^{-1} from theta_hat_1. Refused unless step 1 converged (CONVERGED_NOISE
-  counts) and its report shows none of TwoStep's blocking degeneracies (DESIGN 4.5).
+  counts) and its report shows none of TwoStep's blocking degeneracies (DESIGN 4.5). SD_XI_BLOWUP is a warning
+  (logged, ``reports/step2_warning.txt``) instead when the aggregate block is in Sargan form (``_step2_gate``).
 - ``post``: at the last finished estimate (step2, else step1): the report again and ``spec.post``, whose
   summary goes to ``post/summary.json``.
 - ``stability``: at most 20 optimizer iterations from the estimate with ``2 nu`` draws per agent and new
-  seeds, then the report with the integration block (DESIGN 5.7) and ``spec.headlines`` compared.
+  seeds, warm-started from the estimate's model state (its delta at the estimate), then the report with the
+  integration block (DESIGN 5.7) and ``spec.headlines`` compared.
 - ``sigma_p_band`` (set identification of one parameter, the fallback when the gate fails): for each value in
   ``spec.band_values`` of ``spec.band_parameter``, that parameter fixed, fixed-W step 1 (W1) and step 2 (W2 =
   S^{-1} at the step-1 point, only if step 1 converged) on ``spec.band_moments`` from the prefit point, then
@@ -53,7 +55,8 @@ latest one is also copied to the run directory root):
   run one after another, each on all threads.
 
 Every W the estimation stages minimise (W1, W2, band W) passes through ``spec.binding_weighting(problem, W)``
-when the spec has it, e.g. to make a calibration row bind.
+when the spec has it, e.g. to make a calibration row bind. A spec with ``step2_weighting(problem, ev1) -> W2`` forms
+W2 itself (step2 and the band stages), e.g. when a block of S is singular by construction.
 
 ``--stage all`` runs extensive, step1, step2, post and stability in order; a refused stage is reported and the
 chain continues with what it can do (post and stability fall back to the step-1 estimate). When extensive or
@@ -70,7 +73,7 @@ layout_changes=None) -> NFPGMMProblem`` with ``moments`` in {"all", "demand", "p
 ``prefit_free``, ``prefit_max_iterations``; ``gate_profiles() -> [(name, moments, kwargs)]`` with
 ``ray_profile`` keyword arguments (direction, lambdas, grid, origin, economics) plus ``layout_changes``
 and ``rules`` ({tag: {"rule": callable(ProfileResult) -> (passed, message), "columns": [...]}});
-``gate_required`` (the tag step1 needs, or a tuple of tags of which one must pass); ``named_directions(theta, units) -> {name: vector}``;
+``gate_required`` (the tag step1 needs, or a tuple of tags of which one must pass; empty: no gate needed); ``named_directions(theta, units) -> {name: vector}``;
 ``post(pipeline, problem, result, out_dir) -> dict``; ``headlines(problem, result) -> {name: float}``;
 optionally ``optimizer_options`` (OptimizerOptions overrides for every stage), ``max_iterations``,
 ``extensive_free``, ``gate_concentrate_iterations``, ``run_key() -> dict`` (result-changing options that
@@ -190,10 +193,30 @@ class Pipeline:
         self.rd = RunDirectory(cfg.base, spec.name, self.spec_hash, hash_options(key), new_run=new_run, options=key)
         self.path = self.rd.path
         self._problems: dict[tuple[Any, ...], Any] = {}
+        self._apply_prefit_variant()
 
     # ---------------------------------------------------------------- problems and reports
 
+    # ---------------------------------------------------------------- prefit variants
+
+    def _variants(self) -> tuple[str, ...]:
+        fn = getattr(self.spec, "prefit_variants", None)
+        return tuple(fn()) if callable(fn) else ()
+
+    def _apply_prefit_variant(self) -> bool:
+        """Apply the variant a finished prefit chose (stage ``prefit.variant``) to the spec; True when one applies."""
+        if not self._variants() or not self.rd.stage_done("prefit.variant"):
+            return False
+        self.spec.set_prefit_variant(str(self.rd.load_stage("prefit.variant")["variant"]))
+        return True
+
+    def _ensure_prefit_variant(self) -> None:
+        """A spec with prefit variants builds its problems only after the prefit chose one (the layout depends on it)."""
+        if self._variants() and not self._apply_prefit_variant():
+            self.prefit()
+
     def problem(self, moments: str = "all", nu: int | None = None, seed: int | None = None) -> Any:
+        self._ensure_prefit_variant()
         key = (moments, nu or self.cfg.nu, self.cfg.seed if seed is None else seed)
         if key not in self._problems:
             problem = self.spec.build_problem(key[1], key[2], self.cfg.threads, moments)
@@ -268,11 +291,15 @@ class Pipeline:
         """Warm-start problem's model from a finished stage's model state (same markets and draws)."""
         if self.rd.stage_done(stage):
             ps = self.rd.load_stage(stage).get("problem_state") or {}
-            if ps.get("model") is not None and hasattr(problem.model, "load_state_dict"):
-                try:
-                    problem.model.load_state_dict(ps["model"])
-                except (ValueError, KeyError) as exc:
-                    log.info("warm start from %s not used: %s", stage, exc)
+            self._load_model_state(problem, ps.get("model"), stage)
+
+    def _load_model_state(self, problem: Any, state: dict[str, Any] | None, source: str) -> None:
+        """``problem.model.load_state_dict(state)`` when both exist; a state that does not fit is logged and skipped."""
+        if state is not None and hasattr(problem.model, "load_state_dict"):
+            try:
+                problem.model.load_state_dict(state)
+            except (ValueError, KeyError) as exc:
+                log.info("warm start from %s not used: %s", source, exc)
 
     def _binding(self, problem: Any, W: np.ndarray) -> np.ndarray:
         """``spec.binding_weighting(problem, W)`` when the spec has it, else W."""
@@ -349,9 +376,19 @@ class Pipeline:
     # ---------------------------------------------------------------- stages
 
     def prefit(self) -> np.ndarray:
-        """Theta at the end of the prefit stage (runs it if needed)."""
+        """Theta at the end of the prefit stage (runs it if needed).
+
+        A spec with ``prefit_variants() -> (name, ...)`` and ``set_prefit_variant(name)`` (layout alternatives, e.g. two
+        bases of a price-sensitivity shift) gets one prefit per variant (stages ``prefit.<name>``, reports
+        ``reports/prefit.<name>``); the variant with the lowest q is kept (stage ``prefit.variant``), applied to the
+        spec, and its prefit becomes stage ``prefit``. Variants come before every other problem of the run.
+        """
         if self.rd.stage_done("prefit"):
+            self._apply_prefit_variant()
             return np.asarray(self._stage_state("prefit")["theta"], dtype=float)
+        variants = self._variants()
+        if variants:
+            return self._prefit_variants(variants)
         problem = self.problem("prefit")
         free = set(self.spec.prefit_free)
         layout = problem.layout
@@ -369,6 +406,40 @@ class Pipeline:
         finally:
             problem.layout = layout
         return np.asarray(res.theta, dtype=float)
+
+    def _prefit_variants(self, variants: tuple[str, ...]) -> np.ndarray:
+        results: dict[str, float] = {}
+        for v in variants:
+            self.spec.set_prefit_variant(v)
+            stage = f"prefit.{v}"
+            if not self.rd.stage_done(stage):
+                problem = self.spec.build_problem(self.cfg.nu, self.cfg.seed, self.cfg.threads, "prefit")
+                try:
+                    free = set(self.spec.prefit_free)
+                    problem.layout = problem.layout.replace({n: {"free": n in free} for n in problem.layout.names})
+                    theta0 = problem.layout.starts()
+                    W1 = self._saved_weight(f"prefit_W1.{v}", lambda: problem.initial_weighting(theta0))
+                    hook = getattr(self.spec, "concentrate_weighting", None)
+                    W_pre = W1 if hook is None else hook(problem, W1)
+                    res = minimize(problem, Fixed(W_pre), self._options(
+                        stage=stage, theta0=theta0, max_iterations=self.spec.prefit_max_iterations), checkpoint=self.rd)
+                    self.report(problem, res, stage)
+                finally:
+                    close = getattr(problem.model, "close", None)
+                    if close is not None:
+                        close()
+            results[v] = float(self.rd.load_stage(stage)["q"])
+            log.info("prefit variant %s: q %.6f", v, results[v])
+        best = min(variants, key=lambda v: results[v])
+        self.spec.set_prefit_variant(best)
+        self.rd.save_stage("prefit", self.rd.load_stage(f"prefit.{best}"))
+        self.rd.save_stage("prefit.variant", {"variant": best, "q": json.dumps(results)})
+        src = self.path / "reports" / f"prefit.{best}"
+        if src.is_dir():
+            shutil.copytree(src, self.path / "reports" / "prefit", dirs_exist_ok=True)
+        log.info("prefit: variant %s kept (q by variant %s)", best, results)
+        self._problems.clear()
+        return np.asarray(self._stage_state("prefit")["theta"], dtype=float)
 
     def gate(self) -> dict[str, Any]:
         """The spec's ray profiles from the prefit point; writes gate/report.{json,txt} and gate/verdict.json.
@@ -445,6 +516,9 @@ class Pipeline:
 
     def _check_gate(self) -> None:
         required = self.spec.gate_required
+        if not required:   # a spec whose gate is a diagnostic only (empty gate_required): step1 needs no verdict
+            log.info("step1: the spec requires no gate verdict")
+            return
         gate_dir = run_dir_path(self.cfg.base, self.spec, self.cfg.gate_nu, self.cfg.seed) / "gate" / "verdict.json"
         if not gate_dir.exists():
             raise StageRefused(f"step1 needs a passed gate: no {gate_dir}. Run `run --stage gate --nu "
@@ -470,6 +544,24 @@ class Pipeline:
         """Trial-step limit of step1 and step2: ``spec.max_iterations`` if set (smoke tests), else none."""
         v = getattr(self.spec, "max_iterations", None)
         return None if v is None else int(v)
+
+    def _w2(self, problem: Any, ev1: Any) -> np.ndarray:
+        """W2 at the step-1 evaluation: ``spec.step2_weighting(problem, ev1)`` when the spec has it, else S(theta_1)^-1
+        made block diagonal across moment blocks (``coupled_blocks`` excepted)."""
+        hook = getattr(self.spec, "step2_weighting", None)
+        if callable(hook):
+            return np.asarray(hook(problem, ev1), dtype=float)
+        return _block_diagonal_like(weight_from_covariance(problem.covariance(ev1)), ev1.blocks,
+                                    getattr(problem, "coupled_blocks", ()))
+
+    def _step2_gate(self, problem: Any, W1: np.ndarray, detected: Sequence[str]) -> tuple[bool, str]:
+        """``TwoStep(W1).gate(detected)``, with SD_XI_BLOWUP a warning when every aggregate block of ``problem`` is
+        scale-free (``SarganIVMoments``): the Sargan form cannot be lowered by shrinking xi, and a concentrated xi
+        drives it toward n h_jj, not 0 (LEARNINGS 19), so the flag marks a misfit to report, not a degenerate point W2
+        would inherit. A fixed-W aggregate block (``IVMoments``) keeps the refusal."""
+        agg = list(getattr(problem, "aggregate", None) or ())
+        warn = ("SD_XI_BLOWUP",) if agg and all(getattr(m, "scale_free", False) for m in agg) else ()
+        return TwoStep(W1).gate(detected, warn_only=warn)
 
     def _w1(self, problem: Any, theta: np.ndarray) -> np.ndarray:
         return self._saved_weight("W1", lambda: self._binding(problem, problem.initial_weighting(theta)))
@@ -539,8 +631,11 @@ class Pipeline:
         if not r1.convergence.converged:
             reason = f"step 1 ended {r1.convergence.value}, not converged"
         else:
-            ok, why = TwoStep(W1).gate(detected)
+            ok, why = self._step2_gate(problem, W1, detected)
             reason = None if ok else why
+            if ok and why:
+                log.warning("step2: %s", why)
+                atomic_write(self.path / "reports" / "step2_warning.txt", (why + "\n").encode())
         if reason:
             msg = f"Step 2 not started: {reason}. Post and stability use the step-1 point."
             atomic_write(self.path / "reports" / "step2_refused.txt", (msg + "\n").encode())
@@ -551,8 +646,7 @@ class Pipeline:
         ev1 = r1.evaluation
 
         def make_w2() -> np.ndarray:
-            return self._binding(problem, _block_diagonal_like(weight_from_covariance(problem.covariance(ev1)),
-                                                               ev1.blocks, getattr(problem, "coupled_blocks", ())))
+            return self._binding(problem, self._w2(problem, ev1))
 
         W2 = self._saved_weight("W2", make_w2)
         res = minimize(problem, Fixed(W2), self._options(stage="step2", theta0=r1.theta, max_iterations=self._limit()),
@@ -596,6 +690,12 @@ class Pipeline:
         W = np.asarray(self._stage_state(stage)["W"], dtype=float)
         nu2 = 2 * self.cfg.nu
         prob2 = self.problem("all", nu=nu2, seed=self.cfg.seed + STABILITY_SEED_OFFSET)
+        # the re-run starts from the estimate's own mean utilities, solved on the nu draws at the estimate: delta is
+        # per product, so it carries onto the doubled draws and only the draws change. Without this the re-run started
+        # from whatever the spec built (cold, or a --warm-delta of another run at another theta, which on the round-4
+        # GMY run failed to invert 1991). A resumed stability stage loads its own checkpoint state over this.
+        state = getattr(problem.model, "state_dict", None)
+        self._load_model_state(prob2, state() if callable(state) else None, f"the {stage} estimate")
         res2 = minimize(prob2, Fixed(W), self._options(stage="stability", theta0=res.theta,
                                                           max_iterations=STABILITY_ITERATIONS), checkpoint=self.rd)
         head0 = self.spec.headlines(problem, res)
@@ -619,11 +719,7 @@ class Pipeline:
     def _band_fixed(self, layout: Any, par: str, v: float) -> Any:
         """``layout`` with ``par`` fixed at ``v``; its bounds widen to ``v`` when ``v`` lies outside them (a fixed
         parameter such as the bound a_lo has lower = upper = its value)."""
-        sp = layout.specs[layout.names.index(par)]
-        ch: dict[str, Any] = {"free": False, "start": v}
-        if not sp.lower <= v <= sp.upper:
-            ch.update(lower=min(sp.lower, v), upper=max(sp.upper, v))
-        return layout.replace({par: ch})
+        return layout.fixed({par: v})
 
     def _band(self, name: str) -> list[dict[str, Any]]:
         spec = self.spec
@@ -673,9 +769,7 @@ class Pipeline:
                     ev1 = r1.evaluation
 
                     def make_w2(problem: Any = problem, ev1: Any = ev1) -> np.ndarray:
-                        return self._binding(problem, _block_diagonal_like(
-                            weight_from_covariance(problem.covariance(ev1)), ev1.blocks,
-                            getattr(problem, "coupled_blocks", ())))
+                        return self._binding(problem, self._w2(problem, ev1))
 
                     W2 = self._saved_weight(f"{tag}.W2", make_w2)
                     res = minimize(problem, Fixed(W2), self._options(stage=f"{tag}.step2", theta0=r1.theta,
@@ -746,11 +840,12 @@ class Pipeline:
                 rep1 = self._band_report(problem, r1, f"margin_band.{v:g}.step1")
                 res, stage = r1, "step1"
                 detected = [d["name"] for d in rep1.get("degeneracies", []) if d.get("detected")]
-                ok2, why = TwoStep(W1).gate(detected)
-                step2_note = "" if (r1.convergence.converged and ok2) else (
+                ok2, why = self._step2_gate(problem, W1, detected)
+                started = r1.convergence.converged and ok2
+                step2_note = (why if ok2 else "") if started else (
                     f"step 2 not started: step 1 ended {r1.convergence.value}" if not r1.convergence.converged
                     else why)
-                if not step2_note and r1.evaluation is not None:
+                if started and r1.evaluation is not None:
                     ev1 = r1.evaluation
 
                     def make_w2(problem: Any = problem, ev1: Any = ev1) -> np.ndarray:

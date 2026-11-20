@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["first_second_correlations", "logit_second_choice_matrix"]
+__all__ = ["first_second_correlations", "logit_second_choice_matrix", "correlation_adjoint"]
 
 
 def first_second_correlations(first_shares: np.ndarray, second_choice: np.ndarray, x: np.ndarray,
@@ -61,3 +61,40 @@ def logit_second_choice_matrix(probabilities: np.ndarray, weights: np.ndarray) -
     C = B @ P.T                                                   # C[j, k] = sum_h B[j, h] P[k, h]
     C[np.arange(J), np.arange(J)] -= np.einsum("jh,jh->j", B, P)  # remove k = j
     return C
+
+
+def correlation_adjoint(first_shares: np.ndarray, second_choice: np.ndarray, x: np.ndarray
+                        ) -> tuple[np.ndarray, np.ndarray]:
+    """correlation_adjoint(first_shares, second_choice, x) -> (corr (K,), A (K, J, J)) with A[c, j, k] the derivative of
+    corr_c (``first_second_correlations``) in C[j, k], first shares held fixed.
+
+    With r = (s / S) C, pi = r / sum r, d1 = x - p1 x, d2 = x - p2 x (p1, p2 the marginals of pi):
+    ``d corr_c / d pi_jk = [d1_j d2_k - cov / (2 var1) d1_j^2 - cov / (2 var2) d2_k^2] / sqrt(var1 var2)`` (the means'
+    derivatives drop out), the normalisation adds nothing because ``sum_jk pi_jk d corr / d pi_jk = 0``, so
+    ``A[c, j, k] = (s_j / (S tot)) d corr_c / d pi_jk`` (GMY spec WP-G4)."""
+    s = np.asarray(first_shares, dtype=float).ravel()
+    C = np.asarray(second_choice, dtype=float)
+    x = np.asarray(x, dtype=float)
+    if x.ndim == 1:
+        x = x[:, None]
+    J = s.size
+    if C.shape != (J, J) or x.shape[0] != J:
+        raise ValueError(f"shapes: shares {s.shape}, second choice {C.shape}, x {x.shape}")
+    a = s / s.sum()
+    r = a[:, None] * C
+    tot = r.sum()
+    if not tot > 0:
+        raise ValueError("the joint first/second-choice law has no mass")
+    pi = r / tot
+    p1, p2 = pi.sum(axis=1), pi.sum(axis=0)
+    d1, d2 = x - p1 @ x, x - p2 @ x                       # (J, K)
+    var1, var2 = p1 @ d1 ** 2, p2 @ d2 ** 2               # (K,)
+    cov = np.einsum("jc,jk,kc->c", d1, pi, d2)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        root = np.sqrt(var1 * var2)
+        corr = cov / root
+        dpi = (d1.T[:, :, None] * d2.T[:, None, :]
+               - (cov / (2 * var1))[:, None, None] * (d1.T ** 2)[:, :, None]
+               - (cov / (2 * var2))[:, None, None] * (d2.T ** 2)[:, None, :]) / root[:, None, None]
+    A = dpi * (a / tot)[None, :, None]
+    return corr, A

@@ -11,6 +11,7 @@
 #include "pcm_demand.hpp"
 #include "pcm_events.hpp"
 #include "pcm_kernel.hpp"
+#include "pcm_market_share.hpp"
 #include "pcm_welfare.hpp"
 
 using Eigen::ArrayXd;
@@ -126,9 +127,9 @@ Cut truncation_cuts(const Fixture & f) {
         ArrayXd q; double c;
         draw_q(f.mk, f.prm, f.delta, i, q, c);
         ArrayXd s0 = ArrayXd::Zero(N), s1 = ArrayXd::Zero(N);
-        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, 0.0, s0, nullptr, nullptr, nullptr, nullptr);
-        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, pcm_demand::draw_a_lo(f.prm, c), s1, nullptr,
-                                          nullptr, nullptr, nullptr);
+        pcm_share::cond_share(q, f.mk.p, f.prm.sigma_p, 0.0, s0, nullptr, nullptr, nullptr, nullptr);
+        pcm_share::cond_share(q, f.mk.p, f.prm.sigma_p, pcm_demand::draw_a_lo(f.prm, c), s1, nullptr,
+                              nullptr, nullptr, nullptr);
         const int n0 = (s0 > 0).count(), n1 = (s1 > 0).count();
         if (n1 < n0) {
             ++cut.removed;
@@ -419,8 +420,8 @@ TEST(PcmTruncation, EventsUseThePositiveMassFrontier) {
         ArrayXd q; double c;
         draw_q(f.mk, f.prm, f.delta, i, q, c);
         ArrayXd s = ArrayXd::Zero(N);
-        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, f.prm.lo / c, s, nullptr, nullptr, nullptr,
-                                          nullptr);
+        pcm_share::cond_share(q, f.mk.p, f.prm.sigma_p, f.prm.lo / c, s, nullptr, nullptr, nullptr,
+                              nullptr);
         for (int j = 0; j < N; ++j) if (s[j] > 0) B[j] += f.mk.weights[i];
     }
     const auto ev = pcm_events::max_step(f.delta, ArrayXd::Zero(N), f.mk, f.prm, ArrayXd::Zero(P), 1.0, 2);
@@ -439,10 +440,10 @@ TEST(PcmTruncation, EventsUseThePositiveMassFrontier) {
         ArrayXd q; double c;
         draw_q(f.mk, f.prm, f.delta, i, q, c);
         ArrayXd sa = ArrayXd::Zero(N), sb = ArrayXd::Zero(N);
-        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, f.prm.lo / c, sa, nullptr, nullptr, nullptr,
-                                          nullptr);
-        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, p1.lo / c, sb, nullptr, nullptr, nullptr,
-                                          nullptr);
+        pcm_share::cond_share(q, f.mk.p, f.prm.sigma_p, f.prm.lo / c, sa, nullptr, nullptr, nullptr,
+                              nullptr);
+        pcm_share::cond_share(q, f.mk.p, f.prm.sigma_p, p1.lo / c, sb, nullptr, nullptr, nullptr,
+                              nullptr);
         const bool set_changed = ((sa > 0) != (sb > 0)).any();
         changed += set_changed;
         mismatch += set_changed != (s_a[i] != s_b[i]);
@@ -518,7 +519,7 @@ TEST(PcmTruncation, ABoundEventsUseThePositiveMassFrontier) {
         ArrayXd q; double c;
         draw_q(f.mk, f.prm, f.delta, i, q, c);
         ArrayXd s = ArrayXd::Zero(N);
-        pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, f.prm.lo, s, nullptr, nullptr, nullptr, nullptr);
+        pcm_share::cond_share(q, f.mk.p, f.prm.sigma_p, f.prm.lo, s, nullptr, nullptr, nullptr, nullptr);
         for (int j = 0; j < N; ++j) if (s[j] > 0) B[j] += f.mk.weights[i];
     }
     const auto ev = pcm_events::max_step(f.delta, ArrayXd::Zero(N), f.mk, f.prm, ArrayXd::Zero(P), 1.0, 2);
@@ -565,7 +566,7 @@ TEST(PcmTruncation, FrontierAnatomyMatchesTheDrawPass) {
             draw_q(f.mk, f.prm, f.delta, i, q, c);
             ArrayXd s = ArrayXd::Zero(N);
             const double a_lo = pcm_demand::draw_a_lo(f.prm, c);
-            pcm_demand::detail::cond_vertical(q, f.mk.p, f.prm.sigma_p, a_lo, s, nullptr, nullptr, nullptr, nullptr);
+            pcm_share::cond_share(q, f.mk.p, f.prm.sigma_p, a_lo, s, nullptr, nullptr, nullptr, nullptr);
             EXPECT_NEAR(an.mass[i], s.sum(), 1e-14);
             EXPECT_EQ(an.frontier_size[i], (s > 0).count());
             if (an.mass[i] > 0) {

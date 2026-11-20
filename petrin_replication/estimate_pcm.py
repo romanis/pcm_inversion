@@ -78,7 +78,7 @@ import pandas as pd  # noqa: E402
 import pyblp  # noqa: E402
 
 from nfp_harness import comparison, pipeline  # noqa: E402
-from nfp_harness.data import break_price_ties  # noqa: E402
+from nfp_harness.data import break_price_ties, income_law_basis  # noqa: E402
 from nfp_harness.diagnostics import at_bound_parameters  # noqa: E402
 from nfp_harness.linear import LinearIV  # noqa: E402
 from nfp_harness.models import pcm_post as pp  # noqa: E402
@@ -212,7 +212,7 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, float, int]:
     # Petrin's income law (LEARNINGS 32) with ybar the pooled low-group median income, so the normalising consumer
     # is the median low-income household; c_i spans at most a factor 150 within a group.
     ybar = float(agents.income[agents.low == 1].median())
-    agents["log_ybar_inc_w"] = np.log(ybar / agents.income.clip(*INCOME_CLIP))
+    agents["log_ybar_inc_w"] = income_law_basis(agents.income.to_numpy(float), ybar, INCOME_CLIP)
     agents["income_group"] = np.select([agents.low == 1, agents.mid == 1, agents.high == 1], ["low", "mid", "high"], "none")
     agents["fs_group"] = np.where(agents.fs >= 5, "5+", agents.fs.astype(int).astype(str))
     return products, agents, price_range, n_merged

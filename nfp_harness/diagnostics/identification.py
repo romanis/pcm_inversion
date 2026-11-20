@@ -20,6 +20,7 @@ __all__ = [
     "weak_identification_block",
     "order_condition_block",
     "sqrt_psd",
+    "block_shares",
 ]
 
 IDENTIFICATION_DEFAULTS: dict[str, float] = {
@@ -266,3 +267,19 @@ def weak_identification_block(G: np.ndarray, S: np.ndarray, n: int,
             f"(columns scaled by {scale}; {note}).")
     block.messages.append(f"FLAG: WEAK_IDENTIFICATION: {text}" if weak else f"Weak identification: ok. {text}")
     return block
+
+
+def block_shares(G: np.ndarray, W: np.ndarray, blocks: Mapping[str, slice],
+                 names: Sequence[str] | None = None) -> dict[str, dict[str, float]]:
+    """block_shares(G, W, blocks, names=None) -> {parameter: {block: share}}: for each column k of the (k, P) Jacobian,
+    the fraction of ``||W^{1/2} G[:, k]||^2`` that comes from each moment block's rows (GMY spec WP-G2 4(d): which block
+    pins which parameter). Rows of ``W^{1/2} G`` are split by ``blocks``; with block-diagonal W this is
+    ``G_b[:, k]' W_bb G_b[:, k]`` per block. A column with zero norm gets NaN shares."""
+    G = np.asarray(G, dtype=float)
+    A = sqrt_psd(W) @ G
+    tot = np.sum(A ** 2, axis=0)
+    names = list(names) if names is not None else [f"theta{k}" for k in range(G.shape[1])]
+    out: dict[str, dict[str, float]] = {}
+    for k, nm in enumerate(names):
+        out[nm] = {b: (float(np.sum(A[s, k] ** 2) / tot[k]) if tot[k] > 0 else float("nan")) for b, s in blocks.items()}
+    return out

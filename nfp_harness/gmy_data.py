@@ -409,3 +409,34 @@ def model_micro_moments(probabilities: Sequence[np.ndarray], products: pd.DataFr
                         micro: MicroMoments) -> np.ndarray:
     """model_micro_moments(probabilities, products, agents, micro) -> (33,): ``MicroMomentEvaluator`` in one call."""
     return MicroMomentEvaluator(products, agents, micro)(probabilities)
+
+
+#: demographic agent column -> its levels, for the household sets of the micro moments
+SET_DEMOGRAPHICS = {"inc_quintile": (1, 2, 3, 4, 5), "age_group": (1, 2, 3, 4, 5), "fs_group": (1, 2, 3, 4),
+                    "rural": (0, 1)}
+
+
+def set_column(survey: str, demographic: str, level: Any) -> str:
+    """Name of the 0/1 agent column of a household set: ``<survey>_<demographic>_<level>``."""
+    return f"{survey}_{demographic}_{int(level)}"
+
+
+def add_set_columns(agents: pd.DataFrame) -> pd.DataFrame:
+    """``agents`` with one 0/1 column per (survey, demographic, level): demographic = level and the year in the
+    survey's window (loadCPSMktHholds.m lines 109-147)."""
+    a = agents.copy()
+    for s in ("cex", "mri"):
+        for col, levels in SET_DEMOGRAPHICS.items():
+            for v in levels:
+                a[set_column(s, col, v)] = ((a[col] == v) & (a[s] == 1)).astype(float)
+    return a
+
+
+def group_moment_rows(micro: MicroMoments) -> list[tuple[str, str | None, str, str]]:
+    """(kind, product column or None, set column a, set column b) for each of the 33 rows of ``micro``, in order: the
+    arguments of ``moments.GroupMomentRow``."""
+    out = []
+    for r in micro.table.itertuples():
+        char = MICRO_CHAR[r.char] if r.kind == "diff" else None
+        out.append((r.kind, char, set_column(r.survey, r.demographic, r.a), set_column(r.survey, r.demographic, r.b)))
+    return out

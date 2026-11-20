@@ -68,3 +68,15 @@ def test_cs_gain_by_group_adds_up_to_the_total() -> None:
 def test_scalar_items_drops_nested_and_non_finite() -> None:
     d = {"a": 1.5, "b": "x", "c": {"d": 1}, "e": float("nan"), "f": None, "g": [1], "h": np.float64(2.0)}
     assert comparison.scalar_items(d) == {"a": 1.5, "b": "x", "e": None, "f": None, "h": 2.0}
+
+
+def test_weighted_median() -> None:
+    from nfp_harness.comparison import weighted_median
+
+    v = np.array([0.1, 0.2, 0.3, 0.4, np.nan])
+    assert weighted_median(v[:3], np.ones(3)) == 0.2
+    # sales weights: more than half the weight sits on 0.4, so it is the weighted median; at 2.9 of 5.9 it is not
+    assert weighted_median(v, np.array([1.0, 1.0, 1.0, 3.1, 5.0])) == 0.4
+    assert weighted_median(v, np.array([1.0, 1.0, 1.0, 2.9, 5.0])) == 0.3
+    assert weighted_median(v, np.array([0.0, 2.0, 0.0, 1.0, 1.0])) == 0.2   # zero weights and NaN values left out
+    assert np.isnan(weighted_median(np.array([np.nan]), np.ones(1)))

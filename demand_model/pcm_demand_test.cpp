@@ -129,3 +129,45 @@ TEST(PCMDemand, RejectsUnsortedPrices) {
     std::swap(f.mk.p[2], f.mk.p[3]);
     EXPECT_THROW(pcm_demand::shares(f.delta, f.mk, f.prm, false), std::runtime_error);
 }
+
+// GMY 2015 at a 2e-5 step: two products bought by one draw each, adjacent on that draw's hull. Lifting the one below
+// the hull drops the other below the new chord, lifting that one drops the first, and the original repair cycled for
+// 60 rounds (121 share evaluations) without a feasible start; a warm start now gets a second, robust repair that lifts
+// both together. One draw, no heterogeneity: products at 2.9 and 3.0 sit between 1 and 10, where the chord factors
+// (0.95 and 0.99) make each lift push the other off. (Here the continuation of invert would also recover from the
+// vertical guess; nfp_harness/tests/test_inversion_repair.py checks the GMY 2015 market, where it does not.)
+TEST(PCMDemand, WarmStartRepairsProductsThatDisplaceEachOther) {
+    pcm_demand::Market mk;
+    mk.p = ArrayXd(4);
+    mk.p << 1.0, 2.9, 3.0, 10.0;
+    mk.x = MatrixXd::Ones(4, 1);
+    mk.weights = ArrayXd::Ones(1);
+    mk.taste_basis = MatrixXd(1, 0);
+    mk.scale_basis = MatrixXd(1, 0);
+    pcm_demand::Params prm{ArrayXd(0), ArrayXd(0), 1.0};
+    // concave qualities: slopes 1.5 > 1.2 > 1.1995 > 0.6, so every product has a window
+    ArrayXd delta(4);
+    delta << 1.5, 1.5 + 1.9 * 1.2, 0.0, 0.0;
+    delta[2] = delta[1] + 0.1 * 1.1995;
+    delta[3] = delta[2] + 7.0 * 0.6;
+    const ArrayXd s_data = pcm_demand::shares(delta, mk, prm, false).s;
+    ASSERT_TRUE((s_data > 0).all());
+    // the warm start: product 2 1e-5 below the chord from product 1 to product 3, product 1 1e-5 above the chord from
+    // product 0 to product 2 (a vertex with that slack)
+    auto chord = [&](const ArrayXd & d, int i, int j, int k) {
+        return d[i] + (mk.p[j] - mk.p[i]) * (d[k] - d[i]) / (mk.p[k] - mk.p[i]);
+    };
+    ArrayXd warm = delta;
+    for (int it = 0; it < 200; ++it) {
+        warm[2] = chord(warm, 1, 2, 3) - 1e-5;
+        warm[1] = chord(warm, 0, 1, 2) + 1e-5;
+    }
+    const ArrayXd s_warm = pcm_demand::shares(warm, mk, prm, false).s;
+    ASSERT_GT(s_warm[1], 0.0);
+    ASSERT_EQ(s_warm[2], 0.0);
+    const auto r = pcm_demand::invert(s_data, mk, prm, warm, 1e-12, 5000);
+    EXPECT_TRUE(r.converged);
+    EXPECT_LT(r.max_abs_residual, 1e-12);
+    EXPECT_LT(r.share_evaluations, 2500u);   // inside the warm stage budget of solve_market
+    EXPECT_LT((r.delta - delta).abs().maxCoeff(), 1e-8);
+}

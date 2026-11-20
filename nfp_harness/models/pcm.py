@@ -21,7 +21,10 @@ in layout order.
 Draws: each market gets ``R_t = 2^ceil(log2(A_t nu_per_agent))`` scrambled Sobol standard normal
 points over the taste draw dimensions (seed ``seed + t`` for the t-th market in sorted id order),
 split into consecutive blocks over its A_t agents (``data.cross_agents``), so each agent keeps its
-weight (DESIGN 9, decisions 3 and 6). ``PCMSpec.draws_per_market`` overrides R_t.
+weight (DESIGN 9, decisions 3 and 6). ``PCMSpec.draws_per_market`` overrides R_t. With ``antithetic`` (taste draw
+dimensions by name, or True for all) the R_t points are R_t / 2 Sobol points each followed by its antithetic partner
+(``data.sobol_normal_draws``); the default (none) leaves the draws unchanged. a_i has no draws: the kernel integrates
+its lognormal in closed form.
 
 Products are sorted by price within each market (the kernel needs strictly increasing prices;
 spread ties first with ``data.break_price_ties``). ``MarketIndex.rows`` holds the product rows in that
@@ -37,15 +40,15 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
 from ..data import cross_agents, sobol_normal_draws
-from ..moments import MICRO_OUTPUTS
+from ..moments import GROUP_OUTPUTS, MICRO_OUTPUTS, SECOND_CHOICE_ADJOINT, SECOND_CHOICE_OUTPUTS
 from ..types import EvalStatus, InnerSolution, KernelRequests, MarketIndex, MicroPartRequest, StepLimit
 
-__all__ = ["PCMModel", "PCMSpec", "allocate_threads", "kernel_status"]
+__all__ = ["PCMModel", "PCMSpec", "allocate_threads", "kernel_status", "group_sums_oracle"]
 
 log = logging.getLogger("nfp_harness.models.pcm")
 
@@ -100,6 +103,41 @@ def allocate_threads(weights: np.ndarray, total: int) -> np.ndarray:
         n[k] -= 1
         left += 1
     return n
+
+
+def group_sums_oracle(kernel: Any, delta: np.ndarray, km: Any, theta: np.ndarray, phi: np.ndarray, sigma_p: float,
+                      group_of_draw: np.ndarray, n_groups: int, U: np.ndarray, derivatives: bool = True,
+                      n_threads: int = 1, **bound: float) -> dict[str, Any]:
+    """Per-household purchase-weighted sums by the existing kernel (GMY spec WP-G3 item 6; tests only, O(G) calls).
+
+    For each group g, a one-household ``Market`` of its draws (weights w_i) and ``evaluate_market`` with the micro
+    request H = 1, U' = [1, U]: ``S`` (G, C+1) with column 0 = P_g, ``d_delta`` (G, C+1, J) and ``d_theta``
+    (G, C+1, P_kernel) (kernel order; None without derivatives), ``w`` (G,).
+    """
+    x, p = np.asarray(km.x), np.asarray(km.p)
+    w, tb, sb = np.asarray(km.weights), np.asarray(km.taste_basis), np.asarray(km.scale_basis)
+    cols = list(km.taste_col)
+    g_of = np.asarray(group_of_draw, dtype=int)
+    Up = np.column_stack([np.ones(x.shape[0]), np.asarray(U, dtype=float)])
+    C1 = Up.shape[1]
+    J, P = x.shape[0], np.size(theta) + np.size(phi) + 1
+    S = np.zeros((n_groups, C1))
+    dD = np.zeros((n_groups, C1, J)) if derivatives else None
+    dT = np.zeros((n_groups, C1, P)) if derivatives else None
+    wg = np.zeros(n_groups)
+    for g in range(n_groups):
+        idx = np.flatnonzero(g_of == g)
+        wg[g] = w[idx].sum()
+        mk = kernel.Market(x, p, w[idx], tb[idx], cols, sb[idx])
+        r = kernel.evaluate_market(delta, mk, theta, phi, sigma_p,
+                                   {"H": np.ones((idx.size, 1)), "U": Up, "h_of_part": [0] * C1},
+                                   derivatives=derivatives, n_threads=n_threads, **bound)
+        S[g] = r["micro"]
+        if derivatives:
+            assert dD is not None and dT is not None
+            dD[g] = r["micro_d_delta"]
+            dT[g] = r["micro_d_theta"]
+    return {"S": S, "d_delta": dD, "d_theta": dT, "w": wg}
 
 
 @dataclass(frozen=True)
@@ -216,8 +254,13 @@ class PCMModel:
     n_products: int
 
     def __init__(self, spec: Any, data: Any, layout: Any, nu_per_agent: int, seed: int,
-                 total_threads: int | None = None) -> None:
-        """PCMModel(spec, data, layout, nu_per_agent, seed, total_threads=None). None uses os.cpu_count().
+                 total_threads: int | None = None, antithetic: Sequence[str] | bool = ()) -> None:
+        """PCMModel(spec, data, layout, nu_per_agent, seed, total_threads=None, antithetic=()). None uses
+        os.cpu_count().
+
+        ``antithetic``: taste draw dimensions (the layout's taste ``basis`` names that are not agent columns, e.g.
+        "nu0") whose draws come in antithetic pairs, or True for every one; off by default. Not part of ``PCMSpec``,
+        so spec hashes do not move.
 
         ``spec`` is a ``PCMSpec`` (or a mapping / object with its fields). ``data`` is a mapping or object
         with ``products`` (market, price, share and characteristic columns) and optionally ``agents``
@@ -283,6 +326,13 @@ class PCMModel:
             s = specs[k]
             if s.basis is None or s.basis not in agent_cols:
                 raise ValueError(f"{s.name}: scale basis {s.basis!r} must be a column of the agent table")
+        anti = list(self.nu_names) if antithetic is True else list(antithetic or ())
+        unknown = [a for a in anti if a not in self.nu_names]
+        if unknown:
+            raise ValueError(f"antithetic: {unknown} are not taste draw dimensions {self.nu_names}")
+        #: taste draw dimensions drawn in antithetic pairs (empty: plain scrambled Sobol)
+        self.antithetic: tuple[str, ...] = tuple(a for a in self.nu_names if a in anti)
+        anti_cols = [self.nu_names.index(a) for a in self.antithetic]
 
         # ------------------------------------------------------------ products
         mkt = np.asarray(products[sp.market_column]).ravel()
@@ -318,7 +368,7 @@ class PCMModel:
             R = sp.draws_per_market or 2 ** int(math.ceil(math.log2(A * self.nu_per_agent)))
             if R < A:
                 raise ValueError(f"market {mid!r}: {R} draws for {A} agents")
-            nu = (sobol_normal_draws(R, len(self.nu_names), self.seed + t) if self.nu_names
+            nu = (sobol_normal_draws(R, len(self.nu_names), self.seed + t, antithetic=anti_cols) if self.nu_names
                   else np.zeros((R, 0)))
             w, idx, nu = cross_agents(w_agent, np.arange(A, dtype=float)[:, None], nu)
             idx = idx[:, 0].astype(int)
@@ -354,6 +404,10 @@ class PCMModel:
         self.last_threads = np.zeros(self.T, dtype=int)
         self._pool = ThreadPoolExecutor(max_workers=max(1, self.T), thread_name_prefix="pcm-market")
         self._lock = threading.RLock()
+        #: how per-household sums are computed: "kernel" (pcm_kernel.group_sums) or "oracle" (group_sums_oracle,
+        #: one evaluate_market call per household; tests only). Not part of PCMSpec, so spec hashes do not move.
+        self.group_sums_backend = "kernel" if hasattr(pcm_kernel, "group_sums") else "oracle"
+        self._group_U: dict[tuple[str, ...], list[np.ndarray]] = {}
 
     # ---------------------------------------------------------------- helpers
 
@@ -417,6 +471,38 @@ class PCMModel:
         m = self._mk[t]
         return {"weights": m.weights, "agent_of_draw": m.agent_of_draw, "agent_rows": m.agent_rows}
 
+    def _group_columns(self, m: _Market, cols: tuple[str, ...]) -> np.ndarray:
+        """(J_t, C) product columns ``cols`` of market m in price order (cached)."""
+        U = self._group_U.get(cols)
+        if U is None:
+            full = np.column_stack([self._product_col(c) for c in cols]) if cols else np.zeros((self.n_products, 0))
+            U = self._group_U[cols] = [full[mk.rows] for mk in self._mk]
+        return U[m.t]
+
+    def group_sums(self, t: int, delta_t: np.ndarray, theta: np.ndarray, cols: tuple[str, ...], derivatives: bool,
+                   n_threads: int = 1) -> dict[str, Any]:
+        """Per-household sums of market t at the price-order ``delta_t`` (contract of ``moments.GroupMicroMoments``):
+        ``columns``, ``S`` (G_t, C+1), ``d_delta`` (G_t, C+1, J_t), ``d_theta`` (G_t, C+1, P) in layout order, ``w``."""
+        m = self._mk[t]
+        th, ph, sp = self.kernel_params(theta)
+        kw = self.kernel_kwargs(theta)
+        U = self._group_columns(m, tuple(cols))
+        G = int(m.agent_of_draw.max()) + 1
+        delta_t = np.asarray(delta_t, dtype=float)
+        if self.group_sums_backend == "oracle":
+            r = group_sums_oracle(self._k, delta_t, m.kernel, th, ph, sp, m.agent_of_draw, G, U, derivatives,
+                                  n_threads, **kw)
+            dD, dT = r["d_delta"], r["d_theta"]
+        else:
+            r = self._k.group_sums(delta_t, m.kernel, th, ph, sp, m.agent_of_draw, G, U, derivatives=derivatives,
+                                   n_threads=int(n_threads), **kw)
+            dD = np.stack([np.asarray(a) for a in r["d_delta"]]) if derivatives else None
+            dT = np.stack([np.asarray(a) for a in r["d_theta"]]) if derivatives else None
+        return {"columns": tuple(cols), "S": np.asarray(r["S"], dtype=float),
+                "d_delta": None if dD is None else np.asarray(dD, dtype=float),
+                "d_theta": None if dT is None else self.from_kernel_order(np.asarray(dT, dtype=float)),
+                "w": np.asarray(r["w"], dtype=float)}
+
     def _micro_for(self, m: _Market, parts: tuple[MicroPartRequest, ...]) -> tuple[dict[str, Any], np.ndarray, float]:
         cached = m.micro_cache.get(parts)
         if cached is not None:
@@ -444,7 +530,36 @@ class PCMModel:
     # ---------------------------------------------------------------- solve
 
     def _solve_one(self, m: _Market, th: np.ndarray, ph: np.ndarray, sp: float, parts: tuple[MicroPartRequest, ...],
-                   need_jacobian: bool, price_derivatives: bool, n_threads: int, a_lo: float) -> dict[str, Any]:
+                   need_jacobian: bool, price_derivatives: bool, n_threads: int, a_lo: float,
+                   requests: KernelRequests | None = None, theta: np.ndarray | None = None) -> dict[str, Any]:
+        r = self._solve_kernel(m, th, ph, sp, parts, need_jacobian, price_derivatives, n_threads, a_lo)
+        if requests is not None and theta is not None and r["status"] == "ok":
+            if requests.group_sums:
+                r["group"] = self.group_sums(m.t, r["delta"], theta, tuple(requests.group_sums), need_jacobian,
+                                             n_threads)
+            if requests.second_choice and m.market_id in tuple(requests.second_choice_markets):
+                r["second"] = self.second_choice(m.t, r["delta"], theta, n_threads=n_threads)
+        return r
+
+    def second_choice(self, t: int, delta_t: np.ndarray, theta: np.ndarray, adjoint: dict[str, Any] | None = None,
+                      n_threads: int = 1) -> dict[str, Any]:
+        """``pcm_kernel.second_choice`` on market t at the price-order ``delta_t``: C, s (and with ``adjoint`` =
+        {"A": (K, J, J), "B": (K, J)} the contraction ``out_delta`` (K, J) and ``out_theta`` (K, P) in layout order)."""
+        th, ph, sp = self.kernel_params(theta)
+        r = self._k.second_choice(np.asarray(delta_t, dtype=float), self._mk[t].kernel, th, ph, sp,
+                                  None if adjoint is None else {"A": list(np.asarray(adjoint["A"], dtype=float)),
+                                                                "B": np.asarray(adjoint["B"], dtype=float)},
+                                  n_threads=int(n_threads), **self.kernel_kwargs(theta))
+        out = {"C": np.asarray(r["C"]), "s": np.asarray(r["s"]),
+               "draws_with_no_inside_second": int(r["draws_with_no_inside_second"]), "seconds": float(r["seconds"])}
+        if adjoint is not None:
+            out["out_delta"] = np.asarray(r["out_delta"])
+            out["out_theta"] = self.from_kernel_order(np.asarray(r["out_theta"]))
+        return out
+
+    def _solve_kernel(self, m: _Market, th: np.ndarray, ph: np.ndarray, sp: float,
+                      parts: tuple[MicroPartRequest, ...], need_jacobian: bool, price_derivatives: bool,
+                      n_threads: int, a_lo: float) -> dict[str, Any]:
         acc = self._accepted[m.t]
         if acc is not None and acc.a_lo != a_lo:
             acc = None   # a warm start solved under another bound is not a warm start
@@ -475,7 +590,8 @@ class PCMModel:
         self.last_threads = threads
         log.info("PCM threads per market: %s", dict(zip([str(m.market_id) for m in self._mk], threads.tolist())))
         futures = [self._pool.submit(self._solve_one, m, th, ph, sp, parts, need_jacobian,
-                                     requests.price_derivatives, int(threads[m.t]), al) for m in self._mk]
+                                     requests.price_derivatives, int(threads[m.t]), al, requests, theta)
+                   for m in self._mk]
         results = [f.result() for f in futures]
 
         delta = np.full(self.n_products, np.nan)
@@ -539,6 +655,19 @@ class PCMModel:
             outputs[MICRO_OUTPUTS] = table
         if requests.price_derivatives:
             outputs["ds_dp"] = ds_dp
+        if requests.group_sums:
+            outputs[GROUP_OUTPUTS] = [r.get("group") for r in results]
+        if requests.second_choice:
+            outputs[SECOND_CHOICE_OUTPUTS] = [r.get("second") for r in results]
+            solved = [np.asarray(r["delta"], dtype=float) for r in results]
+            theta_sc = theta.copy()
+            nthr = self.total_threads
+
+            def adjoint(t: int, A: np.ndarray, B: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+                o = self.second_choice(t, solved[t], theta_sc, {"A": A, "B": B}, n_threads=nthr)
+                return o["out_delta"], o["out_theta"]
+
+            outputs[SECOND_CHOICE_ADJOINT] = adjoint
         if status is EvalStatus.OK and self.spec.track_realised_mass:
             mass = self._realised_mass()
             if mass is not None:
@@ -665,6 +794,25 @@ class PCMModel:
         """restore(theta): discard the trial state."""
         with self._lock:
             self._trial = [None] * self.T
+
+    def warm_from_delta(self, delta: np.ndarray, theta: np.ndarray) -> int:
+        """warm_from_delta(delta, theta) -> markets set: every market whose (n,) row-order ``delta`` entries are finite
+        gets that delta and ``theta`` (layout order) as its accepted state, so a run on other draws (e.g. nu 16 from
+        a nu 4 stage) starts warm instead of cold (GMY spec WP-G7 item 1). Markets with NaN entries keep theirs."""
+        with self._lock:
+            delta = np.asarray(delta, dtype=float).ravel()
+            if delta.shape != (self.n_products,):
+                raise ValueError(f"delta has shape {delta.shape}, expected ({self.n_products},)")
+            stacked = self.to_kernel_order(np.asarray(theta, dtype=float).ravel())
+            al = self.a_lo(theta)
+            done = 0
+            for m in self._mk:
+                d = delta[m.rows]
+                if np.all(np.isfinite(d)):
+                    self._accepted[m.t] = _State(delta=d.copy(), theta=stacked.copy(), a_lo=al)
+                    done += 1
+            self._trial = [None] * self.T
+            return done
 
     def accepted_delta(self) -> np.ndarray | None:
         """(n,) accepted delta in row order, or None while some market has no accepted state."""

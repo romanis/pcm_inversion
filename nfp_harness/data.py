@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 from scipy.stats import norm, qmc
 
-__all__ = ["break_price_ties", "sobol_normal_draws", "cross_agents"]
+__all__ = ["break_price_ties", "drop_small_shares", "sobol_normal_draws", "cross_agents", "income_law_basis"]
+
+#: Petrin's income law winsorises income to [1, 150] in $1000 (LEARNINGS 11, 32)
+INCOME_LAW_CLIP = (1.0, 150.0)
 
 
 def break_price_ties(prices: np.ndarray, market_ids: np.ndarray, min_gap: float) -> np.ndarray:
@@ -32,20 +37,60 @@ def break_price_ties(prices: np.ndarray, market_ids: np.ndarray, min_gap: float)
     return out
 
 
-def sobol_normal_draws(n: int, dim: int, seed: int, require_power_of_two: bool = True) -> np.ndarray:
+def drop_small_shares(shares: np.ndarray, market_ids: np.ndarray, min_share: float) -> np.ndarray:
+    """drop_small_shares(shares, market_ids, min_share) -> boolean mask of the rows to keep.
+
+    A product whose data share is below ``min_share`` is bought by about one simulated consumer or fewer, so its
+    inversion and its derivatives are pure simulation noise. Dropping it moves its share to the outside good; the
+    other products' shares are unchanged. Every market keeps at least its largest product. ``min_share = 0`` keeps
+    every row.
+    """
+    shares = np.asarray(shares, dtype=float).ravel()
+    market_ids = np.asarray(market_ids).ravel()
+    if shares.shape != market_ids.shape:
+        raise ValueError(f"{shares.size} shares for {market_ids.size} market ids")
+    if not min_share >= 0:
+        raise ValueError(f"min_share must be non-negative, got {min_share}")
+    keep = shares >= min_share
+    for t in np.unique(market_ids):
+        rows = np.flatnonzero(market_ids == t)
+        if not keep[rows].any():
+            keep[rows[np.argmax(shares[rows])]] = True
+    return keep
+
+
+def sobol_normal_draws(n: int, dim: int, seed: int, require_power_of_two: bool = True,
+                       antithetic: Sequence[int] = ()) -> np.ndarray:
     """sobol_normal_draws(n, dim, seed) -> (n, dim) scrambled Sobol standard normal draws.
 
     n is a power of two (owner decision 6: 4,096 development, 16,384 reported, 32,768 doubling check).
     ``require_power_of_two=False`` allows other n (scipy then warns about balance properties).
+
+    ``antithetic`` (column indices, default none): the n / 2 scrambled Sobol points of this seed, each followed by its
+    antithetic partner, the same point with those columns negated (rows 2k and 2k + 1), so every listed column sums to
+    exactly zero over each pair and over the n draws. n must be even. Without it the draws are unchanged.
     """
     if n < 1 or dim < 1:
         raise ValueError(f"n and dim must be positive, got n={n}, dim={dim}")
+    anti = sorted({int(c) for c in antithetic})
+    if anti:
+        if any(c < 0 or c >= dim for c in anti):
+            raise ValueError(f"antithetic columns {anti} are not all in [0, {dim})")
+        if n % 2:
+            raise ValueError(f"antithetic draws need an even n, got {n}")
+        half = sobol_normal_draws(n // 2, dim, seed, require_power_of_two)
+        out = np.repeat(half, 2, axis=0)
+        out[1::2, anti] = -half[:, anti]
+        return out
     m = int(round(np.log2(n)))
     power = 2**m == n
     if require_power_of_two and not power:
         raise ValueError(f"n = {n} is not a power of two (DESIGN 9, owner decision 6)")
     engine = qmc.Sobol(dim, scramble=True, seed=seed)
     u = engine.random_base2(m) if power else engine.random(n)
+    # a scrambled point can be exactly 0 (e.g. seed 8673321, n 16384, dim 11), whose normal quantile is -inf: such a
+    # coordinate moves to the middle of its first stratum, 0.5 / n (and 1 to 1 - 0.5 / n); every other draw is unchanged
+    u = np.where(u <= 0.0, 0.5 / n, np.where(u >= 1.0, 1.0 - 0.5 / n, u))
     return norm.ppf(u)
 
 
@@ -82,3 +127,19 @@ def cross_agents(agent_weights: np.ndarray, agent_demographics: np.ndarray, nu: 
         counts = np.array([len(b) for b in np.array_split(np.arange(R), A)])
     agent_of_draw = np.repeat(np.arange(A), counts)
     return (w / counts)[agent_of_draw], demo[agent_of_draw], nu
+
+
+def income_law_basis(income: np.ndarray, ybar: float, clip: tuple[float, float] = INCOME_LAW_CLIP) -> np.ndarray:
+    """income_law_basis(income, ybar, clip) -> log(ybar / clip(income, lo, hi)), the agent column of Petrin's bounded
+    income law (LEARNINGS 11, 32).
+
+    With a scale parameter fixed at 1 on this column, log alpha_i = log(ybar / y_i) + ... + log a_i: price sensitivity
+    falls one for one with income, the household with income ``ybar`` has c_i = 1, and the clip bounds the spread of
+    c_i to the factor hi / lo. ``income`` and ``clip`` are in the same unit ($1000 for the [1, 150] default).
+    """
+    lo, hi = clip
+    if not 0 < lo <= hi:
+        raise ValueError(f"clip must satisfy 0 < lo <= hi, got {clip}")
+    if not ybar > 0:
+        raise ValueError(f"ybar must be positive, got {ybar}")
+    return np.log(ybar / np.clip(np.asarray(income, dtype=float), lo, hi))
