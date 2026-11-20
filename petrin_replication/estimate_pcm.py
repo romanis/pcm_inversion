@@ -77,7 +77,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import pyblp  # noqa: E402
 
-from nfp_harness import comparison, pipeline  # noqa: E402
+from nfp_harness import comparison, pipeline, twins  # noqa: E402
 from nfp_harness.data import break_price_ties, income_law_basis  # noqa: E402
 from nfp_harness.diagnostics import at_bound_parameters  # noqa: E402
 from nfp_harness.linear import LinearIV  # noqa: E402
@@ -172,15 +172,7 @@ def merge_twins(products: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     consumer in the PCM: keep the first row with the summed shares (and quantities). Returns (products,
     number of rows merged away). The cost basis stays consistent: the twins share wt, mpg, jp, eu and trend
     (checked), and q is summed with the shares, so log(q) is the merged product's quantity."""
-    g = products.groupby(list(TWIN_KEYS), sort=False)
-    first = (g.cumcount() == 0).to_numpy()
-    out = products.copy()
-    for c in ("wt", "mpg", "jp", "eu", "trend"):
-        if int(g[c].nunique().max()) > 1:
-            raise ValueError(f"merged twins differ in the cost characteristic {c}")
-    for c in ("shares", "q"):
-        out[c] = g[c].transform("sum")
-    return out[first].reset_index(drop=True), int((~first).sum())
+    return twins.merge_twins(products, TWIN_KEYS, ("shares", "q"), constant_columns=("wt", "mpg", "jp", "eu", "trend"))
 
 
 def per_sd_spreads(products: pd.DataFrame) -> dict[str, float]:

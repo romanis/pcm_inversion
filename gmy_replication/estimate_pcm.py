@@ -54,7 +54,7 @@ age-price rows alone (a check of the age channel).
 Starting theta: every taste and pi of the BLP fit (results/blp_fit_h1000.json) divided by the median |alpha_i|, phi at 0
 (the BLP law sits in c_i), sigma_p 2.5. Data: same-firm exact twins merged (same price and x, shares summed; the
 second-choice matrices merged likewise), remaining price ties spread to a $10 gap. Consumers: 1,000 CPS households per
-year (``--households``; gmy_data.load_agents) crossed with scrambled Sobol normal taste draws, 2^ceil(log2(H nu)) per
+year (``--households``; load_agents) crossed with scrambled Sobol normal taste draws, 2^ceil(log2(H nu)) per
 market; nu 16 by default (nu 4 fits the micro block's family-size rows to simulation noise, GMY_ROUND1 section 4).
 ``--antithetic-taste`` draws them in antithetic pairs (each Sobol point followed by its negation on every taste
 dimension, GMY_ROUND4 item 1). a_i has no draws: the kernel integrates its lognormal in closed form.
@@ -92,17 +92,23 @@ sys.path[:0] = [str(ROOT), str(ROOT / "nevo_replication" / ".vendor")]
 import argparse  # noqa: E402
 import dataclasses  # noqa: E402
 import json  # noqa: E402
+import math  # noqa: E402
 import time  # noqa: E402
-from typing import Any, Sequence  # noqa: E402
+from typing import Any, Mapping, Sequence  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-from nfp_harness import comparison, gmy_data, pipeline  # noqa: E402
+from nfp_harness import comparison, micro_sets, pipeline, twins  # noqa: E402
+from nfp_harness import instruments as iv  # noqa: E402
 from nfp_harness.checkpoint import read_stage_file, stage_parameter_names  # noqa: E402
-from nfp_harness.data import INCOME_LAW_CLIP, break_price_ties, drop_small_shares, income_law_basis  # noqa: E402
+from nfp_harness.comparison import format_cell as _fmt, year_entry as _year_get  # noqa: E402
+from nfp_harness.data import (INCOME_LAW_CLIP, break_price_ties, drop_small_shares, fetch_dataverse_file,  # noqa: E402
+                              income_law_basis, zscore)
+from nfp_harness.micro_sets import MicroMoments  # noqa: E402
 from nfp_harness.diagnostics import at_bound_parameters  # noqa: E402
-from nfp_harness.linear import LinearIV, matrix_rank  # noqa: E402
+from nfp_harness.instruments import drop_collinear, drop_collinear_columns, keep_rank, standardise  # noqa: E402
+from nfp_harness.linear import LinearIV  # noqa: E402
 from nfp_harness.models import pcm_post as pp  # noqa: E402
 from nfp_harness.models.pcm import PCMModel, PCMSpec  # noqa: E402
 from nfp_harness.moments import (GroupMicroMoments, GroupMomentRow, IVMoments, MicroDataset,  # noqa: E402
@@ -178,15 +184,335 @@ PAPER = {"table5": {1980: (-5.96, -5.78, -5.49, -5.13, -4.30), 2018: (-9.37, -8.
          "table6_data": dict(zip(UNOBS, (0.71, 0.64, 0.84, 0.71, 0.60, 0.65, 0.48, 0.28, 0.37, 0.34, 0.48))),
          "table6_model": dict(zip(UNOBS, (0.71, 0.64, 0.80, 0.69, 0.59, 0.65, 0.49, 0.28, 0.19, 0.34, 0.47)))}
 
+# ------------------------------------------------------------------ data
+#
+# Grieco, Murry & Yurukoglu (2024, QJE 139(2)) US automobile data: products, CPS households, micro moments
+# and second-choice matrices, read from the authors' replication package (Harvard Dataverse doi:10.7910/DVN/CZGOKP,
+# ``GMY_Replication.tar.gz``, MIT licence). The raw files are not committed: unpack the package so that
+# ``<root>/data/data_blp.csv`` exists (default root ``gmy_replication/data/GMY_Replication`` of this repo).
+#
+# Every rule below is the authors' code in ``codes/`` of the package, cited by file:
+#
+# * products (``loadWardsSalesData.m``): one market per year (1980-2018, 165-323 models, 9,694 rows, all with
+#   ``FINAL_SAMPLE`` = 1); price ``msrp / 10`` in $10,000 of 2015 (msrp is already real, in $1,000 of 2015); market size
+#   ``number_households / 2.5`` (average holding 5 years, 2 cars per household), shares ``sales / market size``; the
+#   file order is the authors' product order (sorted by year, then make), which the second-choice matrices index.
+# * ownership (``makeOwnership.m``): products with the same ``parent`` are jointly priced.
+# * utility interactions (``loadWardsSalesData.m`` xTerms, ``getMu_lowMem.m``): the 15 columns ``XTERMS``; within mu the
+#   three continuous ones (log footprint, log hp, log mpg) are z-scored over the pooled products (MATLAB zscore, sd with
+#   n - 1), and the micro moments use them raw.
+# * second stage (``linearDemand.do``): delta on price (instrument ``lag_pl_con``) and ``STAGE2_X`` with year and
+#   ``make2`` fixed effects, clustered by ``make2``; the do-file's differentiation counts ``IV_N`` and ``IV_N_weight`` are
+#   built here too (the do-file builds them and does not use them in the baseline).
+# * households (``loadCPSMktHholds.m``): per year a uniform draw without replacement of CPS households, weights the CPS
+#   weights normalised to sum to 1 in each year; income in 2015 dollars, winsorised to [5,000, 225,000]; ``inc`` =
+#   (income - pooled mean) / 10,000, ``inc2`` = inc^2 / 100; family size 1 + married + children; age / 100; income
+#   quintiles from the national cutoffs (2018 dollars converted to 2015); CEX sets live in 1983-2004, MRI in 1992-2014.
+# * micro moments (``loadMicMomData.m``, ``getMicroMoments.m``, ``ExjCondH.m``): the 33 moments of specification 6
+#   (``NEWPATTERN``), weight 1 / variance. The model counterpart of E[x | H] is the household-weighted mean over the
+#   households in H (pooled over the set's years, each year's weights summing to 1) of that household's expected x
+#   given a purchase: ``MicroMomentEvaluator``. The "CEX" and "MRI" column labels of the working paper's Table 8 are
+#   swapped relative to the files the code reads (microMomentsCEX.mat holds the values Table 8 prints under MRI, and
+#   the reverse; the urban-rural truck row, which the code takes from the CEX file, sits under MRI in the table).
+# * second choices (``getSecondChoiceStructure.m``): ``secondChoiceProb_<year>`` has first choices in rows and second
+#   choices in columns, in the year's product order, short of the year's product count by up to two trailing
+#   rows/columns, which are padded with zeros.
+#
+# The MicroMoments class of the table and the evaluator of the model counterparts are the harness's
+# nfp_harness.micro_sets (MicroMomentEvaluator, with MICRO_CHAR); the household-set columns are
+# micro_sets.add_set_columns with SURVEYS and SET_DEMOGRAPHICS.
+
+DATAVERSE_DOI = "doi:10.7910/DVN/CZGOKP"
+DEFAULT_ROOT = HERE / "data" / "GMY_Replication"
+
+#: xTerms of loadWardsSalesData.m (columns 1-15), named as in xTerms_names; make dummies are not used by spec 6
+XTERMS = ("prices", "const", "car", "van", "suv", "truck", "log_footprint", "log_hp", "log_mpg", "lux", "sport",
+          "electric", "regionASIA", "regionEU", "regionUS")
+XTERMS_NAMES = ("Price", "Constant", "Car", "Van", "SUV", "Truck", "logSizeLW", "Horsepower", "MilesPerGallon",
+                "Luxury", "Sport", "Electric", "AsianBrand", "EuroBrand", "USBrand")
+#: columns z-scored inside mu (getMu_lowMem.m, jChar columns 7-9)
+Z_XTERMS = ("log_footprint", "log_hp", "log_mpg")
+#: exogenous characteristics of the second stage (linearDemand.do $X, from X(:,1:12) plus sport)
+STAGE2_X = ("z_log_height", "z_log_footprint", "z_log_hp", "z_log_mpg", "z_log_curbweight", "z_log_number_trims",
+            "releaseYear", "yearsSinceDesign_tc", "sport", "electric", "truck", "suv", "van")
+SECOND_CHOICE_YEARS = (1991, 1999, 2005, 2015)
+#: unObsPattern of spec 6: the characteristics with a random coefficient and a second-choice correlation moment
+SECOND_CHOICE_CHARS = ("van", "suv", "truck", "log_footprint", "log_hp", "log_mpg", "lux", "sport", "electric",
+                       "regionEU", "regionUS")
+CEX_YEARS = (1983, 2004)
+MRI_YEARS = (1992, 2014)
+INCOME_WINSOR = (5000.0, 225000.0)
+HOLDING = 2.5   # number_households / 2.5: average duration 5 years, 2 cars per household
+AGE_BINS = (0.30, 0.40, 0.50, 0.60)   # age / 100 cut points of the five age sets
+#: micro-moment characteristic (data column name) -> product column of the model counterpart
+MICRO_CHAR = {"Price": "prices", "Van": "van", "logSizeLW": "log_footprint", "Truck": "truck"}
+
+
+def package_root(root: str | pathlib.Path | None = None) -> pathlib.Path:
+    """package_root(root=None) -> the unpacked package directory (holding ``data/data_blp.csv``); raises
+    FileNotFoundError naming ``fetch_package`` when it is missing."""
+    r = pathlib.Path(root) if root is not None else DEFAULT_ROOT
+    if not (r / "data" / "data_blp.csv").is_file():
+        raise FileNotFoundError(f"{r}/data/data_blp.csv not found: unpack GMY_Replication.tar.gz there "
+                                f"(fetch_package in gmy_replication/estimate_pcm.py downloads it from {DATAVERSE_DOI})")
+    return r
+
+
+def fetch_package(dest: str | pathlib.Path) -> pathlib.Path:
+    """fetch_package(dest) -> path of ``GMY_Replication.tar.gz`` downloaded into ``dest`` from the Dataverse API
+    (dataset ``DATAVERSE_DOI``, latest version). Unpack it with ``tar xzf`` so ``package_root`` finds it."""
+    return fetch_dataverse_file(DATAVERSE_DOI, "GMY_Replication.tar.gz", dest)
+
+
+def _make2(make: pd.Series) -> pd.Series:
+    """make2 of linearDemand.do (small UK and Italian makes pooled, datsun -> nissan, merkur -> mercury). The
+    do-file's list spells 'alpha romeo' and 'lansia', so alfa romeo and lancia keep their own make, as there."""
+    m2 = make.copy()
+    m2[make.isin(["rover", "austin-rover", "triumph", "mg", "delorean", "sterling"])] = "small-uk"
+    m2[make.isin(["alpha romeo", "lansia"])] = "small-italian"
+    m2[make == "datsun"] = "nissan"
+    m2[make == "merkur"] = "mercury"
+    return m2
+
+
+def load_products(root: str | pathlib.Path | None = None) -> pd.DataFrame:
+    """load_products(root=None) -> product table, one row per model-year in the authors' order, with pyblp-shaped
+    columns: ``market_ids`` (year), ``position`` (0-based index within the year, the second-choice matrix index),
+    ``product_ids``, ``firm_ids`` (parent), ``clustering_ids`` (make2), ``prices`` ($10k of 2015), ``shares``,
+    ``market_size``, ``quantity``, the ``XTERMS`` columns (raw), their z-scored versions ``z_<col>`` for
+    ``Z_XTERMS``, the ``STAGE2_X`` columns, ``demand_instruments0`` (lag_pl_con), ``iv_prod``, ``steel_weight``,
+    ``IV_N``, ``IV_N_weight`` and ``trend`` (year - 1980), plus every column of data_blp.csv."""
+    r = package_root(root)
+    d = pd.read_csv(r / "data" / "data_blp.csv")
+    if not (d.FINAL_SAMPLE == 1).all():
+        d = d[d.FINAL_SAMPLE == 1].reset_index(drop=True)
+    if not d.year.is_monotonic_increasing:
+        raise ValueError("data_blp.csv is not sorted by year; the second-choice matrices index the file order")
+    out = d.copy()
+    out["market_ids"] = d.year.astype(int)
+    out["position"] = d.groupby("year").cumcount().astype(int)
+    out["product_ids"] = d.model.astype(str)
+    out["firm_ids"] = d.parent.astype(str)
+    out["make2_do"] = _make2(d.make.astype(str))
+    out["clustering_ids"] = out.make2_do
+    out["prices"] = d.msrp / 10.0
+    out["market_size"] = d.number_households / HOLDING
+    out["quantity"] = d.sales.astype(float)
+    out["shares"] = d.sales / out.market_size
+    out["const"] = 1.0
+    out["electric"] = np.maximum(d.PHEV, d.EV).astype(float)
+    for c in Z_XTERMS:
+        out[f"z_{c}"] = zscore(d[c])
+    for c in ("log_height", "log_curbweight", "log_number_trims"):
+        out[f"z_{c}"] = zscore(d[c])
+    out["yearsSinceDesign_tc"] = d.yearsSinceDesign.clip(3, 12).astype(float)
+    out["trend"] = (d.year - d.year.min()).astype(float)
+    out["demand_instruments0"] = d.lag_pl_con.astype(float)
+    # differentiation counts of linearDemand.do: rivals by year x vehicle type x HQ region, and the same split by
+    # curb weight above the pooled median of the vehicle type
+    veh = np.select([d.van == 1, d.suv == 1, d.truck == 1], ["van", "suv", "truck"], "car")
+    out["veh_type"] = veh
+    out["IV_N"] = out.groupby(["year", "veh_type", "region"]).year.transform("size").astype(float)
+    big = d.curbweight > out.groupby("veh_type").curbweight.transform("median")
+    out["big_for_class"] = big.astype(int)
+    out["IV_N_weight"] = out.groupby(["year", "veh_type", "region", "big_for_class"]).year.transform("size").astype(float)
+    return out
+
+
+def _cpi(r: pathlib.Path) -> dict[int, float]:
+    c = pd.read_csv(r / "data" / "CPIU_1967base.csv", encoding="utf-8-sig")
+    return dict(zip(c.year.astype(int), c.CPIU67.astype(float)))
+
+
+def load_agents(root: str | pathlib.Path | None = None, n_households: int = 1000, seed: int = SEED,
+                years: Sequence[int] | None = None) -> pd.DataFrame:
+    """load_agents(root=None, n_households=1000, seed=SEED, years=None) -> household table, ``n_households``
+    CPS households per year drawn uniformly without replacement (numpy, so not the authors' MATLAB stream).
+
+    Columns: ``market_ids``, ``agent_ids``, ``weights`` (CPS weight / year total), ``income`` (2015 $, winsorised),
+    ``inc``, ``inc2``, ``fs2``, ``fs34``, ``fs5``, ``age`` (/100), ``rural``, ``college``, ``inc_quintile`` (1-5),
+    ``age_group`` (1-5: <30, 30s, 40s, 50s, 60+), ``fs_group`` (1-4: 1, 2, 3-4, 5+), ``cex`` and ``mri`` (1 when the
+    year is in that survey's window). ``years`` restricts the draw; the income mean behind ``inc`` is always the
+    pooled mean over all 39 years, as in loadCPSMktHholds.m (each year weighted equally).
+    """
+    r = package_root(root)
+    cps = pd.read_csv(r / "data" / "CPS_households.csv")
+    cpi = _cpi(r)
+    rng = np.random.default_rng(seed)
+    all_years = sorted(int(y) for y in pd.read_csv(r / "data" / "data_blp.csv", usecols=["year"]).year.unique())
+    frames = []
+    for y in all_years:
+        g = cps[cps.year == y]
+        if len(g) < n_households:
+            raise ValueError(f"{y}: {len(g)} CPS households, fewer than {n_households}")
+        g = g.iloc[np.sort(rng.choice(len(g), size=n_households, replace=False))]
+        f = pd.DataFrame({"market_ids": y, "agent_ids": np.arange(n_households),
+                          "weights": (g.weight / g.weight.sum()).to_numpy(float)})
+        f["income"] = np.clip(g.hhincome.to_numpy(float) * cpi[2015] / cpi[y], *INCOME_WINSOR)
+        fs = 1 + g.married.to_numpy() + g.numchildren.to_numpy()
+        f["fs2"] = (fs == 2).astype(float)
+        f["fs34"] = ((fs >= 3) & (fs <= 4)).astype(float)
+        f["fs5"] = (fs >= 5).astype(float)
+        f["fs_group"] = np.select([fs == 1, fs == 2, fs <= 4], [1, 2, 3], 4)
+        f["age"] = g.age.to_numpy(float) / 100.0
+        f["age_group"] = np.digitize(f.age, AGE_BINS) + 1
+        f["rural"] = g.rural.to_numpy(float)
+        f["college"] = g.bachelors.to_numpy(float)
+        frames.append(f)
+    a = pd.concat(frames, ignore_index=True)
+    w_tot = a.groupby("market_ids").weights.transform("sum")   # 1 in every year
+    avg = float((a.income * a.weights).sum() / w_tot.groupby(a.market_ids).first().sum())
+    a["inc"] = (a.income - avg) / 1e4
+    a["inc2"] = a.inc ** 2 / 1e2
+    q = pd.read_csv(r / "data" / "income_quintile_cutoffs_by_year.csv").set_index("year")
+    cut = q[["inc_p2", "inc_p4", "inc_p6", "inc_p8"]] * cpi[2015] / cpi[2018]
+    a["inc_quintile"] = 0
+    for y, idx in a.groupby("market_ids").groups.items():
+        # MATLAB discretize on [-Inf; cutoffs; Inf]: bins closed on the left
+        a.loc[idx, "inc_quintile"] = np.digitize(a.loc[idx, "income"], cut.loc[y].to_numpy(float)) + 1
+    a["cex"] = a.market_ids.between(*CEX_YEARS).astype(float)
+    a["mri"] = a.market_ids.between(*MRI_YEARS).astype(float)
+    if years is not None:
+        a = a[a.market_ids.isin(list(years))].reset_index(drop=True)
+    return a
+
+
+def load_micro_tables(root: str | pathlib.Path | None = None) -> dict[str, dict[str, pd.DataFrame]]:
+    """load_micro_tables(root=None) -> {"cex": {"value", "variance"}, "mri": {...}}: the 44 demographics x
+    characteristics tables of cleanMoments.m (CEX 44 x 75: 13 characteristics and 62 make groups; MRI 44 x 76, plus
+    PurchaseProb). The MRI rows on urban / rural are NaN, as cleanMoments.m sets them."""
+    from scipy.io import loadmat
+    r = package_root(root)
+    makes = pd.read_csv(r / "data" / "make_group_ids.csv").make.tolist()
+
+    def fix(s: str) -> str:
+        return s.replace("(", "").replace(")", "").replace(" ", "_").replace("-", "_")
+
+    cex = loadmat(r / "data" / "microMomentsCEX.mat")
+    # cleanMoments.m labels both surveys with the CEX names (the MRI file's name arrays are not used)
+    chars = [str(x[0]) for x in cex["car_char_names_cex"].ravel()][:-1]
+    demog = [str(x[0]) for x in cex["demog_names_cex"].ravel()]
+    out: dict[str, dict[str, pd.DataFrame]] = {}
+    for s in ("cex", "mri"):
+        m = cex if s == "cex" else loadmat(r / "data" / "microMomentsMRI.mat")
+        cols = [fix(c) for c in chars + makes + ["PurchaseProb"]]
+        val, var = m[f"moment_values_{s}"], m[f"moment_variance_{s}"]
+        cols = cols[:val.shape[1]]
+        out[s] = {"value": pd.DataFrame(val, index=demog, columns=cols),
+                  "variance": pd.DataFrame(var, index=demog, columns=cols)}
+    urb = ["Urban", "Rural", "UrbanMINUSRural", "UrbanOVERRural"]
+    out["mri"]["value"].loc[urb, :] = np.nan
+    return out
+
+
+def load_micro_moments(root: str | pathlib.Path | None = None) -> MicroMoments:
+    """load_micro_moments(root=None) -> MicroMoments of spec 6 (33 rows)."""
+    t = load_micro_tables(root)
+    rows: list[dict[str, Any]] = []
+
+    def add(demog_rows: Sequence[tuple[str, Any, Any]], chars: Sequence[str], surveys: Sequence[str], demographic: str,
+            kind: str = "diff") -> None:
+        # extractMom: per survey a (demog x char) block, surveys stacked, then column-major: char outermost
+        for ch in chars:
+            for s in surveys:
+                for name, a, b in demog_rows:
+                    rows.append({"name": f"{name} {ch} {s}", "survey": s, "char": ch, "kind": kind,
+                                 "demographic": demographic, "a": a, "b": b,
+                                 "value": float(t[s]["value"].loc[name, ch]),
+                                 "variance": float(t[s]["variance"].loc[name, ch])})
+
+    inc = [(f"Income{q}MINUSIncome1", q, 1) for q in (5, 4, 3, 2)]
+    age = [("Age60+MINUSAge20-29", 5, 1), ("Age50-59MINUSAge20-29", 4, 1), ("Age40-49MINUSAge20-29", 3, 1),
+           ("Age30-39MINUSAge20-29", 2, 1)]
+    fam = [("FamilySize2MINUSFamilySize1", 2, 1), ("FamilySize3-4MINUSFamilySize1", 3, 1),
+           ("FamilySize5+MINUSFamilySize1", 4, 1)]
+    add(inc, ["Price"], ["cex", "mri"], "inc_quintile")
+    add(age, ["Price"], ["cex", "mri"], "age_group")
+    add(fam, ["Van", "logSizeLW"], ["cex", "mri"], "fs_group")
+    add([("UrbanMINUSRural", 0, 1)], ["Truck"], ["cex"], "rural")
+    add([(f"Income{q}OVERIncome1", q, 1) for q in (5, 4, 3, 2)], ["PurchaseProb"], ["mri"], "inc_quintile", "ratio")
+    return MicroMoments(pd.DataFrame(rows))
+
+
+def load_second_choices(root: str | pathlib.Path | None = None, products: pd.DataFrame | None = None
+                        ) -> dict[int, dict[str, np.ndarray]]:
+    """load_second_choices(root=None, products=None) -> {year: {"prob", "count"}} for 1991, 1999, 2005, 2015:
+    (J_t, J_t) arrays in the year's product order (``position``), first choice in rows, second choice in columns,
+    the package's matrices padded with zero trailing rows/columns to J_t (getSecondChoiceStructure.m). A row sums
+    to 1 when the first choice has respondents and to 0 otherwise."""
+    from scipy.io import loadmat
+    r = package_root(root)
+    products = load_products(r) if products is None else products
+    m = loadmat(r / "data" / "secondChoiceOut.mat")
+    out: dict[int, dict[str, np.ndarray]] = {}
+    for y in SECOND_CHOICE_YEARS:
+        J = int((products.market_ids == y).sum())
+        res = {}
+        for key, name in (("prob", "secondChoiceProb"), ("count", "secondChoiceN")):
+            a = np.asarray(m[f"{name}_{y}"], dtype=float)
+            if a.shape[0] > J or a.shape[1] > J:
+                raise ValueError(f"{name}_{y} is {a.shape}, larger than the {J} products of {y}")
+            full = np.zeros((J, J))
+            full[:a.shape[0], :a.shape[1]] = a
+            res[key] = full
+        out[y] = res
+    return out
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class GMYData:
+    """Everything one GMY replication script needs: products, agents, micro moments and second choices."""
+
+    products: pd.DataFrame
+    agents: pd.DataFrame
+    micro: MicroMoments
+    second_choices: Mapping[int, Mapping[str, np.ndarray]]
+    root: pathlib.Path
+
+
+def load_data(root: str | pathlib.Path | None = None, n_households: int = 1000, seed: int = SEED,
+         years: Sequence[int] | None = None) -> GMYData:
+    """load_data(root=None, n_households=1000, seed=SEED, years=None) -> GMYData; ``years`` keeps those markets only
+    (the micro moments then pool over the years kept)."""
+    r = package_root(root)
+    p = load_products(r)
+    sc = load_second_choices(r, p)
+    if years is not None:
+        keep = [int(y) for y in years]
+        p = p[p.market_ids.isin(keep)].reset_index(drop=True)
+        sc = {y: v for y, v in sc.items() if y in keep}
+    a = load_agents(r, n_households, seed, years)
+    return GMYData(products=p, agents=a, micro=load_micro_moments(r), second_choices=sc, root=r)
+
+
+#: demographic agent column -> its levels, for the household sets of the micro moments
+SET_DEMOGRAPHICS = {"inc_quintile": (1, 2, 3, 4, 5), "age_group": (1, 2, 3, 4, 5), "fs_group": (1, 2, 3, 4),
+                    "rural": (0, 1)}
+SURVEYS = ("cex", "mri")
+
+
+def add_set_columns(agents: pd.DataFrame) -> pd.DataFrame:
+    """``agents`` with one 0/1 column per (survey, demographic, level): demographic = level and the year in the
+    survey's window (loadCPSMktHholds.m lines 109-147)."""
+    return micro_sets.add_set_columns(agents, SURVEYS, SET_DEMOGRAPHICS)
+
+
+def group_moment_rows(micro: MicroMoments) -> list[tuple[str, str | None, str, str]]:
+    """(kind, product column or None, set column a, set column b) for each of the 33 rows of ``micro``, in order: the
+    arguments of ``moments.GroupMomentRow``."""
+    return micro_sets.group_moment_rows(micro, MICRO_CHAR)
+
+
+def micro_evaluator(products: pd.DataFrame, agents: pd.DataFrame, micro: MicroMoments
+                    ) -> micro_sets.MicroMomentEvaluator:
+    """GMY's model counterparts of the 33 micro moments (ExjCondH.m) on ``products`` and ``agents``."""
+    return micro_sets.MicroMomentEvaluator(products, agents, micro, MICRO_CHAR)
+
+
 def merge_twins(products: pd.DataFrame, keys: Sequence[str] = TWIN_KEYS) -> tuple[pd.DataFrame, int]:
     """Rows equal on ``keys`` (market, firm, price and every kernel characteristic) are one product to every PCM
-    consumer: keep the first, sum shares and quantity."""
-    g = products.groupby(list(keys), sort=False)
-    first = (g.cumcount() == 0).to_numpy()
-    out = products.copy()
-    for c in ("shares", "quantity", "sales"):
-        out[c] = g[c].transform("sum")
-    return out[first].reset_index(drop=True), int((~first).sum())
+    consumer: keep the first, sum shares and quantity (``twins.merge_twins``)."""
+    return twins.merge_twins(products, keys, ("shares", "quantity", "sales"))
 
 
 def price_structure(products: pd.DataFrame, chars: Sequence[str] = TASTE[1:]) -> dict[int, dict[str, float]]:
@@ -273,7 +599,7 @@ class GMYSpec:
             return
         self.years = years
         self.instruments = instruments
-        data = gmy_data.load(n_households=self.households, seed=SEED, years=self.years)
+        data = load_data(n_households=self.households, seed=SEED, years=self.years)
         self.raw_products = data.products
         self.structure_raw = price_structure(data.products, self.kernel_chars[1:])
         p, self.n_merged = merge_twins(data.products, self.twin_keys)
@@ -310,7 +636,7 @@ class GMYSpec:
         cw = np.cumsum(a.weights.to_numpy(float)[order])
         self.income_law_ybar = float(y[order][np.searchsorted(cw, cw[-1] / 2)])
         a["log_ybar_inc_w"] = income_law_basis(y, self.income_law_ybar)
-        self.agents = gmy_data.add_set_columns(a)
+        self.agents = add_set_columns(a)
         self.micro = data.micro
         self.X1, self.X1_names = self.linear_design(p)
         self.linear_names = list(self.X1_names)
@@ -338,8 +664,8 @@ class GMYSpec:
     @staticmethod
     def linear_design(p: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
         """X1 = [STAGE2_X, year dummies (first dropped), make2 dummies (first dropped), constant], rank-reduced."""
-        cols = [p[c].to_numpy(float) for c in gmy_data.STAGE2_X]
-        names = list(gmy_data.STAGE2_X)
+        cols = [p[c].to_numpy(float) for c in STAGE2_X]
+        names = list(STAGE2_X)
         for c in ("market_ids", "make2_do"):
             lv = sorted(p[c].unique())
             for v in lv[1:]:
@@ -433,7 +759,7 @@ class GMYSpec:
 
     @property
     def never_buyers(self) -> str:
-        return "gmy_code" if "never_buyers_gmy_code" in self.robustness else "drop"
+        return "keep" if "never_buyers_gmy_code" in self.robustness else "drop"
 
     def add_arguments(self, parser: Any) -> None:
         parser.add_argument("--years", type=int, nargs="+", default=None,
@@ -572,7 +898,7 @@ class GMYSpec:
             "supply block (Nash markups and the Lerner index are post-estimation only)"
             + (f"; moments {self.moments}" if self.moments != "gmy" else ""),
             "D2: the micro moments condition on households with positive purchase probability"
-            + (" (robustness: GMY's literal code, never-buyers keep their weight)" if self.never_buyers == "gmy_code"
+            + (" (robustness: GMY's literal code, never-buyers keep their weight)" if self.never_buyers == "keep"
                else ""),
             "D3: the second-choice joint law is renormalised on both sides; data matrices merged over the same-firm "
             "twins, twin-to-twin pairs dropped",
@@ -663,13 +989,13 @@ class GMYSpec:
         return PCMSpec(self.kernel_chars, track_realised_mass=False, trial_cold_evals=0, bound_kind="a")
 
     def micro_moment(self, rows: str = "all") -> list[GroupMicroMoments]:
-        """GMY's 33 micro moments (V3) as one GroupMicroMoments, in gmy_data.load_micro_moments order, fixed covariance
+        """GMY's 33 micro moments (V3) as one GroupMicroMoments, in load_micro_moments order, fixed covariance
         diag(variance) (D6). Rows whose household sets are empty in ``--years`` are dropped. ``rows="prefit"`` keeps
         the price-by-income, price-by-age and purchase-rate rows (20 of 33), the rows that pin phi_inc and phi_age, or
         under ``--prefit-rows age`` the 8 price-by-age rows."""
         tab = self.micro.table
         keep = []
-        for k, (kind, char, sa, sb) in enumerate(gmy_data.group_moment_rows(self.micro)):
+        for k, (kind, char, sa, sb) in enumerate(group_moment_rows(self.micro)):
             if rows == "prefit" and not (tab.char.iloc[k] in ("Price", "PurchaseProb")):
                 continue
             if rows == "prefit" and self.prefit_rows == "age" and not (
@@ -680,8 +1006,8 @@ class GMYSpec:
         if not keep:
             return []
         idx = [k for k, _ in keep]
-        mk = [y for y in self.years if gmy_data.CEX_YEARS[0] <= y <= gmy_data.CEX_YEARS[1]
-              or gmy_data.MRI_YEARS[0] <= y <= gmy_data.MRI_YEARS[1]]
+        mk = [y for y in self.years if CEX_YEARS[0] <= y <= CEX_YEARS[1]
+              or MRI_YEARS[0] <= y <= MRI_YEARS[1]]
         return [GroupMicroMoments("micro_gmy", MicroDataset("GMY_CEX_MRI", 1, market_ids=mk), [r for _, r in keep],
                                   tab.value.to_numpy(float)[idx], tab.variance.to_numpy(float)[idx],
                                   labels=list(tab.name.iloc[idx]), never_buyers=self.never_buyers)]
@@ -768,7 +1094,7 @@ class GMYSpec:
         for y, v in self.second_choices.items():
             pr = raw[raw.market_ids == y]
             out[int(y)] = first_second_correlations(pr.shares, v["prob"],
-                                                    pr[list(gmy_data.SECOND_CHOICE_CHARS)].to_numpy(float)).tolist()
+                                                    pr[list(SECOND_CHOICE_CHARS)].to_numpy(float)).tolist()
         return out
 
     def market_rows(self, year: int) -> np.ndarray:
@@ -786,34 +1112,26 @@ class GMYSpec:
         rows = self.market_rows(year)
         merged = self.products.iloc[rows]
         keys = [c for c in self.twin_keys if c != "prices"]
-        index = {tuple(r): k for k, r in enumerate(zip(*[merged[c].to_numpy() for c in keys],
-                                                       merged.prices_data.to_numpy()))}
-        to = np.array([index.get(tuple(r), -1)
-                       for r in zip(*[raw[c].to_numpy() for c in keys], raw.prices.to_numpy())])
-        s_raw = raw.shares.to_numpy(float)
-        Jm = rows.size
-        Mmap = np.zeros((s_raw.size, Jm))
-        kept = to >= 0   # a raw product whose merged product was dropped (D9) leaves the joint law, as first and second
-        Mmap[np.flatnonzero(kept), to[kept]] = 1.0
-        pi = Mmap.T @ ((s_raw / s_raw.sum())[:, None] * prob) @ Mmap
-        np.fill_diagonal(pi, 0.0)
+        to = twins.twin_targets(raw, merged, keys, raw_price="prices", merged_price="prices_data")
+        # a raw product whose merged product was dropped (D9, to = -1) leaves the joint law, as first and second
+        pi = twins.merge_joint_law(prob, raw.shares.to_numpy(float), to, rows.size)
         s_m = merged.shares.to_numpy(float)
         a = s_m / s_m.sum()
         with np.errstate(divide="ignore", invalid="ignore"):
             C = np.where(a[:, None] > 0, pi / a[:, None], 0.0)
-        x = merged[list(gmy_data.SECOND_CHOICE_CHARS)].to_numpy(float)
+        x = merged[list(SECOND_CHOICE_CHARS)].to_numpy(float)
         return first_second_correlations(s_m, C, x), x, s_m
 
     def second_choice_moment(self, weight: float = SC_WEIGHT) -> list[SecondChoiceMoments]:
         """GMY's second-choice correlation moments (V4) for the second-choice years in ``--years``: 11 characteristics
         x year, NaN data rows dropped (41 rows on all four years), weight 30 (D6), merged product set (D3)."""
-        years = [y for y in gmy_data.SECOND_CHOICE_YEARS if y in self.years]
+        years = [y for y in SECOND_CHOICE_YEARS if y in self.years]
         if not years:
             return []
         corr, x, s = {}, {}, {}
         for y in years:
             corr[y], x[y], s[y] = self.merged_second_choice_data(y)
-        return [SecondChoiceMoments("second_choice", years, gmy_data.SECOND_CHOICE_CHARS, corr, x, s, weight=weight)]
+        return [SecondChoiceMoments("second_choice", years, SECOND_CHOICE_CHARS, corr, x, s, weight=weight)]
 
     def step2_weighting(self, problem: Any, ev: Any) -> np.ndarray:
         """W2 at the step-1 point (D6): the micro and second-choice blocks keep their fixed (n V)^-1; the aggregate block
@@ -860,8 +1178,8 @@ class GMYSpec:
                 "robustness": list(self.robustness), "a_lo": {"value": self.a_lo, "kind": "a"},
                 "micro": {"rows": len(self.micro.table), "weight": "diag(1/variance) fixed", "never_buyers":
                           self.never_buyers},
-                "second_choice": {"years": [y for y in gmy_data.SECOND_CHOICE_YEARS if y in self.years],
-                                  "weight": SC_WEIGHT, "chars": gmy_data.SECOND_CHOICE_CHARS},
+                "second_choice": {"years": [y for y in SECOND_CHOICE_YEARS if y in self.years],
+                                  "weight": SC_WEIGHT, "chars": SECOND_CHOICE_CHARS},
                 "aggregate": "IVMoments" if "fixed_w" in self.robustness else "SarganIVMoments",
                 "clusters": "product_ids", "blp_start": self.blp["source"],
                 "layout": [dataclasses.asdict(s) for s in self._hash_layout().specs],
@@ -1055,7 +1373,7 @@ class GMYSpec:
         (out / "instruments.json").write_text(json.dumps(inst, indent=1))
         summ["instruments"] = inst
         blp = {label: json.loads(f.read_text()) for label, f in BLP_SUMMARIES.items() if f.exists()}
-        table = comparison.gmy_table({"PCM a_lo %g" % self.a_lo: summ}, blp, PAPER)
+        table = comparison_table({"PCM a_lo %g" % self.a_lo: summ}, blp, PAPER)
         (out / "comparison.txt").write_text(table + "\n")
         pipeline.log.info("comparison with GMY's BLP:\n%s", table)
         return summ
@@ -1076,6 +1394,128 @@ class GMYSpec:
         return row
 
     a_lo_band_row = band_row
+
+
+def comparison_table(pcm: Mapping[str, Mapping[str, Any]], blp: Mapping[str, Mapping[str, Any]],
+              paper: Mapping[str, Any] | None = None) -> str:
+    """comparison_table(pcm, blp, paper=None) -> the PCM-vs-BLP comparison table of the GMY spec (section 4) as
+    text.
+
+    ``pcm`` maps a column label to a PCM summary (``GMYSpec.summary``), ``blp`` a label to an ``estimate_blp.py`` JSON
+    (``table5``, ``lerner_median_by_year``, ``second_choice``, ``micro``, ``own_elasticity_mean_by_year``), ``paper``
+    the paper's quoted numbers (definitions unverified). Every row uses one definition for every column; a missing
+    entry prints as ``-``. Second-choice means are over the years of the first PCM column.
+    """
+    paper = dict(paper or {})
+    cols = list(pcm) + list(blp) + (["paper (definition UNVERIFIED)"] if paper else [])
+    first = next(iter(pcm.values()), {})
+    years = sorted(int(y) for y in (first.get("lerner_median_by_year") or first.get("own_elasticity_median_by_year")
+                                    or {}))
+    lines: list[str] = []
+    w = max(14, *(len(c) + 2 for c in cols))
+
+    def row(label: str, vals: Sequence[Any], digits: int = 3) -> None:
+        lines.append(f"{label:52s}" + "".join(f"{_fmt(v, digits):>{w}s}" for v in vals))
+
+    lines.append(f"{'':52s}" + "".join(f"{c:>{w}s}" for c in cols))
+    lines.append("Own-price elasticity by income quintile, mean over products (quintile demand s_jq, e_jq = p_j/s_jq "
+                 "ds_jq/dp_j; PCM: mean / 5-95% trimmed mean [median])")
+    for y in (1980, 2018):
+        for q in range(5):
+            vals: list[Any] = []
+            for s in pcm.values():
+                t = _year_get(s.get("table5"), y)
+                trim = t.get("trimmed_mean_over_products") if t else None
+                vals.append(f"{_fmt(t['mean_over_products'][q], 2)}"
+                            + (f" / {_fmt(trim[q], 2)}" if trim else "")
+                            + f" [{_fmt(t['median_over_products'][q], 2)}]"
+                            if t and "median_over_products" in t else (t["mean_over_products"][q] if t else None))
+            for b in blp.values():
+                t = _year_get(b.get("table5"), y)
+                vals.append(t["mean_over_products"][q] if t else None)
+            if paper:
+                t = _year_get(paper.get("table5"), y)
+                vals.append(t[q] if t else None)
+            row(f"  {y} Q{q + 1}", vals, 2)
+    lines.append("Median Lerner index (p - mc)/p, Nash with parent ownership, median over products")
+    for y in years:
+        vals = [_year_get(s.get("lerner_median_by_year"), y) for s in pcm.values()]
+        vals += [_year_get(b.get("lerner_median_by_year"), y) for b in blp.values()]
+        if paper:
+            vals.append(" / ".join(f"{_fmt(_year_get(v, y))}" for v in paper.get("lerner_median", {}).values())
+                        if y in (1980, 2018) else None)
+        row(f"  {y}", vals)
+    na = [None] * (len(blp) + (1 if paper else 0))
+    row("  all years: median over products", [s.get("margin_median") for s in pcm.values()] + na)
+    row("  all years: sales-weighted median", [s.get("margin_median_sales_weighted") for s in pcm.values()] + na)
+    row("  products with |own elasticity| < 1 (margin > 1)", [s.get("products_own_elasticity_above_-1")
+                                                             for s in pcm.values()] + na, 0)
+    lines.append("Own-price elasticity, mean over products (PCM: mean / 5-95% trimmed mean [median])")
+    for y in years:
+        vals: list[Any] = [f"{_fmt(_year_get(s.get('own_elasticity_mean_by_year'), y), 2)} / "
+                           f"{_fmt(_year_get(s.get('own_elasticity_trimmed_mean_by_year'), y), 2)} "
+                           f"[{_fmt(_year_get(s.get('own_elasticity_median_by_year'), y), 2)}]" for s in pcm.values()]
+        vals += [_year_get(b.get("own_elasticity_mean_by_year"), y) for b in blp.values()]
+        if paper:
+            vals.append(None)
+        row(f"  {y}", vals, 2)
+    sc_years = sorted(int(y) for y in (first.get("second_choice") or {}))
+    if sc_years:
+        lines.append(f"Second-choice correlation of first and second choice, mean over {sc_years} (data: merged "
+                     f"products; paper: Table 6 data / model)")
+        chars = list((paper.get("table6_data") or {}).keys()) or [f"x{k}" for k in range(11)]
+        for c_i, c in enumerate(chars):
+            def mean_of(sc: Mapping[Any, Any] | None, key: str) -> Any:
+                v = [(_year_get(sc, y) or {}).get(key, [None] * len(chars))[c_i] for y in sc_years] if sc else []
+                v = [float(x) for x in v if x is not None and math.isfinite(float(x))]
+                return sum(v) / len(v) if v else None
+            vals = [f"{_fmt(mean_of(s.get('second_choice'), 'pcm'))} ({_fmt(mean_of(s.get('second_choice'), 'data'))})"
+                    for s in pcm.values()]
+            vals += [mean_of(b.get("second_choice"), "model") for b in blp.values()]
+            if paper:
+                vals.append(f"{_fmt(paper['table6_data'].get(c), 2)} / {_fmt(paper['table6_model'].get(c), 2)}")
+            row(f"  {c} model (data)", vals)
+        row("  RMSE model - data (PCM years)", [s.get("second_choice_rmse") for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)))
+    mic = first.get("micro") or []
+    if mic:
+        lines.append("Micro moments (V3): data, then each model")
+        bl = [{r["name"]: r.get("model") for r in (b.get("micro") or [])} for b in blp.values()]
+        row("  name / data", ["data"] + [""] * (len(cols) - 1))
+        for r in mic:
+            vals = [f"{_fmt(next((x['pcm'] for x in (s.get('micro') or []) if x['name'] == r['name']), None))}"
+                    for s in pcm.values()] + [d.get(r["name"]) for d in bl]
+            if paper:
+                vals.append(None)
+            lines.append(f"  {r['name']:42s}{_fmt(r['data']):>10s}" + "".join(f"{_fmt(v):>{w}s}" for v in vals))
+    lines.append("Diversion to the product's own vehicle type (share-weighted, pooled over markets)")
+    for g in ("car", "van", "suv", "truck"):
+        row(f"  {g}", [(s.get("diversion_to_own_type") or {}).get(g) for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)))
+    lines.append("Consumer surplus per household, $ (PCM frontier formula, 1/alpha tail bounded by a_lo; not a headline)")
+    for y in years:
+        row(f"  {y}", [_year_get(s.get("cs_per_household_usd_by_year"), y) for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)), 0)
+    lines.append("Window anatomy and fit")
+    for k in ("frontier_products_per_buying_draw", "log_alpha_range_buyers", "window_width_log_alpha"):
+        row(f"  {k}", [(s.get("window_anatomy") or {}).get(k) for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)))
+    bins = next((list(h) for s in pcm.values() if (h := (s.get("window_anatomy") or {}).get("frontier_size_mass"))),
+                [])
+    for b in bins:
+        row(f"  buyer mass on frontiers of {b} product{'' if b == '1' else 's'}",
+            [((s.get("window_anatomy") or {}).get("frontier_size_mass") or {}).get(b) for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)))
+    row("  own_elasticity_times_window_width", [s.get("own_elasticity_times_window_width") for s in pcm.values()]
+        + [None] * (len(blp) + (1 if paper else 0)), 2)
+    row("  convergence", [s.get("convergence") for s in pcm.values()] + [None] * (len(blp) + (1 if paper else 0)))
+    row("  q", [s.get("q") for s in pcm.values()] + [b.get("q") for b in blp.values()] + ([None] if paper else []), 2)
+    for blk in (first.get("q_blocks") or {}):
+        row(f"  q:{blk}", [(s.get("q_blocks") or {}).get(blk) for s in pcm.values()]
+            + [None] * (len(blp) + (1 if paper else 0)), 2)
+    row("  AT_BOUND", [";".join(s.get("at_bound") or []) or "none" for s in pcm.values()]
+        + [None] * (len(blp) + (1 if paper else 0)))
+    return "\n".join(lines)
 
 
 def stage_theta(path: str | pathlib.Path, names: Sequence[str]) -> dict[str, float]:
@@ -1116,57 +1556,29 @@ def near_twins(products: pd.DataFrame, gap: float = NEAR_TWIN_GAP) -> dict[int, 
     return out
 
 
-def _pyblp_frame(p: pd.DataFrame) -> pd.DataFrame:
-    d = pd.DataFrame({"market_ids": p.market_ids.to_numpy(), "firm_ids": p.firm_ids.to_numpy()})
-    for c in GH_CONTINUOUS + BLP_DUMMIES:
-        d[c] = p[c].to_numpy(float)
-    return d
-
-
 def blp_sums(p: pd.DataFrame) -> np.ndarray:
     """BLP sums of the style and segment dummies and of the three continuous characteristics over the firm's other
-    products and over rivals (pyblp 1.3.0 ``build_blp_instruments``, market = year, firm = parent), (n, 18)."""
-    import pyblp
-    return np.asarray(pyblp.build_blp_instruments(
-        pyblp.Formulation("0 + " + " + ".join(BLP_DUMMIES + GH_CONTINUOUS)), _pyblp_frame(p)), dtype=float)
+    products and over rivals (market = year, firm = parent), (n, 18)."""
+    return iv.blp_sums(p, BLP_DUMMIES + GH_CONTINUOUS)
 
 
 def gh_instruments(p: pd.DataFrame, version: str = "local") -> np.ndarray:
-    """Gandhi-Houde differentiation instruments on the three continuous characteristics (pyblp 1.3.0
-    ``build_differentiation_instruments``, ``version`` "local" or "quadratic"), own-firm and rival, (n, 6)."""
-    import pyblp
-    return np.asarray(pyblp.build_differentiation_instruments(
-        pyblp.Formulation("0 + " + " + ".join(GH_CONTINUOUS)), _pyblp_frame(p), version=version), dtype=float)
-
-
-def standardise(A: np.ndarray) -> np.ndarray:
-    """Columns scaled to unit variance (not centred, so a column's span with the constant is unchanged)."""
-    A = np.asarray(A, dtype=float)
-    sd = A.std(axis=0)
-    return A / np.where(sd > 0, sd, 1.0)
+    """Gandhi-Houde differentiation instruments on the three continuous characteristics, own-firm and rival, (n, 6)."""
+    return iv.gh_instruments(p, GH_CONTINUOUS, version)
 
 
 def excluded_instruments(p: pd.DataFrame, which: str = "gmy") -> tuple[np.ndarray, list[str]]:
     """(Z_ex (n, k), names) for ``--instruments``: ``gmy`` = GMY_EXCLUDED (5), ``gh`` = Gandhi-Houde local (6),
     ``gmy+gh`` = both (11), every column standardised so the rank tolerance of ``drop_collinear`` is scale-free."""
-    cols: list[np.ndarray] = []
-    names: list[str] = []
-    if which in ("gmy", "gmy+gh"):
-        cols += [p[c].to_numpy(float) for c in GMY_EXCLUDED]
-        names += list(GMY_EXCLUDED)
-    if which in ("gh", "gmy+gh"):
-        gh = gh_instruments(p, "local")
-        cols += list(gh.T)
-        names += [f"gh_local{k}" for k in range(gh.shape[1])]
-    if not cols:
+    if which not in INSTRUMENT_SETS:
         raise ValueError(f"unknown instrument set {which!r}")
-    return standardise(np.column_stack(cols)), names
+    return iv.excluded_instruments(p, GMY_EXCLUDED if which in ("gmy", "gmy+gh") else (),
+                                   GH_CONTINUOUS if which in ("gh", "gmy+gh") else ())
 
 
 def first_stage_table(p: pd.DataFrame, X1: np.ndarray) -> list[dict[str, Any]]:
     """Relevance screen of each candidate excluded set (WP-G2 facts): columns, rank added to X1, the homoskedastic
     first-stage F of price on the set after partialling X1, and the R^2 it adds. Data only."""
-    price = p.prices.to_numpy(float)
     sets: list[tuple[str, np.ndarray]] = [
         ("lag_pl_con (GMY baseline)", p[["lag_pl_con"]].to_numpy(float)),
         ("+ iv_prod", p[["lag_pl_con", "iv_prod"]].to_numpy(float)),
@@ -1179,47 +1591,7 @@ def first_stage_table(p: pd.DataFrame, X1: np.ndarray) -> list[dict[str, Any]]:
         ("Gandhi-Houde quadratic", gh_instruments(p, "quadratic")),
         ("gmy+gh", excluded_instruments(p, "gmy+gh")[0]),
     ]
-    n = price.size
-    r_x = price - X1 @ np.linalg.lstsq(X1, price, rcond=None)[0]
-    tss = float(np.sum((price - price.mean()) ** 2))
-    rss_r = float(r_x @ r_x)
-    rows = []
-    for name, E in sets:
-        E = standardise(E)
-        keep = drop_collinear_columns(np.column_stack([X1, E]), keep=X1.shape[1])
-        q = len(keep) - X1.shape[1]
-        A = np.column_stack([X1, E])[:, keep]
-        r_u = price - A @ np.linalg.lstsq(A, price, rcond=None)[0]
-        rss_u = float(r_u @ r_u)
-        F = ((rss_r - rss_u) / q) / (rss_u / (n - A.shape[1])) if q > 0 else float("nan")
-        rows.append({"set": name, "columns": int(E.shape[1]), "rank_added": int(q), "F_price": float(F),
-                     "R2_added": (rss_r - rss_u) / tss})
-    return rows
-
-
-def keep_rank(A: np.ndarray, tol: float = 1e-10) -> list[int]:
-    """Columns of A kept greedily left to right while each raises the rank."""
-    keep: list[int] = []
-    for k in range(A.shape[1]):
-        if np.std(A[:, k]) == 0 and k > 0:
-            continue
-        if matrix_rank(A[:, keep + [k]], rtol=tol) == len(keep) + 1:
-            keep.append(k)
-    return keep
-
-
-def drop_collinear_columns(Z: np.ndarray, keep: int) -> list[int]:
-    """Column indices of Z: the first ``keep``, then each later column that adds rank (left to right)."""
-    cols = list(range(keep))
-    for k in range(keep, Z.shape[1]):
-        if matrix_rank(Z[:, cols + [k]]) == len(cols) + 1:
-            cols.append(k)
-    return cols
-
-
-def drop_collinear(Z: np.ndarray, keep: int) -> np.ndarray:
-    """Z with columns past the first ``keep`` dropped when they add no rank."""
-    return Z[:, drop_collinear_columns(Z, keep)]
+    return iv.first_stage_table(p.prices.to_numpy(float), X1, sets)
 
 
 def evaluate(args: argparse.Namespace) -> None:

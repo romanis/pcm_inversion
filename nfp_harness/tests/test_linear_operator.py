@@ -95,12 +95,13 @@ def test_frisch_waugh_lovell_two_way() -> None:
 
 
 def test_gmy_size_operator_is_cheap() -> None:
-    gmy_data = pytest.importorskip("nfp_harness.gmy_data")
+    from nfp_harness.tests.test_gmy_instruments import gmy_module
+    gmy = gmy_module()
     try:
-        p = gmy_data.load_products()
+        p = gmy.load_products()
     except FileNotFoundError:
         pytest.skip("GMY replication package not unpacked")
-    cols = [np.ones(len(p))] + [p[c].to_numpy(float) for c in gmy_data.STAGE2_X]
+    cols = [np.ones(len(p))] + [p[c].to_numpy(float) for c in gmy.STAGE2_X]
     for c in ("market_ids", "make2_do"):
         for v in sorted(p[c].unique())[1:]:
             cols.append((p[c] == v).to_numpy(float))

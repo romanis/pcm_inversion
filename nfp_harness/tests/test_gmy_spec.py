@@ -8,15 +8,13 @@ from typing import Any
 import numpy as np
 import pytest
 
-from nfp_harness import comparison
 from nfp_harness.tests.test_gmy_instruments import gmy_module
 
 
 @pytest.fixture(scope="module")
 def gmy() -> Any:
-    from nfp_harness import gmy_data
     try:
-        gmy_data.package_root()
+        gmy_module().package_root()
     except FileNotFoundError:
         pytest.skip("GMY replication package not unpacked")
     pytest.importorskip("nfp_harness._native")
@@ -98,7 +96,7 @@ def test_warm_from_delta(gmy: Any, spec: Any) -> None:
     m.close()
 
 
-def test_gmy_table_renders_missing_entries() -> None:
+def test_comparison_table_renders_missing_entries() -> None:
     pcm = {"PCM a_lo 0.2": {
         "table5": {1980: {"mean_over_products": [-20.0, -19.0, -18.0, -17.0, -16.0]}},
         "lerner_median_by_year": {1980: 0.05, 1991: 0.06},
@@ -113,10 +111,9 @@ def test_gmy_table_renders_missing_entries() -> None:
     blp = {"BLP fit": {"table5": {"1980": {"mean_over_products": [-6.0, -5.8, -5.5, -5.1, -4.3]}},
                        "lerner_median_by_year": {"1980": 0.3}, "micro": [{"name": "m1", "model": 0.15}],
                        "second_choice": {"1991": {"model": [0.71] * 11}}}}
-    text = comparison.gmy_table(pcm, blp, {"table5": {1980: (-5.96, -5.78, -5.49, -5.13, -4.30)},
-                                            "lerner_median": {"intro": {1980: 0.311}},
-                                            "table6_data": {f"c{k}": 0.5 for k in range(11)},
-                                            "table6_model": {f"c{k}": 0.5 for k in range(11)}})
+    paper = {"table5": {1980: (-5.96, -5.78, -5.49, -5.13, -4.30)}, "lerner_median": {"intro": {1980: 0.311}},
+             "table6_data": {f"c{k}": 0.5 for k in range(11)}, "table6_model": {f"c{k}": 0.5 for k in range(11)}}
+    text = gmy_module().comparison_table(pcm, blp, paper)
     assert "1980 Q1" in text and "-20.00" in text and "-6.00" in text and "-5.96" in text
     assert "2018 Q1" in text and " -" in text   # 2018 missing everywhere: rendered as '-'
     assert "c0 model (data)" in text and "0.710" in text

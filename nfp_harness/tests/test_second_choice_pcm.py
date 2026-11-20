@@ -65,13 +65,14 @@ def test_correlation_adjoint_matches_finite_differences() -> None:
 
 
 def test_moment_on_a_logit_matrix_reproduces_the_blp_correlations() -> None:
-    from nfp_harness import gmy_data
+    from nfp_harness.tests.test_gmy_instruments import gmy_module
+    gmy = gmy_module()
     try:
-        data = gmy_data.load(n_households=300, years=(1999,))
+        data = gmy.load_data(n_households=300, years=(1999,))
     except FileNotFoundError:
         pytest.skip("GMY replication package not unpacked")
     p = data.products
-    x = p[list(gmy_data.SECOND_CHOICE_CHARS)].to_numpy(float)
+    x = p[list(gmy.SECOND_CHOICE_CHARS)].to_numpy(float)
     s = p.shares.to_numpy(float)
     data_corr = first_second_correlations(s, data.second_choices[1999]["prob"], x)
     blp = ROOT / "gmy_replication" / "results" / "blp_fit_h1000.json"
@@ -83,7 +84,7 @@ def test_moment_on_a_logit_matrix_reproduces_the_blp_correlations() -> None:
     u = rng.normal(size=(len(p), H)) - 5.0
     P = np.exp(u) / (1.0 + np.exp(u).sum(axis=0, keepdims=True))
     C = logit_second_choice_matrix(P, data.agents.weights.to_numpy(float))
-    mom = SecondChoiceMoments("second_choice", (1999,), gmy_data.SECOND_CHOICE_CHARS, {1999: data_corr},
+    mom = SecondChoiceMoments("second_choice", (1999,), gmy.SECOND_CHOICE_CHARS, {1999: data_corr},
                               {1999: x}, {1999: s})
     assert mom.k == 10   # electric has no variance in 1999
     mom.bind([MarketIndex(1999, np.arange(len(p)))], len(p), 3)
@@ -97,18 +98,17 @@ def test_moment_on_a_logit_matrix_reproduces_the_blp_correlations() -> None:
 
 
 def test_gmy_second_choice_moment_has_41_rows() -> None:
-    from nfp_harness import gmy_data
     from nfp_harness.tests.test_gmy_instruments import gmy_module
+    gmy = gmy_module()
     try:
-        gmy_data.package_root()
+        gmy.package_root()
     except FileNotFoundError:
         pytest.skip("GMY replication package not unpacked")
-    gmy = gmy_module()
-    spec = gmy.GMYSpec(gmy_data.SECOND_CHOICE_YEARS)
+    spec = gmy.GMYSpec(gmy.SECOND_CHOICE_YEARS)
     (mom,) = spec.second_choice_moment()
     assert mom.k == 41 and mom.weight == 30.0
     raw = spec.second_choice_data()
-    for y in gmy_data.SECOND_CHOICE_YEARS:
+    for y in gmy.SECOND_CHOICE_YEARS:
         merged = mom.data_corr[y]
         assert np.isfinite(merged).sum() == (10 if y < 2015 else 11)
         # the twin merge moves the data correlations by little (the unmerged ones are BLP's data side)

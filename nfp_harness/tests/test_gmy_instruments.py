@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import sys
 from typing import Any
 
 import numpy as np
@@ -25,15 +26,15 @@ def gmy_module() -> Any:
     spec = importlib.util.spec_from_file_location("gmy_estimate_pcm", ROOT / "gmy_replication" / "estimate_pcm.py")
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod   # registered before it runs: its dataclasses look their module up there
     spec.loader.exec_module(mod)
     return mod
 
 
 @pytest.fixture(scope="module")
 def gmy() -> Any:
-    from nfp_harness import gmy_data
     try:
-        gmy_data.package_root()
+        gmy_module().package_root()
     except FileNotFoundError:
         pytest.skip("GMY replication package not unpacked")
     mod = gmy_module()   # puts the vendored pyblp on sys.path
@@ -43,8 +44,7 @@ def gmy() -> Any:
 
 @pytest.fixture(scope="module")
 def raw(gmy: Any) -> tuple[Any, np.ndarray]:
-    from nfp_harness import gmy_data
-    p = gmy_data.load_products()
+    p = gmy.load_products()
     X1, _ = gmy.GMYSpec.linear_design(p)
     return p, X1
 

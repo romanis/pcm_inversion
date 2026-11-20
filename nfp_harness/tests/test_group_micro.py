@@ -122,7 +122,7 @@ def hand_values(model: PCMModel, delta: np.ndarray, theta: np.ndarray, data: dic
             if Pg > 0:
                 num += wg * Sg[c] / Pg
                 den += wg
-            elif never_buyers == "gmy_code":
+            elif never_buyers == "keep":
                 den += wg
         return num / den
 
@@ -174,16 +174,16 @@ def test_jacobian_matches_finite_differences(interaction: bool) -> None:
     model.close()
 
 
-def test_never_buyers_drop_and_gmy_code() -> None:
+def test_never_buyers_drop_and_keep() -> None:
     model, delta, data = model_at(stingy=True)
     theta = layout().starts()
     sol = solution(model, delta, theta, False)
     zero = [int(np.sum(e["S"][:, 0] == 0)) for e in sol.outputs[GROUP_OUTPUTS]]
     assert zero == [1, 1]
-    drop, code = moment(model, data, "drop"), moment(model, data, "gmy_code")
+    drop, code = moment(model, data, "drop"), moment(model, data, "keep")
     v_drop, v_code = drop.predicted(sol), code.predicted(sol)
     np.testing.assert_allclose(v_drop, hand_values(model, delta, theta, data, "drop"), rtol=1e-12, atol=1e-13)
-    np.testing.assert_allclose(v_code, hand_values(model, delta, theta, data, "gmy_code"), rtol=1e-12, atol=1e-13)
+    np.testing.assert_allclose(v_code, hand_values(model, delta, theta, data, "keep"), rtol=1e-12, atol=1e-13)
     assert drop.last_info["micro_never_buyers"]["A"] == 2   # household 0 of both markets is in set A
     # row 1 is M_A[x1] - M_notA[x1] and notA holds no never-buyer, so the two rows differ by
     # M_A,drop - M_A,code = M_A,drop (W_A - W_A+) / W_A = M_A,drop w_never / W_A
@@ -222,12 +222,14 @@ def test_fixed_covariance_weighting() -> None:
 
 
 def test_gmy_rows_reproduce_the_logit_evaluator() -> None:
-    from nfp_harness import gmy_data
+    from nfp_harness.micro_sets import MicroMomentEvaluator
+    from nfp_harness.tests.test_gmy_instruments import gmy_module
+    gmy = gmy_module()
     try:
-        data = gmy_data.load(n_households=200, years=(1985, 1995, 2003))
+        data = gmy.load_data(n_households=200, years=(1985, 1995, 2003))
     except FileNotFoundError:
         pytest.skip("GMY replication package not unpacked")
-    p, a = data.products, gmy_data.add_set_columns(data.agents)
+    p, a = data.products, gmy.add_set_columns(data.agents)
     rng = np.random.default_rng(0)
     years = np.unique(p.market_ids)
     P_list, entries, markets, agent_rows = [], [], [], []
@@ -243,8 +245,8 @@ def test_gmy_rows_reproduce_the_logit_evaluator() -> None:
         entries.append({"columns": cols, "S": S, "w": w, "d_delta": None, "d_theta": None})
         markets.append(MarketIndex(int(y), rows))
         agent_rows.append(arow)
-    want = gmy_data.MicroMomentEvaluator(p, a, data.micro)(P_list)
-    rows = [GroupMomentRow(*r) for r in gmy_data.group_moment_rows(data.micro)]
+    want = MicroMomentEvaluator(p, a, data.micro, gmy.MICRO_CHAR)(P_list)
+    rows = [GroupMomentRow(*r) for r in gmy.group_moment_rows(data.micro)]
     g = GroupMicroMoments("micro_gmy", MicroDataset("GMY", 1), rows, data.micro.values, data.micro.variances)
     g.bind(markets, len(p), 3)
     g.bind_agents(a, agent_rows)

@@ -1,13 +1,20 @@
-"""Model-agnostic data helpers: tie breaking, QMC draws, agent crossing (DESIGN 6.1). Owned by WP4."""
+"""Model-agnostic data helpers: tie breaking, QMC draws, agent crossing, z-scores, Dataverse downloads (DESIGN 6.1).
+Owned by WP4."""
 
 from __future__ import annotations
 
+import json
+import pathlib
+import urllib.request
 from typing import Sequence
 
 import numpy as np
 from scipy.stats import norm, qmc
 
-__all__ = ["break_price_ties", "drop_small_shares", "sobol_normal_draws", "cross_agents", "income_law_basis"]
+__all__ = ["break_price_ties", "drop_small_shares", "sobol_normal_draws", "cross_agents", "income_law_basis", "zscore",
+           "fetch_dataverse_file"]
+
+DATAVERSE_API = "https://dataverse.harvard.edu/api"
 
 #: Petrin's income law winsorises income to [1, 150] in $1000 (LEARNINGS 11, 32)
 INCOME_LAW_CLIP = (1.0, 150.0)
@@ -143,3 +150,27 @@ def income_law_basis(income: np.ndarray, ybar: float, clip: tuple[float, float] 
     if not ybar > 0:
         raise ValueError(f"ybar must be positive, got {ybar}")
     return np.log(ybar / np.clip(np.asarray(income, dtype=float), lo, hi))
+
+
+
+def zscore(v: np.ndarray) -> np.ndarray:
+    """MATLAB zscore: (v - mean) / sd with the n - 1 sd."""
+    v = np.asarray(v, dtype=float)
+    return (v - v.mean()) / v.std(ddof=1)
+
+
+def fetch_dataverse_file(doi: str, filename: str, dest: str | pathlib.Path, api: str = DATAVERSE_API) -> pathlib.Path:
+    """fetch_dataverse_file(doi, filename, dest, api=DATAVERSE_API) -> path of ``filename`` downloaded into ``dest`` from
+    the latest version of the Dataverse dataset ``doi``; raises RuntimeError unless the dataset holds exactly one file of
+    that name."""
+    dest = pathlib.Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(f"{api}/datasets/:persistentId/versions/:latest/files"
+                                f"?persistentId={doi}", timeout=60) as fh:
+        files = json.load(fh)["data"]
+    ids = [f["dataFile"]["id"] for f in files if f["dataFile"]["filename"] == filename]
+    if len(ids) != 1:
+        raise RuntimeError(f"expected one {filename} in {doi}, found {len(ids)}")
+    out = dest / filename
+    urllib.request.urlretrieve(f"{api}/access/datafile/{ids[0]}", out)
+    return out

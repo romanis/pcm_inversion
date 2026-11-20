@@ -1,4 +1,4 @@
-"""Tests for nfp_harness.gmy_data on the Grieco, Murry & Yurukoglu (2024) package. Skipped when the package is not
+"""Tests for the data layer of gmy_replication/estimate_pcm.py on the Grieco, Murry & Yurukoglu (2024) package. Skipped when the package is not
 unpacked under gmy_replication/data/GMY_Replication (the raw data are not committed)."""
 
 from __future__ import annotations
@@ -6,8 +6,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from nfp_harness import gmy_data as g
+from nfp_harness.micro_sets import MicroMomentEvaluator
 from nfp_harness.second_choice import first_second_correlations
+from nfp_harness.tests.test_gmy_instruments import gmy_module
+
+g = gmy_module()
 
 try:
     ROOT = g.package_root()
@@ -104,7 +107,7 @@ def test_micro_evaluator_on_flat_probabilities(products, agents):
     # several years would not give 0, since the sets differ in their mix of years)
     pr = products[products.market_ids == 1999].reset_index(drop=True)
     ag = agents[agents.market_ids == 1999].reset_index(drop=True)
-    ev = g.MicroMomentEvaluator(pr, ag, m)
+    ev = MicroMomentEvaluator(pr, ag, m, g.MICRO_CHAR)
     out = ev([np.full((len(pr), len(ag)), 0.001)])
     diff = (m.table.kind == "diff").to_numpy()
     assert np.allclose(out[diff], 0, atol=1e-12) and np.allclose(out[~diff], 1)
