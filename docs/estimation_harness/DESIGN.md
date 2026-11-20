@@ -87,6 +87,7 @@ pcm_inversion/
       __init__.py
       pcm.py                       PCM adapter: markets, draws, kernel calls, threads, warm starts
       pcm_post.py                  elasticities, diversion, Nash costs, CS, counterfactuals
+      blp.py                       MixedLogitModel: the BLP contraction on the InnerModel interface (1.5)
     data.py                        tie breaking, QMC draws, agent crossing (model-agnostic helpers)
     paper.py                       PaperSpec: what every paper's spec shares (1.4)
     _native/
@@ -221,6 +222,21 @@ the pipeline:
   `comparison.trimmed_mean`, `near_twins`, `load_summaries`, `pipeline.estimate_columns` (a band row's `at_bound`,
   `q:<block>` and `theta:<name>`), `pipeline.at_band_points` (a band finish hook's per-point re-evaluation),
   `pipeline.evaluation_record` and `diagnostics.identification.identification_summary`.
+
+### 1.5 BLP on the same problem path (`nfp_harness/models/blp.py`)
+
+`MixedLogitModel` is a random-coefficients logit inner model on the `InnerModel` interface `PCMModel` implements:
+theta is (pi on (characteristic, demographic) pairs, sigma on characteristics), one simulated consumer per agent,
+every market inverted by the BLP contraction with SQUAREM from the accepted delta (`commit`, `restore`,
+`warm_from_delta`), in parallel over markets. `solve` returns `shares`, `probabilities` and, when moments ask, the
+logit second-choice matrices of `SecondChoiceMoments` and the household sums of `GroupMicroMoments`, so an
+`NFPGMMProblem` takes the BLP model and the PCM interchangeably at the problem boundary. It has no derivatives yet
+(`need_jacobian=True` raises): a BLP problem is evaluated, or fitted by finite differences.
+`gmy_replication/estimate_blp.py` solves its contraction through it, and `GMYLogit.problem()` builds GMY's step-1
+objective as an `NFPGMMProblem` with the harness's micro and second-choice moments; its q under W1 equals the
+script's sum of squared residuals (`tests/test_blp_model.py`). The script's outputs still come from the authors'
+residual formulas, so the `gmy_blp` golden is unchanged. `petrin_replication/estimate_blp.py` stays on pyblp (demand
+and supply estimated jointly by pyblp's optimizer, which needs derivatives this model does not have).
 
 ## 2. Problem, moments and parameters
 

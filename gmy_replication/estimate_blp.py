@@ -20,7 +20,9 @@ Estimation follows the authors' three steps (Appendix A, codes/estimation.m, mom
 pyblp cannot express step 1: GMY's micro moments average each household's expected x given a purchase with household
 weights (ExjCondH.m), and their second-choice probabilities renormalise over inside goods per household, neither of
 which a pyblp MicroPart can weight; pyblp's own second-choice parts would also need (I, J, J) arrays per part. So step
-1 runs in numpy here (the data layer of estimate_pcm.py, nfp_harness.micro_sets, nfp_harness.second_choice), and step 2 and the post-estimation run in
+1 runs in numpy here: the inner model is the harness's MixedLogitModel (nfp_harness.models.blp, the BLP contraction on
+the InnerModel interface the PCM uses), the moments the data layer of estimate_pcm.py, nfp_harness.micro_sets and
+nfp_harness.second_choice; step 2 and the post-estimation run in
 pyblp (vendored 1.3.0) at theta_hat: a pyblp.Problem with GMY's X1 / X2 / demographics, the same agents and nodes,
 absorbed year and make2 effects and Optimization("return"), so pyblp's one-step GMM is the authors' 2SLS and its
 elasticities and Nash costs are those of the fitted model. pyblp's delta is checked against the numpy contraction.
@@ -44,7 +46,6 @@ import pathlib
 import sys
 import time
 import types
-from concurrent.futures import ThreadPoolExecutor
 
 THREADS_DEFAULT = 32
 for _v in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
@@ -57,7 +58,13 @@ import pandas as pd  # noqa: E402
 from scipy.optimize import least_squares  # noqa: E402
 from scipy.stats import norm, qmc  # noqa: E402
 
-from nfp_harness.second_choice import first_second_correlations, logit_second_choice_matrix  # noqa: E402
+from nfp_harness.linear import LinearIV  # noqa: E402
+from nfp_harness.models.blp import MixedLogitModel  # noqa: E402
+from nfp_harness.moments import GroupMicroMoments, GroupMomentRow, MicroDataset, SecondChoiceMoments  # noqa: E402
+from nfp_harness.params import ParameterLayout, ParameterSpec  # noqa: E402
+from nfp_harness.problem import NFPGMMProblem  # noqa: E402
+from nfp_harness.second_choice import first_second_correlations  # noqa: E402
+from nfp_harness.types import KernelRequests, MarketIndex  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -120,7 +127,8 @@ TABLE8_MODEL = {  # Table 8 "Model" values, keyed by the code's survey label (Ta
 
 
 class GMYLogit:
-    """Mixed logit of GMY spec 6 on one GMYData: contraction, micro and second-choice moments, in numpy."""
+    """Mixed logit of GMY spec 6 on one GMYData: the harness's MixedLogitModel (nfp_harness.models.blp, the BLP
+    contraction) on GMY's X2, demographics and Latin hypercube draws, and GMY's micro and second-choice moments."""
 
     def __init__(self, data: gmy_pcm.GMYData, threads: int, seed: int = SEED, tol: float = 1e-13) -> None:
         self.data, self.tol = data, tol
@@ -135,12 +143,11 @@ class GMYLogit:
         # estimation.m: lhsnorm draws per market, one column per random coefficient
         self.nu = [norm.ppf(qmc.LatinHypercube(d=len(UNOBS), seed=seed + t).random(h))
                    for t, h in enumerate(self.H)]
-        self.log_s = [np.log(p.shares.to_numpy(float)[r]) for r in self.rows]
-        s0 = [np.exp(ls).sum() for ls in self.log_s]
-        self.delta0 = [ls - np.log(1 - s) for ls, s in zip(self.log_s, s0)]   # logit start, as delta_start
-        self.delta = [d.copy() for d in self.delta0]
         self.pattern = [(X2.index(c), DEMOG.index(d)) for c, d in PATTERN]
         self.unobs = [X2.index(c) for c in UNOBS]
+        self.model = MixedLogitModel([MarketIndex(y, r) for y, r in zip(self.years, self.rows)], self.X, self.D,
+                                     self.w, self.nu, self.pattern, self.unobs,
+                                     [p.shares.to_numpy(float)[r] for r in self.rows], threads=threads, tol=tol)
         self.micro = gmy_pcm.micro_evaluator(p, a, data.micro)
         self.sc_years = [y for y in gmy_pcm.SECOND_CHOICE_YEARS if y in set(self.years.tolist())]
         self.sc_x, self.sc_s, self.sc_data = {}, {}, {}
@@ -150,68 +157,25 @@ class GMYLogit:
             self.sc_s[y] = p.shares.to_numpy(float)[r]
             self.sc_data[y] = first_second_correlations(self.sc_s[y], data.second_choices[y]["prob"], self.sc_x[y])
         self.sc_keep = {y: np.isfinite(self.sc_data[y]) for y in self.sc_years}
-        self.pool = ThreadPoolExecutor(max_workers=max(1, min(threads, len(self.years))))
-        self.evaluations = 0
 
-    def coefficients(self, theta: np.ndarray, t: int) -> np.ndarray:
-        """(K2, H_t) coefficient on each X2 column for each household of market t."""
-        C = np.zeros((len(X2), self.H[t]))
-        for k, (c, d) in enumerate(self.pattern):
-            C[c] += theta[k] * self.D[t][:, d]
-        for m, c in enumerate(self.unobs):
-            C[c] += theta[len(PATTERN) + m] * self.nu[t][:, m]
-        return C
-
-    def probabilities_at(self, delta: np.ndarray, mu: np.ndarray) -> np.ndarray:
-        u = delta[:, None] + mu
-        m = np.maximum(u.max(axis=0), 0.0)
-        e = np.exp(u - m)
-        return e / (np.exp(-m) + e.sum(axis=0))
-
-    def solve_market(self, theta: np.ndarray, t: int, delta: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
-        """BLP contraction with SQUAREM; returns (delta, P (J, H), iterations)."""
-        mu = self.X[t] @ self.coefficients(theta, t)
-        w, ls = self.w[t], self.log_s[t]
-
-        def g(d: np.ndarray) -> np.ndarray:
-            return d + ls - np.log(self.probabilities_at(d, mu) @ w)
-
-        x = delta.copy()
-        for it in range(1, 5001):
-            x1 = g(x)
-            r = x1 - x
-            if np.max(np.abs(r)) < self.tol:
-                x = x1
-                break
-            x2 = g(x1)
-            v = x2 - 2 * x1 + x
-            nv = float(v @ v)
-            step = -np.sqrt(float(r @ r) / nv) if nv > 0 else -1.0
-            step = min(step, -1.0)
-            xn = x - 2 * step * r + step * step * v
-            x = g(xn) if np.all(np.isfinite(xn)) else x2
-        else:
-            raise RuntimeError(f"contraction did not converge in market {self.years[t]}")
-        return x, self.probabilities_at(x, mu), it
-
-    def solve(self, theta: np.ndarray, warm: bool = True) -> list[np.ndarray]:
-        theta = np.asarray(theta, dtype=float)
-        start = self.delta if warm else self.delta0
-        res = list(self.pool.map(lambda t: self.solve_market(theta, t, start[t]), range(len(self.years))))
-        self.evaluations += 1
-        return [r[0] for r in res], [r[1] for r in res]
+    @property
+    def evaluations(self) -> int:
+        return self.model.evaluations
 
     def moments(self, theta: np.ndarray, commit: bool = False) -> dict[str, np.ndarray]:
-        delta, P = self.solve(theta)
+        """delta, P, GMY's micro moments (ExjCondH.m) and the first/second-choice correlations of the model's logit
+        second choices, from one ``MixedLogitModel.solve``."""
+        sol = self.model.solve(theta, KernelRequests(second_choice=True, second_choice_markets=tuple(self.sc_years)),
+                               need_jacobian=False)
         if commit:
-            self.delta = [d.copy() for d in delta]
+            self.model.commit(theta)
+        P = sol.outputs["probabilities"]
         g_micro = self.micro(P)
         sc_model = {}
         for y in self.sc_years:
             t = list(self.years).index(y)
-            C = logit_second_choice_matrix(P[t], self.w[t])
-            sc_model[y] = first_second_correlations(self.sc_s[y], C, self.sc_x[y])
-        return {"delta": np.concatenate(delta), "P": P, "micro": g_micro, "sc": sc_model}
+            sc_model[y] = first_second_correlations(self.sc_s[y], sol.outputs["second_choice"][t]["C"], self.sc_x[y])
+        return {"delta": np.concatenate([sol.delta[r] for r in self.rows]), "P": P, "micro": g_micro, "sc": sc_model}
 
     def residuals_of(self, m: dict[str, np.ndarray]) -> np.ndarray:
         mic = self.data.micro
@@ -223,7 +187,29 @@ class GMYLogit:
         return self.residuals_of(self.moments(theta, commit))
 
     def commit_delta(self, delta: np.ndarray) -> None:
-        self.delta = [delta[r].copy() for r in self.rows]
+        """Accept ``delta`` (product-table order, as ``moments`` returns it) as the contraction's warm start."""
+        self.model.warm_from_delta(delta)
+
+    def problem(self) -> NFPGMMProblem:
+        """The same objective on the harness's problem path: an NFPGMMProblem on this MixedLogitModel with the
+        harness's GroupMicroMoments (the 33 rows, weight diag(1 / variance)) and SecondChoiceMoments (weight 30), no
+        aggregate block (beta is GMY's step 2). Its q under W1 is the sum of squared ``residuals``
+        (tests/test_blp_model.py); ``main`` logs both."""
+        data, p = self.data, self.data.products
+        agents = gmy_pcm.add_set_columns(data.agents)
+        tab = data.micro.table
+        micro = GroupMicroMoments("micro_gmy", MicroDataset("GMY_CEX_MRI", 1),
+                                  [GroupMomentRow(*x) for x in gmy_pcm.group_moment_rows(data.micro)],
+                                  tab.value.to_numpy(float), tab.variance.to_numpy(float))
+        ms = [micro] + ([SecondChoiceMoments("second_choice", self.sc_years, SC_CHARS_PRODUCT, self.sc_data, self.sc_x,
+                                             self.sc_s, weight=SC_WEIGHT)] if self.sc_years else [])
+        self.model.product_columns = {c: p[c].to_numpy(float) for c in set(gmy_pcm.MICRO_CHAR.values())}
+        self.model.agents = agents
+        self.model.agent_rows = [np.flatnonzero(agents.market_ids.to_numpy() == y) for y in self.years]
+        layout = ParameterLayout([ParameterSpec(n.replace(" ", "_"), "taste", None, None, float(v), float(lo), float(hi))
+                                  for n, v, lo, hi in zip(NAMES, TABLE4_THETA, LOWER, UPPER)])
+        n = self.model.n_products
+        return NFPGMMProblem(self.model, ms, LinearIV(np.ones((n, 1)), np.ones((n, 1))), layout, max_step=False)
 
 
 def fit_step1(model: GMYLogit, theta0: np.ndarray, max_nfev: int) -> tuple[np.ndarray, dict]:
@@ -378,6 +364,11 @@ def main() -> None:
         if y in summary["lerner_median_by_year"]:
             log.info("median Lerner %d: %.3f", y, summary["lerner_median_by_year"][y])
     log.info("wrote %s", OUT / f"{tag}.json")
+    prob = model.problem()   # the same objective on the harness's problem path (a check, not an output)
+    ev = prob.evaluate(theta, need_jacobian=False)
+    W1 = prob.initial_weighting(theta)
+    log.info("q on the NFPGMMProblem path %.10g, of the residuals %.10g", float(prob.n * ev.g @ W1 @ ev.g),
+             summary["q"])
 
 
 if __name__ == "__main__":
