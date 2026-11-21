@@ -114,8 +114,10 @@ from nfp_harness.diagnostics.identification import identification_summary  # noq
 from nfp_harness.instruments import drop_collinear, drop_collinear_columns, keep_rank, standardise  # noqa: E402
 from nfp_harness.models import pcm_post as pp  # noqa: E402
 from nfp_harness.models.pcm import PCMSpec  # noqa: E402
-from nfp_harness.moments import (GroupMicroMoments, GroupMomentRow, IVMoments, MicroDataset,  # noqa: E402
-                                 SarganIVMoments, SecondChoiceMoments, SupplyMoments)
+from nfp_harness.instruments import difference_instruments, markup_shifters, within_differences  # noqa: E402
+from nfp_harness.moments import (CostEvent, DifferenceIVMoments, DifferenceSarganIVMoments,  # noqa: E402
+                                 EventCostContinuityMoments, GroupMicroMoments, GroupMomentRow, IVMoments,
+                                 MicroDataset, SarganIVMoments, SecondChoiceMoments, SupplyMoments)
 from nfp_harness.paper import PaperSpec  # noqa: E402
 from nfp_harness.params import ParameterLayout, ParameterSpec  # noqa: E402
 from nfp_harness.profile import NotMonotoneDecreasing  # noqa: E402
@@ -163,6 +165,8 @@ MIN_GAP = 0.001          # $10 in $10k
 MIN_SHARE = 1e-5         # products below it are bought by about one simulated consumer; dropped (D9)
 SIGMA_P = {"start": 2.5, "lower": 1.0, "upper": 4.0, "unit": 0.25}
 A_LO = 0.2
+#: --a-lo-free: the bounds of a_lo as a free parameter
+A_LO_FREE = (0.005, 0.5)
 SC_WEIGHT = 30.0         # mom_fnc.m line 109: second-choice residuals x 30
 PHI_BOUND = 4.0
 TASTE_CAP = 10.0         # $100k per sd: above the 1980-2018 price range ($11k-$100k)
@@ -176,8 +180,46 @@ INSTRUMENT_SETS = ("gmy", "gh", "gmy+gh")
 BLP_DUMMIES = ("van", "suv", "truck", "lux", "sport", "electric")
 GH_CONTINUOUS = ("z_log_footprint", "z_log_hp", "z_log_mpg")
 #: --moments names; the stub's old names are aliases (all -> demand_supply, demand -> gmy)
-MOMENT_SETS = ("gmy", "gmy_nolinear", "demand_supply", "aggregate", "prefit")
-ESTIMATION_MOMENTS = ("gmy", "gmy_nolinear", "demand_supply")
+MOMENT_SETS = ("gmy", "gmy_nolinear", "demand_supply", "demand_supply_ms", "demand_supply_fd", "demand_supply_msfd",
+               "demand_supply_msfd_own", "aggregate", "prefit")
+ESTIMATION_MOMENTS = ("gmy", "gmy_nolinear", "demand_supply", "demand_supply_ms", "demand_supply_fd",
+                      "demand_supply_msfd", "demand_supply_msfd_own")
+#: moment sets with within-model difference blocks (--fd-max-gap applies)
+FD_MOMENTS = ("demand_supply_fd", "demand_supply_msfd", "demand_supply_msfd_own")
+#: moment sets with the ownership-event cost-continuity block (ownership on the public-record coding)
+OWN_MOMENTS = ("demand_supply_msfd_own",)
+#: --weighting: default (the stages' W1 and block-diagonal W2), joint_two_step (W1, then W2 = the joint product-level
+#: S(theta_1)^-1), joint_cue (CUE, W(theta) = S_P(theta)^-1 on the product-level blocks), joint_diag (fixed W =
+#: diag(S_P^-1) at the starting theta, a robustness check of the efficient weight)
+WEIGHTINGS = ("default", "joint_two_step", "joint_cue", "joint_diag")
+#: product-level blocks --drop-block may remove under a joint weighting; dropping "aggregate" keeps its X1 rows (they
+#: pin beta exactly) and drops the excluded instruments
+DROPPABLE_BLOCKS = ("aggregate", "supply_ms", "demand_fd", "supply_fd", "event_cost")
+#: --moments demand_supply_ms: characteristics of the Gandhi-Houde markup shifters (own-firm and rival, plus counts)
+MARKUP_SHIFTER_CHARS = GH_CONTINUOUS
+#: --moments demand_supply_fd: time-varying cost shifters differenced within model (data_blp.csv ``model``)
+FD_SHIFTERS = SUPPLY_EXCLUDED
+FD_MAX_GAP = 1
+#: the cleanest ownership events among US car makers 1980-2018, as (name, public transition year T, target makes).
+#: ``GMYSpec.ownership_events`` compares T - 1 with T + 1 (T is a mixed year) and keeps an event only when the data's ``parent`` of every target make differs between the two years; minority stakes the
+#: data do not code are not listed
+OWNERSHIP_EVENTS = (("chrysler_amc", 1987, ("amc", "jeep")),
+                    ("ford_volvo_to_geely", 2010, ("volvo",)),
+                    ("daimler_chrysler", 1998, ("chrysler", "dodge", "jeep", "eagle", "plymouth")),
+                    ("ford_jlr_to_tata", 2008, ("jaguar", "land rover")),
+                    ("bmw_land_rover_to_ford", 2000, ("land rover",)))
+#: control products are matched to an event product of the same body type
+EVENT_MATCH = ("car", "suv", "truck", "van")
+#: the public-record owner where GMY's ``parent`` coding moves a control change by a year (OWNERSHIP_CHANGES.md section
+#: 4 item 3; the first year of the new owner is the closing year): Ford closed on Volvo in Mar 1999 (coded 2000), Geely
+#: on Volvo in Aug 2010 (coded 2011), Cerberus on Chrysler in Aug 2007 (coded 2008), GM on Daewoo in Oct 2002 (coded
+#: 2001), Spyker on Saab in Feb 2010 (coded 2011). Applied with the ownership-event moment sets (OWN_MOMENTS), to every
+#: block's Nash markups, so the whole problem prices under one ownership; minority stakes stay uncoded
+PUBLIC_RECORD_PARENT = {("volvo", 1999): "ford", ("volvo", 2010): "geely", ("chrysler", 2007): "cerberus",
+                        ("dodge", 2007): "cerberus", ("jeep", 2007): "cerberus", ("daewoo", 2001): "daewoo",
+                        ("saab", 2010): "saab"}
+#: --drop-block aliases
+DROP_ALIASES = {"own": "event_cost"}
 MOMENT_ALIASES = {"demand": "gmy"}
 BLP_SUMMARIES = {"BLP fit": RESULTS / "blp_fit_h1000.json", "BLP Table 4": RESULTS / "blp_published_h1000.json"}
 #: numbers quoted in the paper (estimate_blp.py TABLE5, LERNER, TABLE6_*); definitions UNVERIFIED (spec section 0)
@@ -569,7 +611,6 @@ class GMYSpec(PaperSpec):
     evaluate_only_moments = ("aggregate",)
     # W2 (D6): micro and second-choice blocks keep their fixed (n V)^-1, the aggregate block is efficient on the
     # excluded instruments only (weighting.efficient_on_excluded: beta stays at OLS)
-    step2_weighting = "efficient_on_excluded"
     # trust region and noise handling as the Petrin spec (LEARNINGS 25, 32), with the round-1 fix of the collapse on
     # the kinked second-choice and micro blocks: the radius floored at 0.05 natural units, a probe restart at least at
     # the probe's step, and probe restarts while a compass step lowers q by more than 1; round 2: and by more than 0.1%
@@ -588,6 +629,10 @@ class GMYSpec(PaperSpec):
         self.min_share = float(min_share)
         self.blp_fit = pathlib.Path(blp_fit)
         self.moments = "gmy"
+        self.fd_max_gap = FD_MAX_GAP
+        self.weighting = "default"
+        self.drop_blocks: tuple[str, ...] = ()
+        self.a_lo_free = False
         self.a_lo = float(a_lo)
         self.prefit_rows = "price_purchase"
         self.antithetic_taste = False
@@ -671,6 +716,7 @@ class GMYSpec(PaperSpec):
         # step 2 would be singular (rank <= 56) and W2 = S^-1 would not exist.
         self.clusters = p.product_ids.to_numpy()
         self._loaded = key
+        self.apply_ownership_coding()
 
     @staticmethod
     def linear_design(p: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
@@ -695,6 +741,76 @@ class GMYSpec(PaperSpec):
             raise ValueError(f"moments must be one of {ESTIMATION_MOMENTS} (or {tuple(MOMENT_ALIASES)}), got "
                              f"{moments!r}")
         self.moments = moments
+        self.apply_ownership_coding()
+
+    def apply_ownership_coding(self) -> None:
+        """``products.firm_ids``: GMY's ``parent`` (kept as ``firm_ids_gmy``), or under an ownership-event moment set
+        (OWN_MOMENTS) the public-record owner of PUBLIC_RECORD_PARENT for the listed make-years."""
+        p = getattr(self, "products", None)
+        if p is None:
+            return
+        if "firm_ids_gmy" not in p:
+            p["firm_ids_gmy"] = p.firm_ids.astype(str)
+        firms = p.firm_ids_gmy.to_numpy().astype(object)
+        self.recoded_ownership: list[dict[str, Any]] = []
+        if self.moments in OWN_MOMENTS:
+            make, year = p.make.astype(str).to_numpy(), p.market_ids.to_numpy(int)
+            for (mk, y), parent in PUBLIC_RECORD_PARENT.items():
+                rows = (make == mk) & (year == y)
+                if rows.any():
+                    self.recoded_ownership.append({"make": mk, "year": y, "gmy": sorted(set(firms[rows])),
+                                                   "public_record": parent, "products": int(rows.sum())})
+                    firms[rows] = parent
+        p["firm_ids"] = firms.astype(str)
+
+    def set_weighting_mode(self, weighting: str, drop_blocks: Sequence[str] | None = None) -> None:
+        if weighting not in WEIGHTINGS:
+            raise ValueError(f"weighting must be one of {WEIGHTINGS}, got {weighting!r}")
+        drop = tuple(sorted(set(drop_blocks or ())))
+        bad = [b for b in drop if b not in DROPPABLE_BLOCKS]
+        if bad:
+            raise ValueError(f"--drop-block: {bad} are not droppable product-level blocks {DROPPABLE_BLOCKS}")
+        if drop and weighting == "default":
+            raise ValueError("--drop-block needs a joint weighting (--weighting joint_cue, joint_two_step, joint_diag)")
+        self.weighting = weighting
+        self.drop_blocks = drop
+
+    @property
+    def joint(self) -> bool:
+        return self.weighting != "default"
+
+    @property
+    def chain(self) -> tuple[str, ...] | None:
+        """Stages of ``run --stage all``: joint_cue and joint_diag continue an estimate (cue, post); else the
+        pipeline's CHAIN."""
+        return ("cue", "post") if self.weighting in ("joint_cue", "joint_diag") else None
+
+    def fixed_weighting(self, problem: Any, theta: np.ndarray) -> np.ndarray | None:
+        """The fixed W of the cue stage: under joint_diag W = diag(S^-1) on the product rows at ``theta`` and the fixed
+        covariances' inverses on the others; None otherwise (the stage runs CUE)."""
+        if self.weighting != "joint_diag":
+            return None
+        from nfp_harness.weighting import weight_from_covariance
+
+        ev = problem.evaluate(theta, need_jacobian=False)
+        if not ev.ok:
+            raise RuntimeError(f"joint_diag: evaluation at the starting theta failed ({ev.status.value})")
+        W = weight_from_covariance(problem.covariance(ev))
+        P_idx = problem._jointcfg["P_idx"]
+        Wd = W.copy()
+        Wd[np.ix_(P_idx, P_idx)] = np.diag(np.diag(W)[P_idx])
+        return 0.5 * (Wd + Wd.T)
+
+    @property
+    def step2_weighting(self) -> Any:   # type: ignore[override]
+        """W2 (D6): the rule ``efficient_on_excluded`` (micro and second-choice blocks keep their fixed (n V)^-1, the
+        aggregate block is efficient on the excluded instruments only); under a joint weighting the whole
+        product-level S(theta_1)^-1."""
+        if self.joint:
+            from nfp_harness.weighting import weight_from_covariance
+
+            return lambda problem, ev: weight_from_covariance(problem.covariance(ev))
+        return "efficient_on_excluded"
 
     def set_income_basis(self, basis: str) -> None:
         if basis not in INCOME_BASES:
@@ -771,7 +887,29 @@ class GMYSpec(PaperSpec):
                                  "(Gandhi-Houde local), gmy+gh")
         parser.add_argument("--moments", choices=ESTIMATION_MOMENTS + tuple(MOMENT_ALIASES), default="gmy",
                             help="gmy: Sargan + micro + second choice (default); gmy_nolinear: micro + second choice "
-                                 "(GMY's nonlinear stage); demand_supply: gmy + the log-cost supply block")
+                                 "(GMY's nonlinear stage); demand_supply: gmy + the log-cost supply block; "
+                                 "demand_supply_ms: gmy + the supply block with markup shifters added to its "
+                                 "excluded instruments; demand_supply_fd: gmy + within-model first-difference moments "
+                                 "E[dz dxi] = 0 and E[dz domega] = 0 on the time-varying cost shifters; "
+                                 "demand_supply_msfd: both supply blocks and the demand difference block, one gamma; "
+                                 "demand_supply_msfd_own: demand_supply_msfd + the ownership-event cost-continuity "
+                                 "block, ownership on the public-record coding (PUBLIC_RECORD_PARENT)")
+        parser.add_argument("--fd-max-gap", type=int, default=FD_MAX_GAP,
+                            help="difference moment sets: pair a model's rows at most this many years apart "
+                                 "(default 1, consecutive years)")
+        parser.add_argument("--weighting", choices=WEIGHTINGS, default="default",
+                            help="default: the stages' W1 and block-diagonal W2; joint_two_step: W2 = the joint "
+                                 "product-level S(theta_1)^-1 with (beta, gamma) concentrated jointly; joint_cue: CUE "
+                                 "with W(theta) = S_P(theta)^-1 on every product-level block (stages cue, post: start "
+                                 "from --start-theta); joint_diag: fixed W = diag(S_P^-1) at the starting theta "
+                                 "(robustness); part of the run key when not default")
+        parser.add_argument("--drop-block", action="append", choices=DROPPABLE_BLOCKS + tuple(DROP_ALIASES),
+                            default=None, help="joint weightings: drop a product-level block (repeatable; own = "
+                                               "event_cost); aggregate keeps its X1 rows; part of the run key")
+        parser.add_argument("--a-lo-free", action="store_true",
+                            help=f"estimate a_lo as a free GMM parameter on [{A_LO_FREE[0]:g}, {A_LO_FREE[1]:g}], "
+                                 f"starting at --a-lo (its Jacobian column by finite differences); part of the run "
+                                 f"key")
         parser.add_argument("--prefit-rows", choices=PREFIT_ROWS, default="price_purchase",
                             help="micro rows of the prefit: price_purchase (the 20 price and purchase-rate rows, "
                                  "default) or age (the 8 age-price rows, phi_age and the age tastes free); part of the "
@@ -803,6 +941,10 @@ class GMYSpec(PaperSpec):
         self.antithetic_taste = bool(getattr(args, "antithetic_taste", False))
         self.load(years, getattr(args, "instruments", None) or "gmy")   # after the robustness: the kernel columns
         self.set_moments(getattr(args, "moments", None) or "gmy")       # decide the twins
+        self.fd_max_gap = int(getattr(args, "fd_max_gap", None) or FD_MAX_GAP)
+        drop = [DROP_ALIASES.get(b, b) for b in (getattr(args, "drop_block", None) or ())]
+        self.set_weighting_mode(getattr(args, "weighting", None) or "default", drop)
+        self.a_lo_free = bool(getattr(args, "a_lo_free", False))
 
     def paper_run_key(self) -> dict[str, Any]:
         """Result-changing options beyond nu, seed and PaperSpec's shared ones: years (unless all 39), instruments,
@@ -827,6 +969,14 @@ class GMYSpec(PaperSpec):
             out["income_law"] = self.income_law
         if self.antithetic_taste:
             out["antithetic_taste"] = True
+        if self.moments in FD_MOMENTS and self.fd_max_gap != FD_MAX_GAP:
+            out["fd_max_gap"] = self.fd_max_gap
+        if self.weighting != "default":
+            out["weighting"] = self.weighting
+        if self.drop_blocks:
+            out["drop_blocks"] = list(self.drop_blocks)
+        if self.a_lo_free:
+            out["a_lo_free"] = True
         return out
 
     @property
@@ -848,8 +998,11 @@ class GMYSpec(PaperSpec):
              "1 (phi_gmy fixed at 0)")
             + f", and b_i = {'inc_i' if self.phi_inc_basis == 'level' else 'log(income_i / mean income)'} "
             f"(D5; --income-basis {self.income_basis})",
-            f"a_i >= a_lo = {self.a_lo:g}: the unobserved factor truncated below for every household, a calibration of "
-            f"the welfare tail (LEARNINGS 32)",
+            (f"a_i >= a_lo, a_lo a free GMM parameter on [{A_LO_FREE[0]:g}, {A_LO_FREE[1]:g}] started at "
+             f"{self.a_lo:g} (--a-lo-free; its Jacobian column by finite differences, NFPGMMProblem fd_columns)"
+             if self.a_lo_free else
+             f"a_i >= a_lo = {self.a_lo:g}: the unobserved factor truncated below for every household, a calibration "
+             f"of the welfare tail (LEARNINGS 32)"),
             f"taste spreads non-negative, capped at {TASTE_CAP:g} ($10k per sd); u_i0 = 0 with year fixed effects in X1",
             *([f"fixed by --fix (a calibration, not an estimate): "
                f"{', '.join(f'{k} = {v:g}' for k, v in sorted(self.fixed.items()))}"] if self.fixed else []),
@@ -867,6 +1020,14 @@ class GMYSpec(PaperSpec):
             "aggregate block clustered by model (product_ids): make2 has 56 levels against the aggregate moments, so a "
             "make2-clustered S is singular" + ("; fixed-W aggregate block (robustness fixed_w)"
                                                if "fixed_w" in self.robustness else "; Sargan form"),
+            *([f"--weighting {self.weighting}: one model-clustered covariance over every product-level block (xi "
+               f"blocks in plain IV form), (beta, gamma) concentrated jointly in one GLS step, single-cluster rows exact "
+               f"constraints (NFPGMMProblem.set_joint)"
+               + (f"; dropped blocks {', '.join(self.drop_blocks)}" if self.drop_blocks else "")] if self.joint else []),
+            *(["ownership on the public-record coding (PUBLIC_RECORD_PARENT): "
+               + ("; ".join(f"{r['make']} {r['year']} -> {r['public_record']}" for r in self.recoded_ownership)
+                  or "no loaded make-year recoded")]
+              if self.moments in OWN_MOMENTS else []),
             f"PCM taste draws are scrambled Sobol normals crossed with the CPS households ({self.households:,} per year)"
             + ("; in antithetic pairs on every taste dimension (--antithetic-taste)" if self.antithetic_taste else ""),
             (f"D7: PCM extension, taste spreads on z log height, z log curb weight and z log number of trims (GMY's "
@@ -926,8 +1087,13 @@ class GMYSpec(PaperSpec):
         specs.append(ParameterSpec("sigma_p", "sigma_p", None, None, SIGMA_P["start"], SIGMA_P["lower"],
                                    SIGMA_P["upper"], unit=SIGMA_P["unit"], note="sd of log a (untruncated parent)"))
         a = self.a_lo
-        specs.append(ParameterSpec("a_lo", "bound", None, None, a, a, a, unit=0.1, free=False,
-                                   note="a_i >= a_lo; fixed (LEARNINGS 32)"))
+        if self.a_lo_free:
+            specs.append(ParameterSpec("a_lo", "bound", None, None, float(np.clip(a, *A_LO_FREE)), A_LO_FREE[0],
+                                       A_LO_FREE[1], unit=0.01, free=True,
+                                       note="a_i >= a_lo; free (--a-lo-free), Jacobian column by finite differences"))
+        else:
+            specs.append(ParameterSpec("a_lo", "bound", None, None, a, a, a, unit=0.1, free=False,
+                                       note="a_i >= a_lo; fixed (LEARNINGS 32)"))
         return ParameterLayout(specs)
 
     def pcm_spec(self) -> PCMSpec:
@@ -962,11 +1128,134 @@ class GMYSpec(PaperSpec):
         iv = IVMoments if "fixed_w" in self.robustness else SarganIVMoments
         return iv(self.Z, self.clusters)
 
-    def supply_moment(self) -> SupplyMoments:
-        return SupplyMoments(self.Z_supply, self.cost_basis, self.products.firm_ids.to_numpy(), self.clusters,
-                             name="supply", w_names=[f"gamma[{c}]" for k, c in enumerate(COST_BASIS)
-                                                     if k in self.cost_keep],
+    def supply_moment(self, kind: str = "levels") -> SupplyMoments:
+        """The log-cost supply block. ``kind``: ``levels`` (GMY's cost shifters, ``--moments demand_supply``),
+        ``ms`` (those plus the markup shifters, ``demand_supply_ms``) or ``fd`` (within-model first differences,
+        ``demand_supply_fd``)."""
+        names = [f"gamma[{c}]" for k, c in enumerate(COST_BASIS) if k in self.cost_keep]
+        w, Z, name = self.cost_basis, self.Z_supply, "supply"
+        if kind == "ms":
+            Z, name = self.Z_supply_ms, "supply_ms"
+        elif kind == "fd":
+            Z, w, keep = self.supply_fd_design
+            names, name = [names[k] for k in keep], "supply_fd"
+        elif kind != "levels":
+            raise ValueError(f"supply kind must be levels, ms or fd, got {kind!r}")
+        return SupplyMoments(Z, w, self.products.firm_ids.to_numpy(), self.clusters, name=name, w_names=names,
                              rcond_min=1e-12, mc_floor=0.05, fd_step=1e-3, fd_scale="unit")
+
+    @property
+    def Z_supply_ms(self) -> np.ndarray:
+        """[cost basis, GMY's excluded supply instruments, markup shifters], the excluded columns standardised as one
+        block (the first columns equal ``Z_supply``'s), collinear columns dropped."""
+        p = self.products
+        ms, _ = markup_shifters(p, MARKUP_SHIFTER_CHARS)
+        ex = np.column_stack([np.column_stack([p[c].to_numpy(float) for c in SUPPLY_EXCLUDED]), ms])
+        return drop_collinear(np.column_stack([self.cost_basis, standardise(ex)]), keep=self.cost_basis.shape[1])
+
+    @property
+    def markup_shifter_names(self) -> list[str]:
+        return ([f"own_{c}" for c in MARKUP_SHIFTER_CHARS] + [f"rival_{c}" for c in MARKUP_SHIFTER_CHARS]
+                + ["own_products", "rival_products"])
+
+    @property
+    def fd_pairs(self) -> tuple[np.ndarray, np.ndarray]:
+        """(cur, prev) rows of one model (``product_ids``, data_blp.csv ``model``) in years at most ``fd_max_gap``
+        apart."""
+        p = self.products
+        cur, prev = within_differences(p.product_ids.to_numpy(), p.market_ids.to_numpy(int), self.fd_max_gap)
+        if cur.size == 0:
+            raise ValueError(f"no model is observed in two years at most {self.fd_max_gap} apart among {self.years}; "
+                             f"raise --fd-max-gap")
+        return cur, prev
+
+    def fd_shifters(self) -> np.ndarray:
+        """(n, k) time-varying cost shifters FD_SHIFTERS, standardised; columns with no within-model variation over
+        the pairs are dropped."""
+        cur, prev = self.fd_pairs
+        z = standardise(np.column_stack([self.products[c].to_numpy(float) for c in FD_SHIFTERS]))
+        return z[:, drop_collinear_columns(z[cur] - z[prev], keep=0)]
+
+    @property
+    def supply_fd_design(self) -> tuple[np.ndarray, np.ndarray, list[int]]:
+        """(Z_d, w_tv, kept cost-basis columns): the cost-basis columns that vary within model over the pairs,
+        and Z_d = difference_instruments of [w_tv, FD shifters], so the block is E[d z d omega] = 0 with
+        d log mc = d w_tv gamma + d omega."""
+        cur, prev = self.fd_pairs
+        dw = self.cost_basis[cur] - self.cost_basis[prev]
+        keep = drop_collinear_columns(dw, keep=0)   # a constant d trend stays: the intercept of the differences
+        w = self.cost_basis[:, keep]
+        Zd = difference_instruments(cur, prev, np.column_stack([w, self.fd_shifters()]))
+        return drop_collinear(Zd, keep=len(keep)), w, keep
+
+    def demand_fd_moment(self, plain: bool = False) -> Any:
+        """E[d z d xi] = 0 over the within-model pairs, the aggregate block's form (Sargan unless fixed_w or
+        ``plain``, the joint weightings' form)."""
+        cur, prev = self.fd_pairs
+        Zd = difference_instruments(cur, prev, self.fd_shifters())
+        iv = DifferenceIVMoments if plain or "fixed_w" in self.robustness else DifferenceSarganIVMoments
+        return iv(Zd, self.clusters, name="demand_fd")
+
+    def ownership_events(self, events: Sequence[tuple[str, int, Sequence[str]]] = OWNERSHIP_EVENTS
+                         ) -> tuple[list[CostEvent], list[dict[str, Any]]]:
+        """Events of the cost-continuity block from the data's own ``parent`` coding, and one record per listed event
+        (used or why not).
+
+        For event (name, T, makes): pre = T - 1, post = T + 1. Used only when both years are loaded and every target
+        make present in both has a different parent in the two years. The parents involved are the targets' parents in
+        pre and post; treated products are those of an involved parent in pre or post, control products the rest. A
+        product counts in either group only if it continues unchanged: the same ``model`` string (``product_ids``) and
+        make in both years, ``releaseYear`` 0 in post and ``yearsSinceDesign`` up by post - pre (no redesign). Each
+        treated product's control mix is the mean over controls of the same body type (EVENT_MATCH), else over all."""
+        p = self.products
+        year = p.market_ids.to_numpy(int)
+        make = p.make.astype(str).to_numpy()
+        parent = p.firm_ids.astype(str).to_numpy()
+        out: list[CostEvent] = []
+        records: list[dict[str, Any]] = []
+        for name, T, targets in events:
+            pre, post = int(T) - 1, int(T) + 1
+            rec: dict[str, Any] = {"event": name, "transition_year": int(T), "pre": pre, "post": post}
+            records.append(rec)
+            if pre not in self.years or post not in self.years:
+                rec["used"] = False
+                rec["why"] = f"years {pre} and {post} are not both loaded"
+                continue
+            pa = {y: {m: sorted(set(parent[(year == y) & (make == m)])) for m in targets} for y in (pre, post)}
+            both = [m for m in targets if pa[pre][m] and pa[post][m]]
+            rec["parents"] = {m: [pa[pre][m], pa[post][m]] for m in targets}
+            if not both or any(pa[pre][m] == pa[post][m] for m in both):
+                rec["used"] = False
+                rec["why"] = "the data's parent does not change for every target make present in both years"
+                continue
+            involved = {x for m in both for y in (pre, post) for x in pa[y][m]}
+            rows = np.flatnonzero(np.isin(year, (pre, post)))
+            cur, prev = within_differences(p.product_ids.to_numpy()[rows], year[rows], post - pre)
+            cur, prev = rows[cur], rows[prev]
+            ys = p.yearsSinceDesign.to_numpy(float)
+            ok = ((make[cur] == make[prev]) & (p.releaseYear.to_numpy(float)[cur] == 0)
+                  & (ys[cur] - ys[prev] == post - pre))
+            cur, prev = cur[ok], prev[ok]
+            treated = np.isin(parent[cur], sorted(involved)) | np.isin(parent[prev], sorted(involved))
+            body = np.column_stack([p[c].to_numpy(float) for c in EVENT_MATCH]).argmax(axis=1)
+            tc, tp, cc, cp = cur[treated], prev[treated], cur[~treated], prev[~treated]
+            A = np.zeros((tc.size, cc.size))
+            for j, r in enumerate(tc):
+                same = body[cc] == body[r]
+                A[j] = same / same.sum() if same.any() else 1.0 / cc.size
+            rec.update(used=True, involved_parents=sorted(involved), treated=int(tc.size), control=int(cc.size),
+                       treated_models=sorted(p.product_ids.to_numpy()[tc].tolist()))
+            out.append(CostEvent(name, (tc, tp), (cc, cp), A))
+        return out, records
+
+    def event_cost_moment(self, costs: SupplyMoments | None = None) -> EventCostContinuityMoments:
+        """The cost-continuity block over ``ownership_events``, with log mc from the levels supply block's FOCs (or
+        from ``costs``, a supply block of the same problem, whose cached log mc and Jacobian it then shares)."""
+        events, records = self.ownership_events()
+        self.ownership_event_records = records
+        if not events:
+            raise ValueError(f"no ownership event is usable on years {self.years}: {records}")
+        return EventCostContinuityMoments(self.supply_moment() if costs is None else costs, events)
 
     def _which(self, moments: str) -> str:
         """``all``: the spec's estimation set (``--moments``: gmy, gmy_nolinear, demand_supply); ``prefit``: the 20 price
@@ -983,18 +1272,51 @@ class GMYSpec(PaperSpec):
             return layout.replace({n: {"free": n in self.prefit_free and n not in self.fixed} for n in layout.names})
         return layout
 
-    def moment_list(self, moments: str) -> list[Any]:
-        which = self._which(moments)
+    def moment_blocks(self, which: str, joint: bool) -> tuple[list[Any], np.ndarray]:
+        """(moment blocks of the moment set ``which``, the aggregate block's Z) in the problem's order; ``joint``: the
+        joint weightings' plain IV forms and ``--drop-block``. Independent of the inner model, so the same blocks
+        serve the PCM (``build_problem``) and the mixed logit on the same moments (estimate_blp.py same-moments)."""
+        Z_agg = self.Z[:, :self.X1.shape[1]] if joint and "aggregate" in self.drop_blocks else self.Z
         ms: list[Any] = []
-        if which in ("gmy", "demand_supply", "aggregate"):
-            ms.append(self.aggregate_moment())
+        if which in ("gmy", "demand_supply", "demand_supply_ms", "aggregate") or which in FD_MOMENTS:
+            ms.append(IVMoments(Z_agg, self.clusters) if joint else self.aggregate_moment())
         if which == "prefit":
             ms += self.micro_moment("prefit")
         elif which != "aggregate":
             ms += self.micro_moment() + self.second_choice_moment()
         if which == "demand_supply":
             ms.append(self.supply_moment())
-        return ms
+        elif which == "demand_supply_ms":
+            ms.append(self.supply_moment("ms"))
+        elif which == "demand_supply_fd":
+            ms += [self.demand_fd_moment(plain=joint), self.supply_moment("fd")]
+        elif which in ("demand_supply_msfd", "demand_supply_msfd_own"):   # one log mc, gamma shared on within-model columns
+            ms += [self.supply_moment("ms"), self.demand_fd_moment(plain=joint), self.supply_moment("fd")]
+            if which == "demand_supply_msfd_own":   # log mc from the levels block's own cost object (one FD pass)
+                ms.append(self.event_cost_moment(costs=ms[-3]))
+        if joint:
+            ms = [m for m in ms if m.name not in self.drop_blocks or m.name == "aggregate"]
+        return ms, Z_agg
+
+    def _joint_for(self, moments: str) -> bool:
+        return self.joint and self._which(moments) not in ("aggregate", "prefit")
+
+    def moment_list(self, moments: str) -> list[Any]:
+        return self.moment_blocks(self._which(moments), self._joint_for(moments))[0]
+
+    def linear_for(self, moments: str) -> Any:
+        """The linear IV of moment set ``moments``: X1 with the aggregate block's Z (its X1 rows only when a joint
+        weighting drops the aggregate block's excluded instruments)."""
+        from nfp_harness.linear import LinearIV
+
+        if self._joint_for(moments) and "aggregate" in self.drop_blocks:
+            return LinearIV(self.X1, self.Z[:, :self.X1.shape[1]], names=self.linear_names)
+        return self.linear()
+
+    def finish_problem(self, problem: Any, moments: str) -> None:
+        """A joint weighting stacks every product-level block under one covariance (``NFPGMMProblem.set_joint``)."""
+        if self._joint_for(moments):
+            problem.set_joint("cue" if self.weighting == "joint_cue" else "fixed")
 
     def second_choice_data(self) -> dict[int, list[float]]:
         out = {}
@@ -1059,7 +1381,14 @@ class GMYSpec(PaperSpec):
                 # options added in round 4, only when set, so the payload of an older run is unchanged
                 **({"income_law": {"law": self.income_law, "ybar_1000usd": self.income_law_ybar, "clip": INCOME_LAW_CLIP}}
                    if self.income_law != "gmy_blp" else {}),
-                **({"draws": {"antithetic": "every taste dimension"}} if self.antithetic_taste else {})}
+                **({"draws": {"antithetic": "every taste dimension"}} if self.antithetic_taste else {}),
+                # options added with the markup-shifter, joint-weighting and free-bound work, only when set
+                **({"fd_max_gap": self.fd_max_gap} if self.moments in FD_MOMENTS else {}),
+                **({"weighting": self.weighting, "drop_blocks": list(self.drop_blocks)} if self.joint else {}),
+                **({"ownership": {"coding": "public_record", "recoded": self.recoded_ownership,
+                                  "events": [list(e[:2]) + [list(e[2])] for e in OWNERSHIP_EVENTS]}}
+                   if self.moments in OWN_MOMENTS else {}),
+                **({"a_lo_free": list(A_LO_FREE)} if self.a_lo_free else {})}
 
     def gate_profiles(self) -> list[tuple[str, str, dict[str, Any]]]:
         """The sigma_p ray profile (section 3): lambda in {0.5, 1, 2} times the start spreads, sigma_p in {1.5, ..,
