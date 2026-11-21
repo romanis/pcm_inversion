@@ -392,8 +392,54 @@ class NFPGMMProblem:
         else:
             aux["q"] = self.objective(g)
             aux["q_blocks"] = {name: float(self.n * g[s] @ self.W[s, s] @ g[s]) for name, s in self.blocks.items()}
+        if G is not None and self.fd_columns:
+            note = self._fd_columns(theta, g, G, aux)
+            if note is not None:
+                aux["note"] = note
+                return self._failed(theta, EvalStatus.NUMERICAL, t0, aux)
         return Evaluation(theta=theta, g=g, G=G, status=EvalStatus.OK, blocks=dict(self.blocks), aux=aux,
                           seconds=time.perf_counter() - t0)
+
+    @property
+    def fd_columns(self) -> tuple[int, ...]:
+        """Free parameters the inner model does not differentiate (``model.fd_columns``, e.g. the PCM's free bound
+        a_lo): their columns of G (and of the CUE terms dV) are finite differences of g."""
+        return tuple(int(k) for k in getattr(self.model, "fd_columns", ()) if self.layout.specs[int(k)].free)
+
+    def _fd_columns(self, theta: np.ndarray, g: np.ndarray, G: np.ndarray, aux: dict[str, Any]) -> str | None:
+        """Fill G[:, k] for every ``fd_columns`` k by a one-sided difference (g(theta + h e_k) - g(theta)) / h, h =
+        ``model.fd_step(theta, k)`` (backward when theta + h leaves the bounds), and under ``set_joint`` the CUE
+        terms dV[:, :, k] likewise. The extra solve warm-starts from the accepted state; the model's trial state at
+        theta is put back afterwards (``snapshot_trial`` / ``restore_trial``), so ``commit(theta)`` promotes it.
+        Returns a note when the shifted evaluation fails."""
+        model: Any = self.model
+        lower, upper = self.layout.bounds()
+        snap = model.snapshot_trial() if hasattr(model, "snapshot_trial") else None
+        supply_cache = [(m, getattr(m, "_cache", None)) for m in self.moments if hasattr(m, "_cache")]
+        steps: dict[str, float] = {}
+        try:
+            for k in self.fd_columns:
+                h = float(model.fd_step(theta, k)) if hasattr(model, "fd_step") else 1e-4 * max(1.0, abs(theta[k]))
+                if theta[k] + h > upper[k]:
+                    h = -h
+                th = theta.copy()
+                th[k] += h
+                ev = self.evaluate(th, need_jacobian=False)
+                if not ev.ok:
+                    return (f"finite-difference column {self.layout.names[k]}: evaluation at {th[k]:.6g} failed "
+                            f"({ev.status.value}: {ev.aux.get('note')})")
+                G[:, k] = (ev.g - g) / h
+                jx, jh = aux.get("joint"), ev.aux.get("joint")
+                if jx is not None and jx.get("dV") is not None and jh is not None:
+                    jx["dV"][:, :, k] = (jh["V"] - jx["V"]) / h
+                steps[self.layout.names[k]] = h
+        finally:
+            if snap is not None:
+                model.restore_trial(snap)
+            for m, c in supply_cache:   # the blocks' caches belong to the solution at theta
+                setattr(m, "_cache", c)
+        aux["fd_columns"] = steps
+        return None
 
     def _joint_fit(self, delta: np.ndarray, D_full: np.ndarray | None, y: np.ndarray, dy: np.ndarray | None
                    ) -> dict[str, Any]:
