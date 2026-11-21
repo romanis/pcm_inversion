@@ -46,6 +46,7 @@ import pathlib
 import sys
 import time
 import types
+from typing import Any, Mapping, Sequence
 
 THREADS_DEFAULT = 32
 for _v in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
@@ -58,6 +59,7 @@ import pandas as pd  # noqa: E402
 from scipy.optimize import least_squares  # noqa: E402
 from scipy.stats import norm, qmc  # noqa: E402
 
+from nfp_harness.diagnostics.report import to_jsonable  # noqa: E402
 from nfp_harness.linear import LinearIV  # noqa: E402
 from nfp_harness.models.blp import MixedLogitModel  # noqa: E402
 from nfp_harness.moments import GroupMicroMoments, GroupMomentRow, MicroDataset, SecondChoiceMoments  # noqa: E402
@@ -315,18 +317,377 @@ def post_estimation(data: gmy_pcm.GMYData, model: GMYLogit, theta: np.ndarray, d
     return out
 
 
+# ------------------------------------------------------------------------------------------------
+# same-moments: a mixed logit on the PCM's moment set under the joint CUE weight
+# ------------------------------------------------------------------------------------------------
+
+SAME_YEARS = (1980, 1991, 1997, 1999, 2001, 2005, 2015, 2018)   # the 8-year PCM joint_cue runs' markets
+SAME_NAMES = ("alpha",) + tuple(n.replace(" ", "_") for n in NAMES)
+UTILITIES = ("gmy", "pcm_matched")
+#: pcm_matched: bounds of the lognormal price factor's sd and of the log price-coefficient scale
+SIGMA_P_LOGIT = (0.0, 3.0)
+LOG_ALPHA0 = (-5.0, 5.0)
+
+
+def _pcm_matched_design(spec: Any, start_theta: Mapping[str, float] | None) -> dict[str, Any]:
+    """The PCM's utility as a mixed logit, read from the GMY PCM spec's own layout (``GMYSpec.layout()``, the
+    starts of ``start_theta`` applied): every taste of the PCM (a sigma on a draw, a pi on a demographic) on the same
+    characteristic, and the PCM's price sensitivity alpha_h = exp(log_alpha0 + log c_h + phi_inc inc_h + phi_age
+    age_h + sigma_p nu_ph) (``MixedLogitModel`` exponential law; log c_h is GMY's BLP income-age law fixed at
+    coefficient 1 as in the PCM, phi_gmy). log_alpha0 is the scale the PCM fixes by its median normalisation and the
+    logit's error does not; price leaves delta, so the linear part is the PCM's X1. The PCM's bound a_lo has no
+    counterpart (the lognormal is untruncated). Starts: the PCM's tastes times exp(log_alpha0) at log_alpha0 =
+    log(median |alpha| of GMY's BLP fit), its phi, sigma_p at min(PCM sigma_p, 1)."""
+    lay = spec.layout()
+    if start_theta:
+        lay = lay.replace({n: {"start": float(np.clip(v, s.lower, s.upper))} for n, v in start_theta.items()
+                           for s in [lay.specs[lay.names.index(n)]] if n in lay.names and s.free})
+    chars = ["prices"] + [c for c in spec.kernel_chars]
+    pattern, unobs, demog, names, starts, lower, upper = [], [], [], [], [], [], []
+    scale = float(spec.alpha_median)
+    for s in lay.specs:
+        if s.role != "taste":
+            continue
+        k = chars.index(s.column)
+        if s.basis.startswith("nu"):
+            unobs.append((k, s))
+        else:
+            if s.basis not in demog:
+                demog.append(s.basis)
+            pattern.append((k, demog.index(s.basis), s))
+    th_pi = [(s.name, s.start * scale, -25.0, 25.0) for _, _, s in pattern]
+    th_sig = [(s.name, s.start * scale, 0.0, 25.0) for _, s in unobs]
+    exp_names = [("log_alpha0", "one")]
+    for s in lay.specs:
+        if s.role == "scale" and s.free:
+            exp_names.append((s.name, s.basis))
+    for d in [b for _, b in exp_names]:
+        if d not in demog:
+            demog.append(d)
+    sp = lay.specs[lay.names.index("sigma_p")]
+    th_exp = ([("log_alpha0", float(np.log(scale)), *LOG_ALPHA0)]
+              + [(n, lay.specs[lay.names.index(n)].start, -4.0, 4.0) for n, _ in exp_names[1:]]
+              + [("sigma_p", float(min(sp.start, 1.0)), *SIGMA_P_LOGIT)])
+    for n, v, lo, hi in th_pi + th_sig + th_exp:
+        names.append(n)
+        starts.append(v)
+        lower.append(lo)
+        upper.append(hi)
+    phi_gmy = lay.specs[lay.names.index("phi_gmy")]
+    offset_col = phi_gmy.basis if phi_gmy.start != 0 else None
+    return {"chars": chars, "pattern": [(k, d) for k, d, _ in pattern], "unobs": [k for k, _ in unobs],
+            "demog": demog, "exp_terms": [("D", demog.index(b)) for _, b in exp_names] + [("nu", len(unobs))],
+            "offset": (offset_col, float(phi_gmy.start)), "names": names, "start": np.array(starts),
+            "lower": np.array(lower), "upper": np.array(upper)}
+
+
+def same_moments_problem(threads: int, households: int = 2000, years: tuple[int, ...] = SAME_YEARS,
+                         fd_max_gap: int = 3, seed: int = SEED, utility: str = "gmy",
+                         moments: str = "demand_supply_msfd_own", drop_blocks: Sequence[str] = (),
+                         start_theta: Mapping[str, float] | None = None) -> tuple[Any, Any, dict[str, Any]]:
+    """(NFPGMMProblem, GMYSpec, design): a mixed logit (``MixedLogitModel``, the harness's BLP contraction) on the
+    moment blocks of the PCM's ``--moments <moments> --weighting joint_cue [--drop-block ...]`` problem
+    (``GMYSpec.moment_blocks``): the same products (twins merged, shares below 1e-5 dropped, price ties spread), the
+    same households and ownership coding, the same X1 and Z, micro weight diag(1 / variance), second choices x 30, and
+    ``set_joint("cue")``. Taste draws are GMY's Latin hypercube normals, one per household and market
+    (estimation.m), seed + market position.
+
+    ``utility``: ``gmy`` is GMY's spec 6 with alpha the first nonlinear parameter (a pattern term on price with a
+    demographic of ones, so ds/dp, which the supply blocks read, moves with it); ``pcm_matched`` is the PCM's utility
+    (``_pcm_matched_design``)."""
+    from nfp_harness.problem import NFPGMMProblem
+
+    if utility not in UTILITIES:
+        raise ValueError(f"utility must be one of {UTILITIES}, got {utility!r}")
+    spec = gmy_pcm.GMYSpec(years=years, households=households)
+    spec.fd_max_gap = int(fd_max_gap)
+    spec.set_moments(moments)
+    spec.set_weighting_mode("joint_cue", list(drop_blocks))
+    ms, _ = spec.moment_blocks(moments, True)
+    p, a = spec.products, spec.agents.copy()
+    a["one"] = 1.0
+    yrs = [int(y) for y in spec.years]
+    rows = [spec.market_rows(y) for y in yrs]   # price order, as the PCM model's markets and the second-choice data
+    arows = [np.flatnonzero(a.market_ids.to_numpy() == y) for y in yrs]
+    w = [a.weights.to_numpy(float)[r] for r in arows]
+    chars = sorted({c for m in ms for c in getattr(m, "chars", ()) if isinstance(c, str) and c in p})
+    common = dict(threads=threads, tol=1e-13, product_columns={c: p[c].to_numpy(float) for c in chars}, agents=a,
+                  agent_rows=arows)
+    shares = [p.shares.to_numpy(float)[r] for r in rows]
+    markets = [MarketIndex(y, r) for y, r in zip(yrs, rows)]
+
+    def col(c: str, r: np.ndarray) -> np.ndarray:
+        return np.ones(r.size) if c == "const" and c not in p else p[c].to_numpy(float)[r]
+
+    if utility == "gmy":
+        X = [np.column_stack([col(c, r) for c in X2]) for r in rows]
+        demog = DEMOG + ("one",)
+        D = [np.column_stack([a[d].to_numpy(float)[r] for d in demog]) for r in arows]
+        nu = [norm.ppf(qmc.LatinHypercube(d=len(UNOBS), seed=seed + t).random(r.size)) for t, r in enumerate(arows)]
+        pattern = [(X2.index("prices"), demog.index("one"))] + [(X2.index(c), DEMOG.index(d)) for c, d in PATTERN]
+        model = MixedLogitModel(markets, X, D, w, nu, pattern, [X2.index(c) for c in UNOBS], shares,
+                                price_column=X2.index("prices"), **common)
+        names, start = SAME_NAMES, np.r_[TABLE4_ALPHA, TABLE4_THETA]
+        lo, hi = np.r_[-25.0, LOWER], np.r_[0.0, UPPER]
+        design: dict[str, Any] = {"utility": "gmy", "names": list(names)}
+    else:
+        dz = _pcm_matched_design(spec, start_theta)
+        X = [np.column_stack([col(c, r) for c in dz["chars"]]) for r in rows]
+        D = [np.column_stack([a[d].to_numpy(float)[r] for d in dz["demog"]]) for r in arows]
+        n_nu = len(dz["unobs"]) + 1
+        nu = [norm.ppf(qmc.LatinHypercube(d=n_nu, seed=seed + t).random(r.size)) for t, r in enumerate(arows)]
+        oc, ov = dz["offset"]
+        offset = [ov * a[oc].to_numpy(float)[r] if oc else np.zeros(r.size) for r in arows]
+        model = MixedLogitModel(markets, X, D, w, nu, dz["pattern"], dz["unobs"], shares, price_column=0,
+                                exp_column=0, exp_terms=dz["exp_terms"], exp_offset=offset, **common)
+        names, start, lo, hi = tuple(dz["names"]), dz["start"], dz["lower"], dz["upper"]
+        design = {"utility": "pcm_matched", "names": list(names), "chars": dz["chars"], "demog": dz["demog"],
+                  "price_law": "alpha_h = exp(log_alpha0 + log c_h + phi' d_h + sigma_p nu_ph), untruncated"}
+    layout = ParameterLayout([ParameterSpec(n, "taste", None, None, float(np.clip(v, l_, h)), float(l_), float(h),
+                                            unit=1.0) for n, v, l_, h in zip(names, start, lo, hi)])
+    prob = NFPGMMProblem(model, ms, spec.linear_for("all"), layout, max_step=False)
+    prob.set_joint("cue")
+    design.update(moments=moments, drop_blocks=list(spec.drop_blocks), fd_max_gap=int(fd_max_gap))
+    return prob, spec, design
+
+
+def same_moments_evaluate(prob: Any, theta: np.ndarray) -> dict[str, Any]:
+    """q_CUE, its blocks, Hansen J and the economics of the mixed logit at theta (no Jacobian): every moment row
+    (data and model) of the micro and second-choice blocks, Lerner indices and own elasticities by year and segment."""
+    from scipy.stats import chi2
+
+    from nfp_harness.weighting import weight_from_covariance
+
+    ev = prob.evaluate(np.asarray(theta, dtype=float), need_jacobian=False)
+    if not ev.ok:
+        return {"status": ev.status.value, "note": ev.aux.get("note")}
+    W = weight_from_covariance(prob.covariance(ev))
+    q = float(prob.n * ev.g @ W @ ev.g)
+    ident = prob.identification
+    df = int(ident["overidentifying"])
+    sol = ev.aux["solution"]
+    sup = next(m for m in prob.moments if getattr(m, "is_supply", False))
+    _, _, info = sup.log_costs(sol, False)
+    model = prob.model
+    lerner, own = np.full(prob.n, np.nan), np.full(prob.n, np.nan)
+    mids = np.empty(prob.n, dtype=int)
+    for t, m in enumerate(model.markets):
+        r = np.asarray(m.rows)
+        pr = model.kernel_market(t).p
+        s = np.asarray(sol.outputs["shares"])[r]
+        lerner[r] = info["markup"][r] / pr
+        own[r] = np.diag(sol.outputs["ds_dp"][t]) * pr / s
+        mids[r] = int(m.market_id)
+    years = [int(m.market_id) for m in model.markets]
+    s_all = np.asarray(sol.outputs["shares"])
+    mic = next((m for m in prob.moments if m.name == "micro_gmy"), None)
+    sc = next((m for m in prob.moments if m.name == "second_choice"), None)
+    out = {"status": "ok", "theta": dict(zip(prob.layout.names, map(float, theta))), "q_cue": q,
+           "q_blocks": ev.aux["q_blocks"], "q_blocks_own": ev.aux["q_blocks_own"],
+           "moments": int(ident["effective_moments"]), "free_nonlinear": int(ident["p_free"]),
+           "linear": int(ident["k_linear"]), "df": df, "J_p_value": float(chi2.sf(q, df)),
+           "lerner_median": float(np.nanmedian(lerner)),
+           "lerner_sales_weighted_mean": float(np.nansum(lerner * s_all) / np.sum(s_all[np.isfinite(lerner)])),
+           "lerner_median_by_year": {y: float(np.nanmedian(lerner[mids == y])) for y in years},
+           "own_elasticity_median": float(np.nanmedian(own)),
+           "own_elasticity_median_by_year": {y: float(np.nanmedian(own[mids == y])) for y in years},
+           "share_mc_clipped": float(info.get("share_mc_clipped", float("nan"))),
+           "price_coefficient_max": max(float(model.price_coefficients(theta, t).max())
+                                        for t in range(len(model.markets))),
+           "micro": [] if mic is None else [
+               {"name": lab, "data": float(d), "model": float(v), "z": float((v - d) / np.sqrt(var))}
+               for lab, d, v, var in zip(mic.labels, mic.values, ev.aux["micro_predicted"]["micro_gmy"],
+                                         mic.variances)],
+           "second_choice": [] if sc is None else [
+               {"row": lab, "data": float(d), "model": float(v)}
+               for lab, d, v in zip(sc.labels, sc.values, ev.aux["micro_predicted"]["second_choice"])]}
+    seg = getattr(prob, "segments", None)
+    if seg is not None:
+        out["lerner_median_by_segment"] = {k: float(np.nanmedian(lerner[seg == k])) for k in np.unique(seg)}
+    evb = next((m for m in prob.moments if m.name == "event_cost"), None)
+    if evb is not None:
+        out["events"] = evb.summary(ev.aux["log_mc"])
+    out["markup"], out["lerner"], out["own_elasticity"] = info["markup"], lerner, own
+    return out
+
+
+def same_moments_fit(prob: Any, theta0: np.ndarray, max_nfev: int, max_rounds: int = 6, tag: str = "blp_same_moments"
+                     ) -> tuple[np.ndarray, dict[str, Any]]:
+    """CUE by nonlinear least squares on r(theta) = sqrt(n) L(theta)^-1 g(theta) with S(theta) = L L', so r'r =
+    q_CUE, and a central-difference Jacobian (the supply blocks' log mc has no analytic derivative on the logit),
+    restarted from its endpoint while q still falls; the contraction warm-starts from the best point so far. A theta
+    at which some household's price coefficient is not negative is refused (no Nash markups). Standard errors
+    (J'J)^-1 from the final Jacobian of r."""
+    import scipy.linalg
+
+    lay = prob.layout
+    names = lay.names
+    lo, hi = (np.asarray(b, dtype=float) for b in lay.bounds())
+    best: dict[str, Any] = {"q": np.inf}
+    k = prob.k
+    t_start = time.time()
+
+    def resid(th: np.ndarray) -> np.ndarray:
+        a_max = max(float(prob.model.price_coefficients(th, t).max()) for t in range(len(prob.model.markets)))
+        if not a_max < 0:   # demand slopes up for some household: no Nash markups, outside the model's domain
+            return np.full(k, 1e3)
+        ev = prob.evaluate(th, need_jacobian=False)
+        if not ev.ok:
+            log.info("evaluation failed at %s: %s %s", np.round(th, 3).tolist(), ev.status.value, ev.aux.get("note"))
+            return np.full(k, 1e3)
+        L = np.linalg.cholesky(prob.covariance(ev))
+        r = np.sqrt(prob.n) * scipy.linalg.solve_triangular(L, ev.g, lower=True)
+        q = float(r @ r)
+        if q < best["q"]:
+            best["q"] = q
+            prob.commit(th)
+            log.info("q_CUE %.4f (evaluations %d, %.0f s)", q, prob.model.evaluations, time.time() - t_start)
+        return r
+
+    x = np.clip(theta0, lo, hi)
+    rounds: list[dict[str, Any]] = []
+    for _ in range(max_rounds):   # restart from the endpoint while it still lowers q (trust-region radius reset)
+        res = least_squares(resid, x, jac="3-point", bounds=(lo, hi), x_scale="jac", diff_step=1e-5,
+                            xtol=1e-12, ftol=1e-12, gtol=1e-8, max_nfev=max_nfev, verbose=0)
+        q_new = float(2 * res.cost)
+        rounds.append({"q": q_new, "nfev": int(res.nfev), "status": int(res.status), "message": str(res.message),
+                       "optimality": float(res.optimality)})
+        log.info("least_squares round %d: q %.5f, %s, optimality %.3g", len(rounds), q_new, res.message,
+                 res.optimality)
+        improved = len(rounds) == 1 or rounds[-2]["q"] - q_new > 1e-4
+        x = np.asarray(res.x, dtype=float)
+        np.savez(OUT / f"{tag}.checkpoint.npz", theta=x, names=np.array(names))
+        if not improved or res.status == 1 or res.nfev >= max_nfev:
+            break
+    J = res.jac
+    se = np.sqrt(np.clip(np.diag(np.linalg.pinv(J.T @ J)), 0, None))
+    info = {"status": int(res.status), "message": str(res.message), "nfev": int(res.nfev), "q": float(2 * res.cost),
+            "rounds": rounds, "optimality": float(res.optimality),
+            "active_bounds": [names[i] for i in np.flatnonzero(res.active_mask)],
+            "se": dict(zip(names, map(float, se))), "seconds": time.time() - t_start,
+            "evaluations": int(prob.model.evaluations)}
+    return np.asarray(res.x, dtype=float), info
+
+
+def _start_theta(path: str | None) -> dict[str, float]:
+    """Named starting values from a harness stage file (``.npz`` with theta and names) or a same-moments JSON."""
+    if not path:
+        return {}
+    pth = pathlib.Path(path)
+    if pth.suffix == ".json":
+        d = json.loads(pth.read_text())
+        th = d.get("estimate", d).get("theta", d.get("theta"))
+        return {k.replace(" ", "_"): float(v) for k, v in th.items()}
+    z = np.load(pth, allow_pickle=True)
+    if "names" in z:   # a same-moments .npz
+        return dict(zip([str(n) for n in z["names"]], map(float, np.asarray(z["theta"], dtype=float).ravel())))
+    from nfp_harness.checkpoint import read_stage_file, stage_parameter_names
+
+    names = stage_parameter_names(pth)
+    if names is None:
+        raise ValueError(f"{pth}: a stage without parameter names")
+    return dict(zip(names, map(float, np.asarray(read_stage_file(pth)["theta"], dtype=float).ravel())))
+
+
+def est_delta(prob: Any) -> np.ndarray:
+    """(n,) row-order accepted delta of a same-moments problem's model."""
+    out = np.full(prob.n, np.nan)
+    for m, d in zip(prob.model.markets, prob.model.delta):
+        out[np.asarray(m.rows)] = d
+    return out
+
+
+def _logit_counterfactuals(model: MixedLogitModel, theta: np.ndarray, delta: np.ndarray, products: Any,
+                           price_coefficient: float | None = None) -> dict[str, Any]:
+    """``estimate_pcm.gmy_counterfactuals`` on a mixed logit: ``LogitMarketDemand`` per market (Nash by the FOC
+    fixed point), ``price_coefficient`` the linear one inside delta (GMY's alpha; None: the model's)."""
+    from nfp_harness.counterfactuals import LogitMarketDemand
+
+    firms = products.firm_ids.astype(str).to_numpy()
+    return gmy_pcm.gmy_counterfactuals(
+        lambda t: LogitMarketDemand(model, theta, delta, t, firms, price_coefficient), model.markets, products)
+
+
+def same_moments_main(args: Any) -> None:
+    """Fit a mixed logit on the PCM's moments and write results/<tag>.{json,npz,log}."""
+    years = tuple(args.years) if args.years else gmy_pcm.ALL_YEARS
+    tag = (f"blp_same_moments_{args.utility}_{len(years)}y" + (f"_{args.tag}" if args.tag else ""))
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
+                        handlers=[logging.FileHandler(OUT / f"{tag}.log"), logging.StreamHandler()])
+    t0 = time.time()
+    st = _start_theta(args.start_theta)
+    prob, spec, design = same_moments_problem(args.threads, households=args.households, years=years,
+                                              fd_max_gap=args.fd_max_gap, utility=args.utility,
+                                              moments=args.moments, drop_blocks=args.drop_block or (),
+                                              start_theta=st if args.utility == "pcm_matched" else None)
+    prob.segments = spec.products[spec.groups].astype(str).to_numpy()   # type: ignore[attr-defined]
+    log.info("%s: %d products, %d moments, identification %s", design, prob.n, prob.k, prob.identification)
+    theta0 = prob.layout.starts()
+    if args.utility == "gmy" and st:
+        theta0 = np.array([st.get(n, v) for n, v in zip(prob.layout.names, theta0)])
+    if args.max_nfev <= 0:   # evaluate only
+        out = {"design": design, "theta0": dict(zip(prob.layout.names, map(float, theta0)))}
+        e = same_moments_evaluate(prob, theta0)
+        prob.commit(theta0)
+        out["estimate"] = {k: v for k, v in e.items() if k not in ("markup", "lerner", "own_elasticity")}
+        if args.counterfactuals:
+            out["counterfactuals"] = _logit_counterfactuals(prob.model, theta0, est_delta(prob), spec.products)
+        (OUT / f"{tag}.json").write_text(json.dumps(to_jsonable(out), indent=1))
+        log.info("evaluated at the start: q_CUE %s (%.0f s)", out["estimate"].get("q_cue"), time.time() - t0)
+        return
+    theta, fit = same_moments_fit(prob, theta0, args.max_nfev, tag=tag)
+    est = same_moments_evaluate(prob, theta)
+    prob.commit(theta)
+    try:
+        cfs = _logit_counterfactuals(prob.model, theta, est_delta(prob), spec.products)
+    except Exception as exc:   # the estimate is written whatever happens to the counterfactuals
+        log.exception("counterfactuals failed")
+        cfs = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    out = {"design": design, "theta0": dict(zip(prob.layout.names, map(float, theta0))), "years": list(spec.years),
+           "households": args.households, "recoded_ownership": spec.recoded_ownership, "fit": fit,
+           "estimate": {k: v for k, v in est.items() if k not in ("markup", "lerner", "own_elasticity")},
+           "counterfactuals": cfs, "seconds": time.time() - t0}
+    (OUT / f"{tag}.json").write_text(json.dumps(to_jsonable(out), indent=1))
+    np.savez(OUT / f"{tag}.npz", theta=theta, names=np.array(prob.layout.names),
+             delta=np.concatenate([d for d in prob.model.delta]),
+             rows=np.concatenate([np.asarray(m.rows) for m in prob.model.markets]),
+             **{k: np.asarray(est[k]) for k in ("markup", "lerner", "own_elasticity") if k in est})
+    log.info("wrote %s: q_CUE %.3f", OUT / f"{tag}.json", out["estimate"].get("q_cue", np.nan))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("stage", choices=("published", "fit"))
+    ap.add_argument("stage", choices=("published", "fit", "same-moments"))
     ap.add_argument("--households", type=int, default=1000)
     ap.add_argument("--threads", type=int, default=THREADS_DEFAULT)
     ap.add_argument("--max-nfev", type=int, default=200)
     ap.add_argument("--years", type=int, nargs="*", default=None)
+    ap.add_argument("--utility", choices=UTILITIES, default="gmy",
+                    help="same-moments: gmy (spec 6, alpha in theta) or pcm_matched (the PCM's utility and lognormal "
+                         "price sensitivity)")
+    ap.add_argument("--moments", default="demand_supply_msfd_own",
+                    help="same-moments: the PCM moment set whose blocks the logit is fitted on")
+    ap.add_argument("--drop-block", action="append", default=None,
+                    help="same-moments: product-level blocks dropped, as the PCM's --drop-block (own = event_cost)")
+    ap.add_argument("--fd-max-gap", type=int, default=1, help="same-moments: as the PCM's --fd-max-gap")
+    ap.add_argument("--start-theta", default=None,
+                    help="same-moments: named starts (a harness stage .npz, e.g. the PCM's, for pcm_matched; a "
+                         "same-moments JSON)")
+    ap.add_argument("--tag", default="", help="suffix of the output names (default none)")
+    ap.add_argument("--counterfactuals", action="store_true",
+                    help="published / fit: also run the shared counterfactuals at the estimate (off by default, so "
+                         "the outputs of a plain run are unchanged); same-moments with --max-nfev 0: run them at the "
+                         "start (a smoke test). A same-moments fit always runs them")
     args = ap.parse_args()
-    if args.threads > 32:
-        raise SystemExit("at most 32 threads")
+    if args.threads > 64:
+        raise SystemExit("at most 64 threads")
     OUT.mkdir(exist_ok=True)
-    tag = f"blp_{args.stage}_h{args.households}" + (f"_{len(args.years)}y" if args.years else "")
+    if args.stage == "same-moments":
+        args.drop_block = [gmy_pcm.DROP_ALIASES.get(b, b) for b in (args.drop_block or ())]
+        same_moments_main(args)
+        return
+    tag = (f"blp_{args.stage}_h{args.households}" + (f"_{len(args.years)}y" if args.years else "")
+           + (f"_{args.tag}" if args.tag else ""))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                         handlers=[logging.FileHandler(OUT / f"{tag}.log"), logging.StreamHandler()])
     data = gmy_pcm.load_data(n_households=args.households, seed=SEED, years=args.years)
@@ -357,6 +718,16 @@ def main() -> None:
                                  "paper_model": TABLE6_MODEL[c]} for c, d, v in zip(UNOBS, dat, mod)}
     summary.update(post_estimation(data, model, theta, m["delta"]))
     summary["paper"] = {"alpha": TABLE4_ALPHA, "table5": TABLE5, "lerner_median": LERNER}
+    if args.counterfactuals:   # the shared counterfactual engine, Nash by the zeta map, alpha the 2SLS coefficient
+        try:
+            model.model.price_column = X2.index("prices")
+            delta_rows = np.full(model.model.n_products, np.nan)
+            delta_rows[np.concatenate(model.rows)] = m["delta"]
+            summary["counterfactuals"] = to_jsonable(_logit_counterfactuals(
+                model.model, theta, delta_rows, data.products, price_coefficient=float(summary["alpha"])))
+        except Exception as exc:   # the estimate is written whatever happens to the counterfactuals
+            log.exception("counterfactuals failed")
+            summary["counterfactuals"] = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
     (OUT / f"{tag}.json").write_text(json.dumps(summary, indent=1, default=float))
     np.savez(OUT / f"{tag}.npz", theta=theta, delta=m["delta"])
     log.info("alpha %.3f (Table 4 %.3f)", summary["alpha"], TABLE4_ALPHA)

@@ -60,6 +60,124 @@ def test_problems_and_identification(gmy: Any, spec: Any) -> None:
     spec.set_moments("gmy")
 
 
+def test_markup_shifter_and_first_difference_moments(gmy: Any, spec: Any) -> None:
+    base = spec.run_key()
+    assert "fd_max_gap" not in base and "moments" not in base
+    k_old = spec.Z_supply.shape[1]
+    Zms = spec.Z_supply_ms
+    # the markup-shifter block extends the supply block: the same first columns, up to 8 shifters added (with two
+    # years the rival count is collinear with the cost basis's constant, trend and the own count)
+    np.testing.assert_array_equal(Zms[:, :k_old], spec.Z_supply)
+    assert Zms.shape[1] == k_old + 7 and len(spec.markup_shifter_names) == 8
+    assert np.allclose(Zms[:, spec.cost_basis.shape[1]:].std(axis=0), 1.0)
+    spec.set_moments("demand_supply_ms")
+    assert spec.run_key()["moments"] == "demand_supply_ms"
+    ms = spec.build_problem(1, 0, 4, "all")
+    assert [m.name for m in ms.moments] == ["aggregate", "micro_gmy", "second_choice", "supply_ms"]
+    assert ms.supply.k == Zms.shape[1]
+    ms.model.close()
+    spec.set_moments("demand_supply_fd")
+    with pytest.raises(ValueError, match="fd-max-gap"):   # 1991 and 1999 are 8 years apart
+        spec.fd_pairs
+    spec.fd_max_gap = 8
+    assert spec.run_key()["fd_max_gap"] == 8
+    cur, prev = spec.fd_pairs
+    p = spec.products
+    assert cur.size > 0 and np.all(p.product_ids.to_numpy()[cur] == p.product_ids.to_numpy()[prev])
+    assert np.all(p.market_ids.to_numpy()[cur] == 1999) and np.all(p.market_ids.to_numpy()[prev] == 1991)
+    fd = spec.build_problem(1, 0, 4, "all")
+    assert [m.name for m in fd.moments] == ["aggregate", "micro_gmy", "second_choice", "demand_fd", "supply_fd"]
+    assert fd.agg.name == "aggregate" and fd.supply.name == "supply_fd"
+    W1 = fd.initial_weighting(fd.layout.starts())
+    d = fd.blocks["demand_fd"]
+    Zd = fd.moments[3].Z
+    np.testing.assert_allclose(W1[d, d], np.linalg.inv(Zd.T @ Zd / fd.n), rtol=1e-8)
+    assert np.linalg.eigvalsh(W1[fd.supply_rows, fd.supply_rows])[0] > 0
+    fd.model.close()
+    spec.fd_max_gap = gmy.FD_MAX_GAP
+    spec.set_moments("gmy")
+    assert spec.run_key() == base
+
+
+def test_two_supply_blocks_with_one_gamma(gmy: Any, spec: Any) -> None:
+    base = spec.run_key()
+    spec.set_moments("demand_supply_msfd")
+    spec.fd_max_gap = 8
+    assert spec.run_key()["moments"] == "demand_supply_msfd" and spec.run_key()["fd_max_gap"] == 8
+    prob = spec.build_problem(1, 0, 4, "all")
+    try:
+        assert [m.name for m in prob.moments] == ["aggregate", "micro_gmy", "second_choice", "supply_ms", "demand_fd",
+                                                  "supply_fd"]
+        assert [s.name for s in prob.supplies] == ["supply_ms", "supply_fd"] and prob.supply.name == "supply_ms"
+        assert prob.gamma_names == prob.supplies[0].names   # the within-model columns are a subset of the levels'
+        assert set(prob.supplies[1].names) < set(prob.gamma_names)
+        assert prob._multi is not None and not prob._multi["include_agg"]
+        assert prob.identification["k_linear"] == prob.linear.n_linear + len(prob.gamma_names)
+        W1 = prob.initial_weighting(prob.layout.starts())
+        for s in prob.supplies:
+            r = prob.blocks[s.name]
+            np.testing.assert_allclose(W1[r, r], np.linalg.inv(s.Z.T @ s.Z / prob.n), rtol=1e-6)
+        assert np.all(W1[prob.blocks["supply_ms"], prob.blocks["supply_fd"]] == 0.0)
+    finally:
+        prob.model.close()
+    spec.fd_max_gap = gmy.FD_MAX_GAP
+    spec.set_moments("gmy")
+    assert spec.run_key() == base
+
+
+def test_ownership_events_from_the_parent_coding(gmy: Any) -> None:
+    sp = gmy.GMYSpec((1997, 1999))
+    events, records = sp.ownership_events()
+    used = {r["event"]: r for r in records if r["used"]}
+    assert list(used) == ["daimler_chrysler"]
+    assert all("not both loaded" in r["why"] for r in records if not r["used"])
+    r = used["daimler_chrysler"]
+    assert r["involved_parents"] == ["chrysler", "daimler"] and r["parents"]["dodge"] == [["chrysler"], ["daimler"]]
+    assert "dodge caravan" in r["treated_models"]
+    (ev,) = events
+    p = sp.products
+    ids, yr, par = p.product_ids.to_numpy(), p.market_ids.to_numpy(int), p.firm_ids.astype(str).to_numpy()
+    for cur, prev in (ev.treated, ev.control):
+        assert np.all(ids[cur] == ids[prev]) and np.all(yr[cur] == 1999) and np.all(yr[prev] == 1997)
+        ysd = p.yearsSinceDesign.to_numpy()
+        assert np.all(ysd[cur] - ysd[prev] == 2) and np.all(p.releaseYear.to_numpy()[cur] == 0)
+    assert set(par[ev.treated[0]]) == {"daimler"} and not set(par[ev.control[0]]) & {"chrysler", "daimler"}
+    assert ev.match is not None and np.allclose(ev.match.sum(axis=1), 1.0)
+    blk = sp.event_cost_moment()
+    assert blk.k == 1 and blk.n == len(p)
+
+
+def test_joint_cue_drop_block_and_free_bound_options(gmy: Any) -> None:
+    sp = gmy.GMYSpec((1997, 1999))
+    base = sp.run_key()
+    sp.set_moments("demand_supply_msfd_own")
+    sp.fd_max_gap = 2
+    sp.set_weighting_mode("joint_cue", [gmy.DROP_ALIASES["own"]])
+    sp.a_lo_free = True
+    key = sp.run_key()
+    assert key["weighting"] == "joint_cue" and key["drop_blocks"] == ["event_cost"] and key["a_lo_free"] is True
+    assert sp.chain == ("cue", "post", "cue_profile", "counterfactuals") and callable(sp.step2_weighting)
+    lay = sp.layout()
+    a = lay.specs[lay.names.index("a_lo")]
+    assert a.free and (a.lower, a.upper) == gmy.A_LO_FREE
+    prob = sp.build_problem(1, 0, 4, "all")
+    try:
+        assert [m.name for m in prob.moments] == ["aggregate", "micro_gmy", "second_choice", "supply_ms", "demand_fd",
+                                                  "supply_fd"]
+        assert prob._jointcfg is not None
+        assert prob.model.fd_columns == (lay.names.index("a_lo"),)
+    finally:
+        prob.model.close()
+    with pytest.raises(ValueError, match="joint weighting"):
+        sp.set_weighting_mode("default", ["event_cost"])
+    sp.set_weighting_mode("default")
+    sp.a_lo_free = False
+    sp.fd_max_gap = gmy.FD_MAX_GAP
+    sp.set_moments("gmy")
+    assert sp.run_key() == base
+    assert sp.step2_weighting == "efficient_on_excluded"
+
+
 def test_normalisations_and_run_key(gmy: Any, spec: Any) -> None:
     text = " ".join(spec.normalisations)
     for tag in ("D1", "D2", "D3", "D4", "D5", "D6"):

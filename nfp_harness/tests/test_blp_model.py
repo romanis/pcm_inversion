@@ -227,6 +227,51 @@ def test_price_derivatives_match_finite_differences() -> None:
     m.close()
 
 
+def test_exponential_price_law_derivatives_match_finite_differences() -> None:
+    """A lognormal price coefficient -exp(theta_0 + theta_inc income + theta_p nu) on the price column: shares, the
+    group sums and the second-choice adjoint keep their analytic theta derivatives through the theta-dependent basis,
+    ds/dp uses each agent's coefficient, and the model carries what supply moments bind to."""
+    d = synthetic()
+    nu2 = [np.column_stack([v, np.random.default_rng(9 + t).normal(size=v.shape[0])]) for t, v in enumerate(d["nu"])]
+    x1 = np.concatenate([X[:, 1] for X in d["X"]])
+    m = MixedLogitModel(d["markets"], d["X"], d["D"], d["w"], nu2, [], [1], d["shares"], threads=2, price_column=2,
+                        exp_column=2, exp_terms=(("D", 0), ("D", 0), ("nu", 1)),
+                        exp_offset=[np.full(h, 0.1) for h in (60, 60, 60)], product_columns={"x1": x1})
+    theta = np.array([1.1, -0.2, 0.3, 0.4])   # sigma_x1, then log-coefficient terms (two on income: one is a check)
+    assert m.P == 4 and m.theta_columns.tolist() == [1, 2, 2, 2]
+    t = 1
+    delta_t = d["delta"][t]
+    a = m.price_coefficients(theta, t)
+    np.testing.assert_allclose(a, -np.exp(0.1 + (-0.2 + 0.3) * d["D"][t][:, 0] + 0.4 * nu2[t][:, 1]))
+    w = d["w"][t]
+    _, ds_dt = m.share_derivatives(theta, t, m.probabilities(theta, t, delta_t))
+    assert rel_err(ds_dt, central_fd(lambda th: m.probabilities(th, t, delta_t) @ w, theta, 1e-6)) < 1e-7
+
+    def S(th: np.ndarray) -> np.ndarray:
+        return m.group_sums(th, t, m.probabilities(th, t, delta_t), ["x1"], False)["S"].ravel()
+
+    gs = m.group_sums(theta, t, m.probabilities(theta, t, delta_t), ["x1"], True)
+    assert rel_err(gs["d_theta"].reshape(-1, 4), central_fd(S, theta, 1e-6)) < 1e-7
+    X0 = d["X"][t].copy()
+
+    def shares_at_prices(p: np.ndarray) -> np.ndarray:
+        m.X[t] = X0.copy()
+        m.X[t][:, 2] = p
+        return m.probabilities(theta, t, delta_t) @ w
+
+    fd = central_fd(shares_at_prices, X0[:, 2], 1e-6)
+    m.X[t] = X0
+    assert rel_err(m.price_derivatives(theta, t, m.probabilities(theta, t, delta_t)), fd) < 1e-8
+    sol = m.solve(theta, KernelRequests(price_derivatives=True), True)
+    assert sol.status.value == "ok" and len(sol.D) == 3
+    np.testing.assert_array_equal(m.kernel_market(t).p, X0[:, 2])
+    assert m.spec.share_column == "shares" and m.products["shares"].shape == (d["n"],)
+    np.testing.assert_array_equal(sol.outputs["theta"], theta)
+    with pytest.raises(ValueError):
+        m.basis(t)
+    m.close()
+
+
 def test_group_sum_and_second_choice_partials_match_finite_differences() -> None:
     d = synthetic()
     x1 = np.concatenate([X[:, 1] for X in d["X"]])
