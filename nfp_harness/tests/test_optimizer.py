@@ -403,7 +403,9 @@ def test_two_step_gate_blocks_step2() -> None:
 # ------------------------------------------------------------------------------------------------
 
 
-def cue_toy(seed: int = 5) -> ToyProblem:
+def cue_toy(seed: int = 5, wiggle: Callable[[np.ndarray], float] | None = None) -> ToyProblem:
+    """A clustered CUE toy; ``wiggle(theta)`` (optional) shifts every residual by a common amount that the analytic
+    G and dV do not see."""
     rng = np.random.default_rng(seed)
     n, C = 120, 30
     clusters = np.repeat(np.arange(C), n // C)
@@ -414,7 +416,8 @@ def cue_toy(seed: int = 5) -> ToyProblem:
 
     def resid(t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         m = np.exp(X @ t)
-        return y - m, -(m[:, None] * X)  # e (n,), de/dtheta (n, P)
+        shift = 0.0 if wiggle is None else wiggle(t)
+        return y - m + shift, -(m[:, None] * X)  # e (n,), de/dtheta (n, P)
 
     def fn(t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         e, de = resid(t)
@@ -457,6 +460,19 @@ def test_cue_run_converges_to_stationary_point() -> None:
     V, dV = p.cue_terms(ev)
     grad = cue_gradient(ev, p.covariance(ev), V, dV, p.n)
     assert np.max(np.abs(grad)) <= res.pg_tol
+
+
+def test_cue_noise_floor_is_measured_and_floors_the_radius() -> None:
+    """The CUE toy with a common wiggle 0.01 sin(1e7 t0) in every residual, which neither G nor dV sees (like the
+    supply block's frontier jumps in log mc): the noise probes measure a floor under CUE as they do under a fixed W,
+    so the radius stays at noise_Delta_floor and the stage ends CONVERGED_NOISE through the terminal probe. Without a
+    floor under CUE (the GMY joint_cue runs), noise mode was off, the radius collapsed to Delta_min and the stage
+    ended STALLED with a large projected gradient."""
+    p = cue_toy(wiggle=lambda t: 0.01 * np.sin(1e7 * float(t[0])))
+    res = minimize(p, "cue", replace(NOISE_OPTS, Delta_0=0.1, noise_Delta_floor=1e-3))
+    assert math.isfinite(res.noise_floor) and res.noise_floor > 0
+    assert res.convergence is ConvergenceClass.CONVERGED_NOISE, (res.convergence, res.message)
+    assert all(h.Delta >= 1e-3 * (1 - 1e-12) for h in res.history)
 
 
 # ------------------------------------------------------------------------------------------------

@@ -490,18 +490,26 @@ def _record(stage: str, it: int, accepted: bool, q: float, ev: Evaluation | None
 def _probe_noise(problem: Any, obj: _Objective, theta: np.ndarray, ev: Evaluation, arr: dict[str, np.ndarray],
                  h: float, heartbeat: Any = None, path: Any = None, stage: str = "", it: int = 0) -> tuple[float, int]:
     """(noise floor, evaluations): the largest change of any block of q over evaluations at theta +- h unit_k for
-    every free k (no Jacobian), against the accepted point ``ev`` (fixed weighting; NaN under CUE). The model
-    is restored to the accepted state after every probe."""
-    if obj.mode == "cue" or obj.W is None:
+    every free k (no Jacobian), against the accepted point ``ev``. Under a fixed weighting a block's q is
+    ``n g_b' W_bb g_b``; under CUE it is the block's term ``n g_b' (S^{-1} g)_b`` of ``q = n g' S(theta)^{-1} g`` with
+    each point's own S (the terms sum to q). The model is restored to the accepted state after every probe."""
+    if obj.mode != "cue" and obj.W is None:
         return float("nan"), 0
     n = _n_of(problem, ev)
     W = obj.W
     blocks = dict(ev.blocks) or {"all": slice(0, ev.g.size)}
 
-    def block_q(g: np.ndarray) -> dict[str, float]:
+    def block_q_of(e: Evaluation) -> dict[str, float]:
+        g = e.g
+        if obj.mode == "cue":
+            a = _solve_sym(np.asarray(problem.covariance(e), dtype=float), g)
+            return {b: float(n * g[sl] @ a[sl]) for b, sl in blocks.items()}
         return {b: float(n * g[sl] @ W[sl, sl] @ g[sl]) for b, sl in blocks.items()}
 
-    base = block_q(ev.g)
+    try:
+        base = block_q_of(ev)
+    except (NotImplementedError, np.linalg.LinAlgError, ValueError):
+        return float("nan"), 0
     floor, nev = 0.0, 0
     for k in np.nonzero(arr["free"])[0]:
         for sgn in (1.0, -1.0):
@@ -516,7 +524,10 @@ def _probe_noise(problem: Any, obj: _Objective, theta: np.ndarray, ev: Evaluatio
                 heartbeat(path, it, stage=stage)
             if not e.ok or not np.all(np.isfinite(e.g)):
                 continue
-            qb = block_q(e.g)
+            try:
+                qb = block_q_of(e)
+            except (NotImplementedError, np.linalg.LinAlgError, ValueError):
+                continue
             floor = max(floor, max(abs(qb[b] - base[b]) for b in blocks))
     return floor, nev
 
