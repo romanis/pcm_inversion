@@ -1611,6 +1611,129 @@ def gmy_counterfactuals(make_demand: Any, markets: Sequence[Any], products: pd.D
                          "units": "prices and costs in the data's price units ($10k); CS per household in the same units"}}
 
 
+def _read_json(path: pathlib.Path) -> Any:
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def model_record(path: str | pathlib.Path) -> dict[str, Any]:
+    """One model's comparable numbers from a PCM run directory (post/summary.json, reports/<stage>/report.json,
+    counterfactuals/summary.json, cue_profile/profile.json) or an estimate_blp.py JSON (fit or same-moments)."""
+    p = pathlib.Path(path)
+    if p.is_dir():
+        post = _read_json(p / "post" / "summary.json") or {}
+        stage = post.get("estimate_stage", "cue")
+        rep = _read_json(p / "reports" / stage / "report.json") or {}
+        hj = rep.get("hansen_j") or {}
+        se = rep.get("standard_errors") or {}
+        cfs = _read_json(p / "counterfactuals" / "summary.json") or {}
+        return {"kind": "pcm", "source": str(p), "stage": stage, "convergence": post.get("convergence"),
+                "q": post.get("q"), "q_blocks": post.get("q_blocks"), "J": hj.get("J"), "df": hj.get("dof"),
+                "J_p": hj.get("p_value"), "theta": post.get("theta"), "se": se.get("se") or se.get("values"),
+                "se_note": se.get("reason"), "lerner_median_by_year": post.get("lerner_median_by_year"),
+                "own_elasticity_median": post.get("own_elasticity_median"), "micro": post.get("micro"),
+                "second_choice_rmse": post.get("second_choice_rmse"), "counterfactuals": cfs,
+                "profile": _read_json(p / "cue_profile" / "profile.json")}
+    d = _read_json(p) or {}
+    est = d.get("estimate")
+    if est is not None:   # same-moments
+        return {"kind": f"logit {d.get('design', {}).get('utility')}", "source": str(p), "q": est.get("q_cue"),
+                "q_blocks": est.get("q_blocks"), "J": est.get("q_cue"), "df": est.get("df"), "J_p": est.get("J_p_value"),
+                "theta": est.get("theta"), "se": (d.get("fit") or {}).get("se"),
+                "lerner_median_by_year": est.get("lerner_median_by_year"),
+                "own_elasticity_median": est.get("own_elasticity_median"),
+                "micro": [{"name": r["name"], "data": r["data"], "pcm": r["model"]} for r in est.get("micro", [])],
+                "counterfactuals": d.get("counterfactuals") or {}, "convergence": (d.get("fit") or {}).get("message")}
+    return {"kind": "logit GMY published/fit", "source": str(p), "q": d.get("q"), "theta": d.get("theta"),
+            "lerner_median_by_year": d.get("lerner_median_by_year"), "own_elasticity_median": None,
+            "micro": [{"name": r["name"], "data": r["data"], "pcm": r["model"]} for r in d.get("micro", [])],
+            "counterfactuals": d.get("counterfactuals") or {}, "convergence": (d.get("step1") or {}).get("message"),
+            "note": "q is GMY's step-1 objective (micro + second choice), not q_CUE on the PCM's moments"}
+
+
+def comparison_report(records: Mapping[str, Mapping[str, Any]]) -> str:
+    """Plain-text comparison of models (``model_record`` outputs): fit, Lerner by year, counterfactuals, micro rows."""
+    names = list(records)
+    w = max(14, *(len(n) for n in names))
+    out: list[str] = []
+
+    def row(label: str, vals: Sequence[Any], digits: int = 3) -> None:
+        out.append(f"{label:<44}" + "".join(f"{_fmt(v, digits):>{w + 2}}" for v in vals))
+
+    out.append(f"{'':<44}" + "".join(f"{n:>{w + 2}}" for n in names))
+    recs = [records[n] for n in names]
+    row("convergence", [str(r.get("convergence"))[:w] for r in recs])
+    row("q (q_CUE for joint CUE fits)", [r.get("q") for r in recs], 2)
+    row("Hansen J degrees of freedom", [r.get("df") for r in recs], 0)
+    row("J p-value", [r.get("J_p") for r in recs], 4)
+    blocks = sorted({b for r in recs for b in (r.get("q_blocks") or {})})
+    for b in blocks:
+        row(f"  q:{b}", [(r.get("q_blocks") or {}).get(b) for r in recs], 2)
+    row("a_lo (PCM)", [(r.get("theta") or {}).get("a_lo") for r in recs], 4)
+    row("a_lo se", [(r.get("se") or {}).get("a_lo") if isinstance(r.get("se"), dict) else None for r in recs], 4)
+    for r in recs:
+        pr = r.get("profile")
+        if pr:
+            out.append(f"a_lo CUE profile ({r['source']}): estimate {_fmt(pr.get('estimate'), 4)}, q "
+                       f"{_fmt(pr.get('q_estimate'), 2)}; " + ", ".join(f"{_fmt(x['value'], 3)}: {_fmt(x['q'], 2)}"
+                                                                   for x in pr.get("rows", []))
+                       + f"; within 3.84 of the minimum: {pr.get('lr_set_3_84')}")
+    row("own elasticity, median", [r.get("own_elasticity_median") for r in recs], 2)
+    cf = [r.get("counterfactuals") or {} for r in recs]
+    row("Lerner, median (all products)", [((c.get("lerner") or {}).get("all") or {}).get("median") for c in cf])
+    row("Lerner, sales-weighted mean",
+        [((c.get("lerner") or {}).get("all") or {}).get("sales_weighted_mean") for c in cf])
+    segs = sorted({s for c in cf for s in ((c.get("lerner") or {}).get("segment") or {})})
+    for s in segs:
+        row(f"  Lerner median, {s}", [(((c.get("lerner") or {}).get("segment") or {}).get(s) or {}).get("median")
+                                      for c in cf])
+    years = sorted({int(y) for r in recs for y in (r.get("lerner_median_by_year") or {})})
+    for y in years:
+        row(f"  Lerner median {y}", [_year_get(r.get("lerner_median_by_year") or {}, y) for r in recs])
+    scen = sorted({k for c in cf for k in (c.get("scenarios") or {})})
+    for k in scen:
+        vals = [(c.get("scenarios") or {}).get(k) for c in cf]
+        if k.startswith("removal_diversion"):
+            row(f"{k}: outside diversion, mean of top", [
+                float(np.mean([x["outside"] for x in v])) if isinstance(v, list) and v else None for v in vals])
+            continue
+        row(f"{k}: status", [None if v is None else str(v.get("status"))[:w] for v in vals])
+        if k.startswith("cost_shock"):
+            row("  pass-through, shocked products", [None if v is None else v.get("pass_through_own") for v in vals])
+            row("  rival price change", [None if v is None else v.get("rival_price_change") for v in vals], 4)
+        else:
+            row("  price change, affected (share-weighted)",
+                [None if v is None else (v.get("price_change_vs_baseline") or {}).get("affected") for v in vals], 4)
+            row("  price change, others", [None if v is None else (v.get("price_change_vs_baseline") or {}).get(
+                "others") for v in vals], 4)
+        row("  CS change per household ($10k)", [None if v is None else v.get("cs_change_vs_baseline") for v in vals],
+            4)
+    micro_names = [m["name"] for m in (next((r.get("micro") for r in recs if r.get("micro")), None) or [])]
+    if micro_names:
+        out.append("")
+        out.append("micro moments (data, then each model)")
+        for nm in micro_names:
+            data = next((m["data"] for r in recs for m in (r.get("micro") or []) if m["name"] == nm), None)
+            vals = [next((m.get("pcm") for m in (r.get("micro") or []) if m["name"] == nm), None) for r in recs]
+            row(f"  {nm[:34]} ({_fmt(data, 3)})", vals)
+    for n, r in records.items():
+        if r.get("note"):
+            out.append(f"note, {n}: {r['note']}")
+    return "\n".join(out)
+
+
+def compare_main(argv: Sequence[str]) -> None:
+    ap = argparse.ArgumentParser(description="compare PCM run directories and estimate_blp.py JSONs")
+    ap.add_argument("command")
+    ap.add_argument("--model", action="append", nargs=2, metavar=("LABEL", "PATH"), required=True,
+                    help="a label and a PCM run directory or an estimate_blp.py JSON (repeatable)")
+    ap.add_argument("--out", default=None, help="also write the table here")
+    args = ap.parse_args(argv)
+    text = comparison_report({lab: model_record(pth) for lab, pth in args.model})
+    print(text)
+    if args.out:
+        pathlib.Path(args.out).write_text(text + "\n")
+
+
 def comparison_table(pcm: Mapping[str, Mapping[str, Any]], blp: Mapping[str, Mapping[str, Any]],
               paper: Mapping[str, Any] | None = None) -> str:
     """comparison_table(pcm, blp, paper=None) -> the PCM-vs-BLP comparison table of the GMY spec (section 4) as
@@ -1816,6 +1939,9 @@ def evaluate(args: argparse.Namespace) -> None:
 
 def main() -> int:
     """``evaluate`` (one cold evaluation at the starting theta) or the pipeline's ``run`` / ``status``."""
+    if len(sys.argv) > 1 and sys.argv[1] == "compare":
+        compare_main(sys.argv[1:])
+        return 0
     if len(sys.argv) > 1 and sys.argv[1] == "evaluate":
         ap = argparse.ArgumentParser(description="evaluate the GMY PCM problem once at the starting theta (cold)")
         ap.add_argument("command")
