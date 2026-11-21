@@ -37,7 +37,7 @@ class NFPGMMProblem:
     ``q`` and ``q_blocks`` (with the current W), ``micro_predicted`` / ``micro_data`` per micro block,
     ``per_market``, and the raw ``solution`` (InnerSolution) and ``linear_fit`` (LinearFit).
 
-    Supply moments (at most one block with ``is_supply``, e.g. ``moments.SupplyMoments``) add the cost
+    Supply moments (blocks with ``is_supply``, e.g. ``moments.SupplyMoments``) add the cost
     coefficients gamma as concentrated linear parameters. With W block diagonal, beta is concentrated with
     the aggregate block (``linear``) and gamma with the supply block. When W couples the aggregate and supply
     rows (step 2 with the cross terms of S), (beta, gamma) are concentrated jointly:
@@ -47,6 +47,12 @@ class NFPGMMProblem:
     ``linear_coefficients`` = [beta, gamma], ``linear_names_all`` and ``supply`` (markup diagnostics). A
     supply block that cannot be evaluated (singular ownership Jacobian, mc <= 0) gives status NUMERICAL with
     the reason in ``aux["note"]``.
+
+    Several supply blocks (e.g. log-cost levels on cost and markup shifters beside within-model differences) share
+    one log mc, computed once by the first block, and one gamma over the union of their named cost columns (a
+    column named in two blocks gets one coefficient). Each keeps its own 2SLS weight block; gamma is concentrated
+    jointly over all supply rows (``_multi_projection``), with beta joining it when W couples the aggregate rows.
+    ``aux["omega_blocks"]`` holds each block's omega. With one supply block nothing here changes.
 
     ``max_step`` exists on the instance only when the model has ``max_step`` (and ``max_step=True``), so
     the optimizer's ``hasattr`` check sees the model's capability.
@@ -100,25 +106,43 @@ class NFPGMMProblem:
         # unknown: ``linear`` still fits it at every delta (its own default weighting) for xi and the reports.
         self.agg: Any = self.aggregate[0] if self.aggregate else None
         self.agg_rows = self.blocks[self.agg.name] if self.agg is not None else slice(0, 0)
-        supply = [m for m in self.moments if getattr(m, "is_supply", False)]
-        if len(supply) > 1:
-            raise ValueError(f"at most one supply moment block, got {len(supply)}")
+        supply: list[Any] = [m for m in self.moments if getattr(m, "is_supply", False)]
+        # several supply blocks (e.g. levels and within-model differences) share one log mc and one gamma
+        self.supplies: list[Any] = supply
         self.supply: Any = supply[0] if supply else None
         self.supply_rows: slice | None = self.blocks[self.supply.name] if self.supply is not None else None
+        self.gamma_names: tuple[str, ...] = tuple(self.supply.names) if self.supply is not None else ()
+        self._gamma_cols: dict[str, np.ndarray] = {}
+        if len(supply) > 1:
+            self._check_supply_blocks()
         # the step-2 W keeps the aggregate-supply cross terms of S only where they can be concentrated jointly
-        # (plain IVMoments); with SarganIVMoments W2 is block diagonal across the two blocks
-        self.coupled_blocks: tuple[tuple[str, ...], ...] = (
-            ((self.agg.name, self.supply.name),) if self.supply is not None and self.agg is not None
-            and type(self.agg) is IVMoments else ())
+        # (plain IVMoments); with SarganIVMoments W2 is block diagonal between the aggregate and supply blocks
+        sup_names = tuple(m.name for m in supply)
+        plain_agg = self.agg is not None and type(self.agg) is IVMoments
+        if len(supply) > 1:
+            self.coupled_blocks: tuple[tuple[str, ...], ...] = (
+                ((self.agg.name,) + sup_names,) if plain_agg else (sup_names,))
+        else:
+            self.coupled_blocks = (((self.agg.name, self.supply.name),) if self.supply is not None and plain_agg
+                                   else ())
         self._joint: dict[str, Any] | None = None
+        self._multi: dict[str, Any] | None = None
         if self.supply is not None:
             try:
                 units = np.asarray(layout.units(), dtype=float)
             except ValueError:
                 units = None
-            self.supply.bind(model, self.P, units=units)
-            if self.supply.n != self.n:
-                raise ValueError(f"supply block has {self.supply.n} rows, model has {self.n} products")
+            for sup in supply:
+                sup.bind(model, self.P, units=units)
+                if sup.n != self.n:
+                    raise ValueError(f"supply block {sup.name!r} has {sup.n} rows, model has {self.n} products")
+        for m in self.moments:   # blocks that read the supply side's log mc through their own cost object
+            if hasattr(m, "bind_costs"):
+                try:
+                    units_c = np.asarray(layout.units(), dtype=float)
+                except ValueError:
+                    units_c = None
+                m.bind_costs(model, self.P, units=units_c)
         if isinstance(linear, LinearIV) and self.agg is not None:
             Z = getattr(self.agg, "Z")
             if Z.shape != linear.Z.shape or not np.array_equal(Z, linear.Z):
@@ -144,6 +168,7 @@ class NFPGMMProblem:
         self.evaluate_only = bool(evaluate_only)
         self.identification = self.check_identification(raise_error=not self.evaluate_only)
 
+        self._jointcfg: dict[str, Any] | None = None   # set_joint
         self.W: np.ndarray
         self.W_provenance = ""
         if W is None:
@@ -151,8 +176,8 @@ class NFPGMMProblem:
             if self.agg is not None:
                 W[self.agg_rows, self.agg_rows] = getattr(linear, "W_aa",
                                                           np.eye(self.agg_rows.stop - self.agg_rows.start))
-            if self.supply is not None:
-                W[self.supply_rows, self.supply_rows] = self.supply.W_ss
+            for sup in self.supplies:
+                W[self.blocks[sup.name], self.blocks[sup.name]] = sup.W_ss
             self.set_weighting(W)
             self.W_provenance = "default: aggregate block of the linear fit, identity on micro rows"
         else:
@@ -165,6 +190,38 @@ class NFPGMMProblem:
 
     # ------------------------------------------------------------------ setup checks
 
+    def _check_supply_blocks(self) -> None:
+        """Several supply blocks: they must compute the same log mc (same firms, floor, rcond and finite-difference
+        rule, so the first block's ``log_costs`` serves all) and a cost column named in more than one block must be
+        the same column. ``gamma_names`` is the union of the blocks' names in order of first appearance and
+        ``_gamma_cols[name]`` maps each block's columns into it."""
+        first = self.supplies[0]
+        for sup in self.supplies[1:]:
+            for attr in ("rcond_min", "fd_step", "fd_shrink", "fd_scale", "mc_floor"):
+                if getattr(sup, attr) != getattr(first, attr):
+                    raise ValueError(f"supply blocks {first.name!r} and {sup.name!r} differ in {attr}; they must "
+                                     f"compute one log mc")
+            if not np.array_equal(sup.firm_ids, first.firm_ids):
+                raise ValueError(f"supply blocks {first.name!r} and {sup.name!r} use different firm ids")
+        names: list[str] = []
+        column: dict[str, np.ndarray] = {}
+        for sup in self.supplies:
+            for k, nm in enumerate(sup.names):
+                if nm in column:
+                    if not np.array_equal(column[nm], sup.w[:, k]):
+                        raise ValueError(f"cost column {nm!r} differs between supply blocks; shared gamma needs "
+                                         f"the same column")
+                else:
+                    column[nm] = sup.w[:, k]
+                    names.append(nm)
+        self.gamma_names = tuple(names)
+        self._gamma_cols = {sup.name: np.array([names.index(nm) for nm in sup.names], dtype=int)
+                            for sup in self.supplies}
+
+    @property
+    def K_supply(self) -> int:
+        """Number of concentrated cost coefficients over all supply blocks (shared columns counted once)."""
+        return len(self.gamma_names) if self.supplies else 0
     def check_identification(self, raise_error: bool = True) -> dict[str, Any]:
         """Count moments against unknowns and refuse (``IdentificationError``) when they cannot identify them.
 
@@ -175,13 +232,13 @@ class NFPGMMProblem:
         """
         Z = getattr(self.agg, "Z") if self.agg is not None else np.zeros((self.n, 0))
         rank_z = matrix_rank(Z)
-        k_micro = sum(int(getattr(m, "k")) for m in self.moments if m is not self.agg and m is not self.supply)
+        k_micro = sum(int(getattr(m, "k")) for m in self.moments if m is not self.agg and m not in self.supplies)
         p_free = self.layout.n_free()
         k_linear = int(getattr(self.linear, "n_linear", 0)) if self.agg is not None else 0
         k_supply = 0
         if self.supply is not None:
-            k_supply = matrix_rank(self.supply.Z)
-            k_linear += int(self.supply.K)
+            k_supply = sum(matrix_rank(sup.Z) for sup in self.supplies)
+            k_linear += self.K_supply
         effective = rank_z + k_micro + k_supply
         unknowns = p_free + k_linear
         info = {
@@ -255,7 +312,22 @@ class NFPGMMProblem:
             aux["supply"] = _supply_summary(s_info)
 
         joint = None
-        if self._joint is not None:
+        if self._jointcfg is not None:
+            try:
+                joint = self._joint_product_fit(sol, delta, D_full, y_s, dy_s)
+            except SupplyDomainError as exc:
+                aux["note"] = str(exc)
+                return self._failed(theta, EvalStatus.NUMERICAL, t0, aux)
+            except np.linalg.LinAlgError as exc:
+                aux["note"] = f"joint product-level covariance: {exc}"
+                return self._failed(theta, EvalStatus.NUMERICAL, t0, aux)
+            fit = joint["fit"]
+            aux["joint"] = joint["aux"]
+        elif self._multi is not None:
+            assert y_s is not None
+            joint = self._multi_fit(delta, D_full, y_s, dy_s)
+            fit = joint["fit"]
+        elif self._joint is not None:
             assert y_s is not None
             joint = self._joint_fit(delta, D_full, y_s, dy_s)
             fit = joint["fit"]
@@ -270,7 +342,7 @@ class NFPGMMProblem:
             with np.errstate(divide="raise", invalid="raise", over="raise", under="ignore"):
                 for m in self.moments:
                     rows = self.blocks[m.name]
-                    if joint is not None and (m is self.agg or m is sup):
+                    if joint is not None and m.name in joint["rows_of"]:
                         sel = joint["rows_of"][m.name]
                         g[rows] = joint["g"][sel]
                         if G is not None:
@@ -289,12 +361,18 @@ class NFPGMMProblem:
                             G[rows] += blk.d_delta @ D_full
                 if sup is not None:
                     assert y_s is not None
-                    gamma, omega = (joint["gamma"], joint["omega"]) if joint is not None else sup.concentrate(y_s)
+                    gamma, omega = ((joint["gamma"], joint["omega"]) if joint is not None and "gamma" in joint
+                                    else sup.concentrate(y_s))
                     aux.update(gamma=gamma, omega=omega, log_mc=y_s,
                                linear_coefficients=np.r_[fit.beta, gamma],
-                               linear_names_all=tuple(fit.names) + tuple(sup.names))
+                               linear_names_all=tuple(fit.names) + tuple(self.gamma_names))
+                    if joint is not None and "omega_blocks" in joint:
+                        aux["omega_blocks"] = joint["omega_blocks"]
         except (FloatingPointError, ZeroDivisionError) as exc:
             aux["note"] = f"floating point error in moments: {exc}"
+            return self._failed(theta, EvalStatus.NUMERICAL, t0, aux)
+        except SupplyDomainError as exc:   # a block with its own cost object (e.g. event cost continuity)
+            aux["note"] = str(exc)
             return self._failed(theta, EvalStatus.NUMERICAL, t0, aux)
 
         if not np.all(np.isfinite(g)) or (G is not None and not np.all(np.isfinite(G))):
@@ -309,8 +387,11 @@ class NFPGMMProblem:
             extra = getattr(m, "aux_summary", None)
             if callable(extra):
                 aux[m.name] = extra(sol)
-        aux["q"] = self.objective(g)
-        aux["q_blocks"] = {name: float(self.n * g[s] @ self.W[s, s] @ g[s]) for name, s in self.blocks.items()}
+        if self._jointcfg is not None:
+            aux.update(self._joint_q(g, aux["joint"]))
+        else:
+            aux["q"] = self.objective(g)
+            aux["q_blocks"] = {name: float(self.n * g[s] @ self.W[s, s] @ g[s]) for name, s in self.blocks.items()}
         return Evaluation(theta=theta, g=g, G=G, status=EvalStatus.OK, blocks=dict(self.blocks), aux=aux,
                           seconds=time.perf_counter() - t0)
 
@@ -335,6 +416,323 @@ class NFPGMMProblem:
         fit = LinearFit(names=tuple(self.linear.names), beta=beta, xi=xi, M=None)
         return {"fit": fit, "gamma": gamma, "omega": y - sup.w @ gamma, "g": g, "G": G, "rows_of": j["rows_of"]}
 
+    def _multi_projection(self, include_agg: bool) -> dict[str, Any]:
+        """Several supply blocks: gamma (the union of their cost columns) is concentrated jointly over every supply
+        row, ``b = (X'W_R X)^{-1} X'W_R m`` with block b's rows of X equal to ``Z_b'w_b/n`` in its own columns of
+        gamma, so a column two blocks share gets one coefficient. With ``include_agg`` (W couples the aggregate and
+        supply rows) beta joins b as in ``_joint_projection``."""
+        K = int(self.linear.K) if include_agg else 0
+        Ks = self.K_supply
+        idx_parts, rows_of, X_parts = [], {}, []
+        start = 0
+        if include_agg:
+            if type(self.agg) is not IVMoments or not isinstance(self.linear, LinearIV):
+                raise ValueError("a W coupling aggregate and supply rows needs plain IVMoments and LinearIV")
+            a = self.agg_rows
+            ka = a.stop - a.start
+            Xa = np.zeros((ka, K + Ks))
+            Xa[:, :K] = self.linear.ZtX1 / self.n
+            X_parts.append(Xa)
+            idx_parts.append(np.arange(a.start, a.stop))
+            rows_of[self.agg.name] = slice(0, ka)
+            start = ka
+        for sup in self.supplies:
+            s = self.blocks[sup.name]
+            Xb = np.zeros((sup.k, K + Ks))
+            Xb[:, K + self._gamma_cols[sup.name]] = sup.ZtW
+            X_parts.append(Xb)
+            idx_parts.append(np.arange(s.start, s.stop))
+            rows_of[sup.name] = slice(start, start + sup.k)
+            start += sup.k
+        idx = np.concatenate(idx_parts)
+        X = np.vstack(X_parts)
+        W_R = self.W[np.ix_(idx, idx)]
+        B = X.T @ W_R
+        Pj = np.linalg.solve(B @ X, B)
+        return {"X": X, "Pj": Pj, "rows_of": rows_of, "K": K, "include_agg": include_agg}
+
+    def _multi_fit(self, delta: np.ndarray, D_full: np.ndarray | None, y: np.ndarray, dy: np.ndarray | None
+                   ) -> dict[str, Any]:
+        """The joint fit of ``_multi_projection``: moments and Jacobian rows of the blocks it covers, gamma, the
+        first supply block's omega (``omega``) and each block's (``omega_blocks``)."""
+        j = self._multi
+        assert j is not None
+        n, K = self.n, j["K"]
+        m_parts, dm_parts = [], []
+        if j["include_agg"]:
+            Z = getattr(self.agg, "Z")
+            m_parts.append(Z.T @ delta / n)
+            if D_full is not None:
+                dm_parts.append(Z.T @ D_full / n)
+        for sup in self.supplies:
+            m_parts.append(sup.Z.T @ y / n)
+            if D_full is not None:
+                assert dy is not None
+                dm_parts.append(sup.Z.T @ dy / n)
+        m = np.concatenate(m_parts)
+        b = j["Pj"] @ m
+        g = m - j["X"] @ b
+        G = None
+        if D_full is not None:
+            dm = np.vstack(dm_parts)
+            G = dm - j["X"] @ (j["Pj"] @ dm)
+        gamma = b[K:]
+        if j["include_agg"]:
+            beta = b[:K]
+            fit = LinearFit(names=tuple(self.linear.names), beta=beta, xi=delta - self.linear.X1 @ beta, M=None)
+        else:
+            fit = self.linear.fit(delta)
+        omegas = {sup.name: y - sup.w @ gamma[self._gamma_cols[sup.name]] for sup in self.supplies}
+        return {"fit": fit, "gamma": gamma, "omega": omegas[self.supply.name], "omega_blocks": omegas, "g": g,
+                "G": G, "rows_of": j["rows_of"]}
+
+    # ------------------------------------------------------------------ joint product-level weighting
+
+    def set_joint(self, mode: str | None) -> None:
+        """Joint product-level weighting: one clustered covariance over every product-level block and one GLS
+        concentration of (beta, gamma) under it. ``mode``: ``"cue"`` (the product-level weight is ``S_P(theta)^-1`` at
+        every theta), ``"fixed"`` (the product-level block of ``self.W``, e.g. W1 or a step-2 ``S_P(theta_1)^-1``), or
+        None (off: the separate concentration of the class docstring).
+
+        Product-level blocks are the aggregate block and the first-difference demand blocks on xi (plain
+        ``IVMoments`` forms: under CUE a block's scale cancels, so the Sargan form adds nothing, and its scale makes the
+        concentration nonlinear), the supply blocks on omega, and the ownership-event blocks on log mc. Micro,
+        second-choice and calibration rows stay block diagonal against them with their own covariances (independent
+        surveys). Every product-level block is clustered by the aggregate block's ids (the model): a first-difference
+        row belongs to the cluster of its model, an event pair to the cluster of its product.
+
+        Stacking the blocks' moments as ``m_P(theta) - X_P b`` with ``b = [beta, gamma]`` (an xi block has ``X = Z'X1/n``
+        in the beta columns, a supply block ``Z_s'w/n`` in its gamma columns, an event block none), the covariance is
+        ``S_P = V'V/n`` with V the (C, k_P) per-cluster sums of the products' contributions at the separate 2SLS
+        residuals ``b0(theta) = P0 m_P`` (beta on the aggregate block, gamma on the supply blocks, each with its 2SLS
+        weight; an event pair contributes its deviation from its group's mean change). Then ``b = argmin_b
+        (m_P - X_P b)'W_P(m_P - X_P b)`` in one GLS step, so ``g_P = m_P - X_P b`` and ``G_P = dm_P - X_P P_b dm_P`` with
+        ``P_b`` the GLS map at fixed W. Under CUE the exact gradient of ``q = n g'S^-1 g`` is ``2 n G'S^-1 g - n a'dS a``
+        (``a = S^-1 g``, ``dS`` from ``dV`` at ``b0``): the GLS first-order condition removes db/dtheta, and
+        ``weighting.cue_objective`` / ``optimizer.cue_gradient`` evaluate it from ``cue_terms``.
+
+        A moment row carried by a single cluster (an X1 dummy of a make with one model) has a contribution equal to its
+        total, so its variance cannot be estimated (at OLS it is exactly zero, and under CUE the row's q does not
+        depend on its value). Such rows are exact constraints: the GLS step sets them to zero (KKT) and S holds them at
+        the identity, so they add no term to q and take one unknown each. With W block diagonal over the aggregate and
+        supply blocks (and no single-cluster rows) the joint step is the separate concentration exactly; a
+        first-difference demand block then also informs beta, which the separate path does not let it do."""
+        if mode is None:
+            self._jointcfg = None
+            self.set_weighting(self.W)
+            return
+        if mode not in ("cue", "fixed"):
+            raise ValueError(f"joint mode must be 'cue', 'fixed' or None, got {mode!r}")
+        if self.agg is None or type(self.agg) is not IVMoments or not isinstance(self.linear, LinearIV):
+            raise ValueError("joint product-level weighting needs a plain IVMoments aggregate block and LinearIV")
+        ids = getattr(self.agg, "clustering_ids", None)
+        if ids is None:
+            ids = np.arange(self.n)
+        uniq, codes = np.unique(np.asarray(ids), return_inverse=True)
+        C = uniq.size
+        import scipy.sparse as sp
+
+        Cmat = sp.csr_matrix((np.ones(self.n), (codes, np.arange(self.n))), shape=(C, self.n))
+        K, Ks = int(self.linear.K), self.K_supply
+        nb = K + Ks
+        blocks: list[dict[str, Any]] = []
+        start = 0
+        for m in self.moments:
+            if m in self.micro or getattr(m, "is_calibration", False):
+                continue
+            if m is self.agg or getattr(m, "is_difference", False):
+                if isinstance(m, SarganIVMoments):
+                    raise ValueError(f"joint weighting: block {m.name!r} is in Sargan form; use the plain IV form")
+                kind, Zb = "xi", np.asarray(getattr(m, "Z"), dtype=float)
+                X = np.zeros((m.k, nb))
+                X[:, :K] = Zb.T @ self.linear.X1 / self.n
+            elif m in self.supplies:
+                kind, Zb = "omega", m.Z
+                X = np.zeros((m.k, nb))
+                X[:, K + self._gcols(m)] = m.ZtW
+            elif hasattr(m, "cluster_terms") and hasattr(m, "costs") and hasattr(m, "L"):
+                kind, Zb = "event", None
+                X = np.zeros((m.k, nb))
+            else:
+                raise NotImplementedError(f"joint weighting: no product-level covariance for block {m.name!r}")
+            cid = getattr(m, "clustering_ids", None)
+            if cid is not None and not np.array_equal(np.asarray(cid), np.asarray(ids)):
+                raise ValueError(f"joint weighting: block {m.name!r} uses other clusters than the aggregate block")
+            single = np.zeros(m.k, dtype=bool)
+            if Zb is not None:
+                support = np.asarray(Cmat @ (np.abs(Zb) > 0).astype(float)) > 0
+                single = support.sum(axis=0) <= 1
+            blocks.append({"m": m, "kind": kind, "Z": Zb, "X": X, "rows": slice(start, start + m.k),
+                           "full": self.blocks[m.name], "single": single})
+            start += m.k
+        kP = start
+        X_P = np.vstack([b["X"] for b in blocks])
+        P_idx = np.concatenate([np.arange(b["full"].start, b["full"].stop) for b in blocks])
+        K0 = np.flatnonzero(np.concatenate([b["single"] for b in blocks]))
+        R = np.setdiff1d(np.arange(kP), K0)
+        if K0.size and matrix_rank(X_P[K0]) < K0.size:
+            raise IdentificationError(f"joint weighting: {K0.size} single-cluster moment rows do not each pin a linear "
+                                      f"coefficient (rank {matrix_rank(X_P[K0])})")
+        # b0: the separate 2SLS concentration (aggregate rows for beta, supply rows for gamma)
+        W0 = np.zeros((kP, kP))
+        for b in blocks:
+            if b["m"] is self.agg or b["kind"] == "omega":
+                r = b["rows"]
+                W0[r, r] = np.linalg.inv(b["Z"].T @ b["Z"] / self.n)
+        B0 = X_P.T @ W0
+        P0 = np.linalg.solve(B0 @ X_P, B0)
+        self._jointcfg = {"mode": mode, "blocks": blocks, "kP": kP, "X_P": X_P, "P_idx": P_idx, "K0": K0, "R": R,
+                          "P0": P0, "Cmat": Cmat, "C": C, "K": K, "Ks": Ks,
+                          "rows_of": {b["m"].name: b["rows"] for b in blocks}}
+        if mode == "cue":   # q_blocks of the other rows read W: their weight is S^-1 of their fixed covariance
+            from .weighting import weight_from_covariance
+
+            W = self.W.copy()
+            for m in self.micro + self.calibration:
+                fixed = getattr(m, "fixed_covariance", None)
+                cov = (self.n * fixed if m in self.micro else np.atleast_2d(m.covariance_block(None, None)))
+                if m in self.micro and fixed is None:
+                    raise NotImplementedError(f"joint CUE needs a fixed covariance for micro block {m.name!r}")
+                rows = self.blocks[m.name]
+                W[rows, rows] = weight_from_covariance(cov)
+            self.W = W
+        self.set_weighting(self.W)
+
+    def _gcols(self, sup: Any) -> np.ndarray:
+        """Columns of gamma (in ``gamma_names`` order) of supply block ``sup``."""
+        if len(self.supplies) > 1:
+            return self._gamma_cols[sup.name]
+        return np.arange(sup.K)
+
+    @staticmethod
+    def _gls_map(X_P: np.ndarray, W_R: np.ndarray, R: np.ndarray, K0: np.ndarray) -> np.ndarray:
+        """(nb, k_P) map P_b: ``b = P_b m_P`` minimises ``(m - X b)_R' W_R (m - X b)_R`` subject to ``(m - X b)_K0 = 0``."""
+        nb, kP = X_P.shape[1], X_P.shape[0]
+        XR, X0 = X_P[R], X_P[K0]
+        k0 = K0.size
+        KKT = np.zeros((nb + k0, nb + k0))
+        KKT[:nb, :nb] = XR.T @ W_R @ XR
+        KKT[:nb, nb:] = X0.T
+        KKT[nb:, :nb] = X0
+        rhs = np.zeros((nb + k0, kP))
+        rhs[:nb, R] = XR.T @ W_R
+        rhs[nb:, K0] = np.eye(k0)
+        return np.linalg.solve(KKT, rhs)[:nb]
+
+    def _joint_product_fit(self, sol: InnerSolution, delta: np.ndarray, D_full: np.ndarray | None,
+                           y: np.ndarray | None, dy: np.ndarray | None) -> dict[str, Any]:
+        """The joint product-level evaluation of ``set_joint``: moments and Jacobian rows of every product-level block,
+        the fit, gamma, omega, and the covariance terms (``aux["joint"]``)."""
+        j = self._jointcfg
+        assert j is not None
+        n, K = self.n, j["K"]
+        X1 = self.linear.X1
+        need = D_full is not None
+        for b in j["blocks"]:
+            if b["kind"] == "event" and y is None:
+                y, dy, _ = b["m"].costs.log_costs(sol, need)
+        m_parts, dm_parts = [], []
+        for b in j["blocks"]:
+            if b["kind"] == "xi":
+                m_parts.append(b["Z"].T @ delta / n)
+                if need:
+                    dm_parts.append(b["Z"].T @ D_full / n)
+            elif b["kind"] == "omega":
+                m_parts.append(b["Z"].T @ y / n)
+                if need:
+                    dm_parts.append(b["Z"].T @ dy / n)
+            else:
+                m_parts.append(b["m"].L @ y)
+                if need:
+                    dm_parts.append(b["m"].L @ dy)
+        m_P = np.concatenate(m_parts)
+        dm_P = np.vstack(dm_parts) if need else None
+        b0 = j["P0"] @ m_P
+        db0 = j["P0"] @ dm_P if need else None
+        xi0 = delta - X1 @ b0[:K]
+        dxi0 = D_full - X1 @ db0[:K] if need else None
+        Cmat, C, kP, P = j["Cmat"], j["C"], j["kP"], self.P
+        V = np.zeros((C, kP))
+        dV = np.zeros((C, kP, P)) if need else None
+        for b in j["blocks"]:
+            r, m = b["rows"], b["m"]
+            if b["kind"] == "event":
+                Ve, dVe = m.cluster_terms(y, dy if need else None, Cmat, n)
+                V[:, r] = Ve
+                if need:
+                    dV[:, r, :] = dVe
+                continue
+            if b["kind"] == "xi":
+                e, de = xi0, dxi0
+            else:
+                gc = K + self._gcols(m)
+                e = y - m.w @ b0[gc]
+                de = dy - m.w @ db0[gc] if need else None
+            Zb = b["Z"]
+            V[:, r] = Cmat @ (Zb * e[:, None])
+            if need:
+                dV[:, r, :] = (Cmat @ (Zb[:, :, None] * de[:, None, :]).reshape(n, -1)).reshape(C, m.k, P)
+        K0, R = j["K0"], j["R"]
+        V[:, K0] = 0.0
+        if need:
+            dV[:, K0, :] = 0.0
+        S_P = V.T @ V / n
+        S_P = 0.5 * (S_P + S_P.T)
+        if j["mode"] == "cue":
+            from .weighting import weight_from_covariance
+
+            W_R = weight_from_covariance(S_P[np.ix_(R, R)])
+        else:
+            W_R = self.W[np.ix_(j["P_idx"][R], j["P_idx"][R])]
+        Pb = self._gls_map(j["X_P"], W_R, R, K0)
+        bb = Pb @ m_P
+        g_P = m_P - j["X_P"] @ bb
+        g_P[K0] = 0.0
+        G_P = None
+        if need:
+            G_P = dm_P - j["X_P"] @ (Pb @ dm_P)
+            G_P[K0] = 0.0
+        beta, gamma = bb[:K], bb[K:]
+        fit = LinearFit(names=tuple(self.linear.names), beta=beta, xi=delta - X1 @ beta, M=None)
+        out: dict[str, Any] = {"fit": fit, "g": g_P, "G": G_P, "rows_of": j["rows_of"],
+                               "aux": {"V": V, "dV": dV, "S_P": S_P, "W_R": W_R, "b0": b0}}
+        if self.supplies:
+            omegas = {sup.name: y - sup.w @ gamma[self._gcols(sup)] for sup in self.supplies}
+            out.update(gamma=gamma, omega=omegas[self.supply.name], omega_blocks=omegas)
+        return out
+
+    def _joint_W(self, jaux: dict[str, Any]) -> np.ndarray:
+        """The (k, k) weight of a joint evaluation: W_R on the product rows (zero on single-cluster rows), the
+        problem's W on the others."""
+        j = self._jointcfg
+        assert j is not None
+        W = self.W.copy()
+        P_idx = j["P_idx"]
+        W[np.ix_(P_idx, P_idx)] = 0.0
+        PR = P_idx[j["R"]]
+        W[np.ix_(PR, PR)] = jaux["W_R"]
+        return W
+
+    def _joint_q(self, g: np.ndarray, jaux: dict[str, Any]) -> dict[str, Any]:
+        """q, ``q_blocks`` (each block's term ``n g_b'(W g)_b``; they sum to q) and ``q_blocks_own`` (``n g_b'S_bb^-1
+        g_b``, the block at its own efficient weight) of a joint evaluation."""
+        W = self._joint_W(jaux)
+        Wg = W @ g
+        q = float(self.n * g @ Wg)
+        q_blocks = {name: float(self.n * g[s] @ Wg[s]) for name, s in self.blocks.items()}
+        own: dict[str, float] = {}
+        j = self._jointcfg
+        assert j is not None
+        S_P, K0 = jaux["S_P"], set(j["K0"].tolist())
+        for b in j["blocks"]:
+            r = [i for i in range(b["rows"].start, b["rows"].stop) if i not in K0]
+            gb = g[j["P_idx"][r]]
+            try:
+                own[b["m"].name] = float(self.n * gb @ np.linalg.solve(S_P[np.ix_(r, r)], gb))
+            except np.linalg.LinAlgError:
+                own[b["m"].name] = float("nan")
+        return {"q": q, "q_blocks": q_blocks, "q_blocks_own": own}
+
     # ------------------------------------------------------------------ covariance and weighting
 
     def _covariance_solution(self, ev: Evaluation) -> InnerSolution:
@@ -357,21 +755,67 @@ class NFPGMMProblem:
         """covariance(ev) -> S(theta) = blockdiag(S_aggregate, n V_micro), (k, k)."""
         if not ev.ok:
             raise ValueError(f"covariance needs an OK evaluation, got {ev.status.value}")
+        if self._jointcfg is not None:
+            return self._joint_covariance(ev)
         fit: LinearFit = ev.aux["linear_fit"]
         sol_cov = self._covariance_solution(ev) if self.micro else ev.aux["solution"]
         parts = []
+        omegas = ev.aux.get("omega_blocks") or {}
         for m in self.moments:
             if getattr(m, "is_micro", False):
                 parts.append(self.n * m.covariance_block(sol_cov, fit))
-            elif m is self.supply:
-                parts.append(m.covariance_from(ev.aux["omega"]))
+            elif m in self.supplies:
+                parts.append(m.covariance_from(omegas.get(m.name, ev.aux["omega"])))
             else:
                 parts.append(m.covariance_block(ev.aux["solution"], fit))
         S = scipy.linalg.block_diag(*parts)
-        if self.supply is not None:
+        if len(self.supplies) > 1:
+            self._supply_cross_terms(S, fit.xi, omegas)
+        elif self.supply is not None:
             cross = self.supply_cross_covariance(fit.xi, ev.aux["omega"])
             S[self.agg_rows, self.supply_rows] = cross
             S[self.supply_rows, self.agg_rows] = cross.T
+        return 0.5 * (S + S.T)
+
+    def _supply_cross_terms(self, S: np.ndarray, xi: np.ndarray, omegas: dict[str, np.ndarray]) -> None:
+        """Several supply blocks: write the clustered cross covariances between every pair of supply blocks and
+        between the aggregate block and each of them into S (in place). All blocks must share the clusters."""
+        ids = self.supply.clustering_ids
+        for sup in self.supplies:
+            if (sup.clustering_ids is None) != (ids is None) or (ids is not None
+                                                                 and not np.array_equal(sup.clustering_ids, ids)):
+                raise ValueError("supply blocks use different clusters; their cross covariance is not defined")
+        V = {sup.name: cluster_sums(sup.Z * omegas[sup.name][:, None], ids) for sup in self.supplies}
+        names = [sup.name for sup in self.supplies]
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                c = V[a].T @ V[b] / self.n
+                S[self.blocks[a], self.blocks[b]] = c
+                S[self.blocks[b], self.blocks[a]] = c.T
+        if self.agg is not None:
+            ids_a = getattr(self.agg, "clustering_ids", None)
+            if (ids_a is None) != (ids is None) or (ids_a is not None and not np.array_equal(ids_a, ids)):
+                raise ValueError("aggregate and supply moments use different clusters; their cross covariance is "
+                                 "not defined")
+            Z = getattr(self.agg, "Z")
+            Va = cluster_sums(Z * xi[:, None], ids_a)
+            scale = float(np.sqrt(xi @ xi / self.n)) if isinstance(self.agg, SarganIVMoments) else 1.0
+            for b in names:
+                c = Va.T @ V[b] / self.n / scale
+                S[self.agg_rows, self.blocks[b]] = c
+                S[self.blocks[b], self.agg_rows] = c.T
+
+    def _joint_covariance(self, ev: Evaluation) -> np.ndarray:
+        """S(theta) of a joint evaluation: ``S_P = V'V/n`` on the product rows (identity on single-cluster rows) and
+        ``cue_fixed_covariance`` (micro, second choice, calibration) elsewhere."""
+        j = self._jointcfg
+        assert j is not None
+        S = self.cue_fixed_covariance(ev)
+        P_idx = j["P_idx"]
+        jS = ev.aux["joint"]["S_P"].copy()
+        jS[j["K0"], :] = 0.0
+        jS[:, j["K0"]] = 0.0
+        S[np.ix_(P_idx, P_idx)] += jS
         return 0.5 * (S + S.T)
 
     def supply_cross_covariance(self, xi: np.ndarray, omega: np.ndarray) -> np.ndarray:
@@ -410,11 +854,11 @@ class NFPGMMProblem:
         if self.agg is not None:
             Z = getattr(self.agg, "Z")
             W[self.agg_rows, self.agg_rows] = weight_from_covariance(Z.T @ Z / self.n)
-        if self.supply is not None:
-            Zs = self.supply.Z
-            W[self.supply_rows, self.supply_rows] = weight_from_covariance(Zs.T @ Zs / self.n)
+        for sup in self.supplies:
+            Zs = sup.Z
+            W[self.blocks[sup.name], self.blocks[sup.name]] = weight_from_covariance(Zs.T @ Zs / self.n)
         for m in self.moments:   # first-difference IV blocks: 2SLS weight on their own instruments
-            if getattr(m, "is_difference", False) and m is not self.supply:
+            if getattr(m, "is_difference", False) and m not in self.supplies:
                 Zd = getattr(m, "Z")
                 W[self.blocks[m.name], self.blocks[m.name]] = weight_from_covariance(Zd.T @ Zd / self.n)
         for m in self.calibration:   # a calibration row's covariance is a declared constant
@@ -432,6 +876,14 @@ class NFPGMMProblem:
             for m in self.micro:
                 rows = self.blocks[m.name]
                 W[rows, rows] = weight_from_covariance(self.n * m.covariance_block(sol_cov, ev.aux["linear_fit"]))
+        evaluated = [m for m in self.moments if getattr(m, "needs_evaluated_weight", False)]
+        if evaluated:   # blocks whose covariance depends on theta (event cost continuity): weight at theta0
+            ev0 = self.evaluate(theta0, need_jacobian=False)
+            if not ev0.ok:
+                raise RuntimeError(f"cannot form W1: evaluation at theta0 failed ({ev0.status.value})")
+            for m in evaluated:
+                rows = self.blocks[m.name]
+                W[rows, rows] = weight_from_covariance(m.covariance_block(ev0.aux["solution"], ev0.aux["linear_fit"]))
         return W
 
     def set_weighting(self, W: np.ndarray) -> None:
@@ -448,11 +900,21 @@ class NFPGMMProblem:
         scale = max(float(np.max(np.abs(W))), 1e-300)
         if np.max(np.abs(W - W.T)) > 1e-10 * scale:
             raise ValueError("W must be symmetric")
+        if self._jointcfg is not None:   # the joint GLS step reads W at every evaluation (set_joint)
+            P_idx = self._jointcfg["P_idx"]
+            prod = np.zeros(self.k, dtype=bool)
+            prod[P_idx] = True
+            if (~prod).any() and np.max(np.abs(W[prod][:, ~prod])) > 1e-12 * scale:
+                raise ValueError("W couples product-level and micro rows; the joint concentration needs W block "
+                                 "diagonal between them")
+            self.W = 0.5 * (W + W.T)
+            self.W_provenance = "set_weighting"
+            return
         a = self.agg_rows
         lin = np.zeros(self.k, dtype=bool)
         lin[a] = True
-        if self.supply_rows is not None:
-            lin[self.supply_rows] = True
+        for sup in self.supplies:
+            lin[self.blocks[sup.name]] = True
         if (~lin).any() and lin.any() and np.max(np.abs(W[lin][:, ~lin])) > 1e-12 * scale:
             raise ValueError("W couples aggregate (or supply) and micro rows; concentrated linear parameters need "
                              "block-diagonal W between them")
@@ -460,7 +922,15 @@ class NFPGMMProblem:
         if self.agg is not None:
             self.linear.set_weighting(self.W[a, a])
         self._joint = None
-        if self.supply is not None:
+        self._multi = None
+        if len(self.supplies) > 1:
+            for sup in self.supplies:
+                rb = self.blocks[sup.name]
+                sup.set_weighting(self.W[rb, rb])
+            coupled = self.agg is not None and any(
+                np.max(np.abs(self.W[a, self.blocks[sup.name]])) > 1e-12 * scale for sup in self.supplies)
+            self._multi = self._multi_projection(include_agg=bool(coupled))
+        elif self.supply is not None:
             s = self.supply_rows
             assert s is not None
             self.supply.set_weighting(self.W[s, s])
@@ -492,15 +962,22 @@ class NFPGMMProblem:
         if ev.G is None:
             raise ValueError("full_jacobian needs an evaluation with G")
         K = int(getattr(self.linear, "K", 0)) if self.agg is not None else 0
-        Ks = int(self.supply.K) if self.supply is not None else 0
+        Ks = self.K_supply
         J = np.zeros((self.k, K + Ks + self.P))
         J[:, K + Ks:] = ev.G
         if K:
             J[self.agg_rows, :K] = self.linear.full_jacobian_linear_block()
         names = list(getattr(self.linear, "names", ())) if self.agg is not None else []
-        if self.supply is not None:
+        if len(self.supplies) > 1:
+            for sup in self.supplies:
+                J[self.blocks[sup.name], K + self._gamma_cols[sup.name]] = -sup.ZtW
+            names += list(self.gamma_names)
+        elif self.supply is not None:
             J[self.supply_rows, K:K + Ks] = -self.supply.ZtW
             names += list(self.supply.names)
+        if self._jointcfg is not None:   # every product row in (beta, gamma): first-difference rows carry beta too
+            j = self._jointcfg
+            J[j["P_idx"], :K + Ks] = -j["X_P"]
         return J, names + list(self.layout.names)
 
     # ------------------------------------------------------------------ CUE
@@ -511,7 +988,20 @@ class NFPGMMProblem:
         Aggregate columns hold ``sum_{j in c} z_j xi_j`` and its theta derivative with M held at the
         current weighting; micro columns are zero (the micro block of S is held fixed, see
         ``cue_fixed_covariance``). ``g_aggregate = V.sum(0)[aggregate] / n``.
+
+        Under ``set_joint`` V holds every product-level block's per-cluster contributions at the separate 2SLS
+        residuals and dV their total theta derivative, so ``S_P = V'V/n`` (zero columns on single-cluster rows).
         """
+        if self._jointcfg is not None:
+            if not ev.ok or ev.G is None or ev.aux.get("joint", {}).get("dV") is None:
+                raise ValueError("cue_terms needs an OK evaluation with a Jacobian")
+            j = self._jointcfg
+            jaux = ev.aux["joint"]
+            Vf = np.zeros((j["C"], self.k))
+            dVf = np.zeros((j["C"], self.k, self.P))
+            Vf[:, j["P_idx"]] = jaux["V"]
+            dVf[:, j["P_idx"], :] = jaux["dV"]
+            return Vf, dVf
         if self.supply is not None:
             raise NotImplementedError("CUE with supply moments is not implemented")
         if self.agg is None:
@@ -530,13 +1020,22 @@ class NFPGMMProblem:
         return V, dV
 
     def cue_fixed_covariance(self, ev: Evaluation) -> np.ndarray:
-        """The part of S CUE holds fixed: ``blockdiag(0, n V_micro(ev.theta))`` in this problem's row order."""
+        """The part of S CUE holds fixed: ``blockdiag(0, n V_micro(ev.theta))`` in this problem's row order. Under
+        ``set_joint`` also the identity on single-cluster product rows and the declared covariance of calibration
+        rows."""
         S = np.zeros((self.k, self.k))
         if self.micro:
             sol_cov = self._covariance_solution(ev)
             for m in self.micro:
                 rows = self.blocks[m.name]
                 S[rows, rows] = self.n * m.covariance_block(sol_cov, ev.aux["linear_fit"])
+        if self._jointcfg is not None:
+            j = self._jointcfg
+            K0 = j["P_idx"][j["K0"]]
+            S[K0, K0] = 1.0
+            for m in self.calibration:
+                rows = self.blocks[m.name]
+                S[rows, rows] = np.atleast_2d(m.covariance_block(None, None))  # type: ignore[arg-type]
         return S
 
     # ------------------------------------------------------------------ optional hooks

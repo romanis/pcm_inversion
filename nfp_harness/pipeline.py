@@ -57,6 +57,10 @@ latest one is also copied to the run directory root):
   stored as ``stages/warm.npz`` with the theta and the parameter names: a warm delta for other runs on the same
   markets and draws (a spec's ``--warm-delta``), e.g. one per value of a fixed bound (a state solved under another
   bound is a warm start, ``PCMModel``).
+- ``cue``: CUE (``weighting.CUE``, S recomputed at every theta) from the layout's starting theta and the spec's warm
+  delta, then its report; post then reads this estimate. When ``spec.fixed_weighting(problem, theta0)`` returns a W
+  (stored as ``weights.cue_W``) the stage minimises that fixed W instead (e.g. a diagonal robustness weight). A spec whose ``chain`` attribute names the stages of
+  ``--stage all`` (e.g. ``("cue", "post")``) replaces ``CHAIN``.
 
 Every W the estimation stages minimise (W1, W2, band W) passes through ``spec.binding_weighting(problem, W)`` when
 the spec has it, else ``weighting.bind_calibration`` (every calibration row binds). ``spec.step2_weighting`` forms W2
@@ -110,7 +114,7 @@ from .diagnostics.report import to_jsonable
 from .optimizer import OptimizerOptions, minimize
 from .profile import ray_profile
 from .types import KernelRequests, OptimizeResult
-from .weighting import STEP2_RULES, Fixed, TwoStep, bind_calibration, upweight_rows, weight_from_covariance
+from .weighting import CUE, STEP2_RULES, Fixed, TwoStep, bind_calibration, upweight_rows, weight_from_covariance
 
 __all__ = ["Pipeline", "RunConfig", "StageRefused", "GateFailed", "STAGES", "CHAIN", "main", "run_dir_path", "run_key_options",
            "estimate_columns", "evaluation_record"]
@@ -118,7 +122,7 @@ __all__ = ["Pipeline", "RunConfig", "StageRefused", "GateFailed", "STAGES", "CHA
 log = logging.getLogger("nfp_harness.pipeline")
 
 STAGES = ("prefit", "gate", "extensive", "step1", "step2", "post", "stability", "sigma_p_band", "a_lo_band",
-          "margin_band", "warm")
+          "margin_band", "warm", "cue")
 CHAIN = ("extensive", "step1", "step2", "post", "stability")
 STABILITY_SEED_OFFSET = 100_000
 STABILITY_ITERATIONS = 20
@@ -739,11 +743,42 @@ class Pipeline:
             self.rd.save_stage("report.step2", {"done": True})
         return res
 
+    def cue(self) -> OptimizeResult:
+        """CUE from the layout's starting theta (``--start-theta``) with the model state the spec built (its
+        ``--warm-delta``): q = n g'S(theta)^-1 g with S recomputed at every theta (the problem's ``covariance`` and
+        ``cue_terms``, e.g. ``NFPGMMProblem.set_joint("cue")``). No prefit, no gate: a CUE run continues an earlier
+        estimate."""
+        problem = self.problem("all")
+        theta0 = problem.layout.starts()
+        weighting: Any = CUE()
+        hook = getattr(self.spec, "fixed_weighting", None)
+        if self.rd.stage_done("weights.cue_W"):
+            weighting = Fixed(np.asarray(self.rd.load_stage("weights.cue_W")["W"], dtype=float))
+        elif callable(hook) and not self.rd.stage_done("cue"):
+            W = hook(problem, theta0)
+            if W is not None:
+                self.rd.save_stage("weights.cue_W", {"W": np.asarray(W, dtype=float)})
+                weighting = Fixed(np.asarray(W, dtype=float))
+        res = minimize(problem, weighting, self._options(stage="cue", theta0=theta0, max_iterations=self._limit()),
+                       checkpoint=self.rd)
+        if not self.rd.stage_done("report.cue"):
+            self.report(problem, res, "cue")
+            self.rd.save_stage("report.cue", {"done": True})
+        return res
+
     def estimate(self) -> tuple[Any, OptimizeResult, str]:
-        """(problem, result, stage) at the last finished estimation stage, re-evaluated with its own W."""
+        """(problem, result, stage) at the last finished estimation stage, re-evaluated with its own W (CUE's
+        S(theta)^-1 for a ``cue`` stage)."""
+        problem = self.problem("all")
+        if self.rd.stage_done("cue"):
+            W = self._stage_state("cue").get("W")
+            res = minimize(problem, CUE() if W is None else Fixed(np.asarray(W, dtype=float)),
+                           self._options(stage="cue"), checkpoint=self.rd)
+            if res.evaluation is None:
+                raise StageRefused("the cue estimate could not be re-evaluated")
+            return problem, res, "cue"
         stage = "step2" if self.rd.stage_done("step2") else "step1"
         st = self._stage_state(stage)
-        problem = self.problem("all")
         res = minimize(problem, Fixed(np.asarray(st["W"], dtype=float)), self._options(stage=stage),
                        checkpoint=self.rd)
         if res.evaluation is None:
@@ -1008,7 +1043,7 @@ class Pipeline:
 
     def run(self, stage: str) -> int:
         """Run one stage, or the chain for ``all``. Returns the process exit status."""
-        stages = CHAIN if stage == "all" else (stage,)
+        stages = tuple(getattr(self.spec, "chain", None) or CHAIN) if stage == "all" else (stage,)
         status = 0
         for s in stages:
             runtime.heartbeat(self.path, 0, stage=s)

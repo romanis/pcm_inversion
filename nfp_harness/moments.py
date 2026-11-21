@@ -39,7 +39,8 @@ from .weighting import cluster_sums, clustered_covariance
 
 __all__ = ["Moment", "IVMoments", "SarganIVMoments", "DifferenceIVMoments", "DifferenceSarganIVMoments", "MicroDataset",
            "MicroPart", "RatioMicroMoment", "MICRO_OUTPUTS",
-           "product_part", "SupplyMoments", "SupplyDomainError", "MarginMoment", "GroupMomentRow", "GroupMicroMoments",
+           "product_part", "SupplyMoments", "SupplyDomainError", "MarginMoment", "CostEvent",
+           "EventCostContinuityMoments", "GroupMomentRow", "GroupMicroMoments",
            "GROUP_OUTPUTS", "SecondChoiceMoments", "SECOND_CHOICE_OUTPUTS", "SECOND_CHOICE_ADJOINT"]
 
 #: A micro part, a pair (agent weight h, product weight v with outside value v0); see ``types.MicroPartRequest``.
@@ -814,6 +815,145 @@ class MarginMoment:
 
 #: Key of ``InnerSolution.outputs`` holding the per-market household sums (contract in ``GroupMicroMoments``).
 GROUP_OUTPUTS = "group_sums"
+
+
+@dataclass(frozen=True)
+class CostEvent:
+    """One event of ``EventCostContinuityMoments``: products whose ownership incentives change between two periods
+    (``treated``) and products whose do not (``control``), each as row pairs (cur, prev) of the same product in the
+    two periods. ``match`` (n_treated, n_control), rows summing to one, gives each treated pair its own control mix
+    (e.g. controls of the same type); None is the plain control mean."""
+
+    name: str
+    treated: tuple[np.ndarray, np.ndarray]
+    control: tuple[np.ndarray, np.ndarray]
+    match: np.ndarray | None = None
+
+
+class EventCostContinuityMoments:
+    """Cost continuity across ownership events: a difference in differences of implied log marginal cost.
+
+    For event e with treated pairs (c_j, p_j) and control pairs (c'_l, p'_l), dy = y[cur] - y[prev] with y = log mc
+    from the Nash FOCs under each period's own ownership (``costs.log_costs``, a ``SupplyMoments``), and
+
+        g_e = mean_j ( dy_j - sum_l A_jl dy'_l ),
+
+    which is zero when costs of products that continue unchanged do not jump at the ownership change beyond the
+    controls' change. Under a wrong price sensitivity the recomputed markup change does not match the observed price
+    change and the residual shows up in dy. g = L y with L (k, n) fixed by the pairs, so ``d_theta = L dy/dtheta``
+    (the cost object's total derivative) and ``d_delta`` is None.
+
+    Covariance: the products are independent draws, so Var(g_e) = var(dy_treated) / n_t + var(dy_control) sum_l
+    c_l^2 with c = mean over j of A_j; ``covariance_block`` returns n diag(Var) (q = n g'Wg with W = its inverse is
+    the sum of squared studentised contrasts t_e = g_e / sd(g_e)). ``needs_evaluated_weight`` asks
+    ``NFPGMMProblem.initial_weighting`` for that weight at theta0. Not for CUE.
+    """
+
+    name: str
+    is_aggregate = False
+    is_micro = False
+    is_supply = False
+    needs_evaluated_weight = True
+
+    def __init__(self, costs: SupplyMoments, events: Sequence[CostEvent], name: str = "event_cost") -> None:
+        """EventCostContinuityMoments(costs, events, name="event_cost"); ``costs`` computes log mc (its own
+        instruments are not used)."""
+        if not events:
+            raise ValueError("no events")
+        self.costs = costs
+        self.events = list(events)
+        self.name = name
+        self.n = int(costs.n)
+        self.k = len(self.events)
+        self.L = np.zeros((self.k, self.n))
+        self._parts: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+        for e, ev in enumerate(self.events):
+            tc, tp = (np.asarray(a, dtype=int).ravel() for a in ev.treated)
+            cc, cp = (np.asarray(a, dtype=int).ravel() for a in ev.control)
+            if tc.size == 0 or cc.size == 0 or tc.size != tp.size or cc.size != cp.size:
+                raise ValueError(f"event {ev.name!r}: treated and control need equal-length non-empty pairs")
+            for a in (tc, tp, cc, cp):
+                if a.min() < 0 or a.max() >= self.n:
+                    raise ValueError(f"event {ev.name!r}: row index outside 0..{self.n - 1}")
+            if np.intersect1d(np.r_[tc, tp], np.r_[cc, cp]).size:
+                raise ValueError(f"event {ev.name!r}: a row is both treated and control")
+            A = np.full((tc.size, cc.size), 1.0 / cc.size) if ev.match is None else np.asarray(ev.match, float)
+            if A.shape != (tc.size, cc.size) or np.any(A < 0) or not np.allclose(A.sum(axis=1), 1.0):
+                raise ValueError(f"event {ev.name!r}: match must be ({tc.size}, {cc.size}) with rows summing to one")
+            c = A.mean(axis=0)
+            np.add.at(self.L[e], tc, 1.0 / tc.size)
+            np.add.at(self.L[e], tp, -1.0 / tc.size)
+            np.add.at(self.L[e], cc, -c)
+            np.add.at(self.L[e], cp, c)
+            self._parts.append((tc, tp, cc, cp, c))
+
+    def bind_costs(self, model: object, P: int, units: np.ndarray | None = None) -> None:
+        """Attach the inner model to the cost object unless the problem already did (a supply block of its own)."""
+        if self.costs.model is not model:
+            self.costs.bind(model, P, units=units)
+
+    def requests(self) -> KernelRequests:
+        return self.costs.requests()
+
+    def covariance_requests(self) -> KernelRequests:
+        return self.costs.requests()
+
+    def evaluate(self, sol: InnerSolution, linear: LinearFit, need_jacobian: bool) -> MomentBlock:
+        """evaluate(sol, linear, need_jacobian) -> MomentBlock(value = L log mc, d_theta = L dlog mc/dtheta)."""
+        y, dy, _ = self.costs.log_costs(sol, need_jacobian)
+        return MomentBlock(name=self.name, value=self.L @ y, d_delta=None,
+                           d_theta=self.L @ dy if need_jacobian and dy is not None else None, data=None)
+
+    def variances(self, y: np.ndarray) -> np.ndarray:
+        """(k,) Var(g_e) at log mc ``y`` (class docstring)."""
+        out = np.empty(self.k)
+        for e, (tc, tp, cc, cp, c) in enumerate(self._parts):
+            dt, dc = y[tc] - y[tp], y[cc] - y[cp]
+            vt = float(np.var(dt, ddof=1)) if dt.size > 1 else 0.0
+            vc = float(np.var(dc, ddof=1)) if dc.size > 1 else 0.0
+            out[e] = vt / dt.size + vc * float(c @ c)
+        return out
+
+    def summary(self, y: np.ndarray) -> list[dict[str, Any]]:
+        """Per event: name, pair counts, g_e, sd(g_e), t_e and the mean change of treated and control log mc."""
+        g, v = self.L @ y, self.variances(y)
+        rows = []
+        for e, (ev, (tc, tp, cc, cp, _)) in enumerate(zip(self.events, self._parts)):
+            sd = float(np.sqrt(v[e]))
+            rows.append({"event": ev.name, "treated": int(tc.size), "control": int(cc.size), "g": float(g[e]),
+                         "sd": sd, "t": float(g[e]) / sd if sd > 0 else float("nan"),
+                         "d_log_mc_treated": float(np.mean(y[tc] - y[tp])),
+                         "d_log_mc_control": float(np.mean(y[cc] - y[cp]))})
+        return rows
+
+    def cluster_terms(self, y: np.ndarray, dy: np.ndarray | None, cluster_matrix: Any, n: int
+                      ) -> tuple[np.ndarray, np.ndarray | None]:
+        """Per-cluster contributions for a joint clustered covariance (``NFPGMMProblem.set_joint``): (C, k) and
+        (C, k, P). A pair p of event e contributes ``n L_e[cur_p] (dy_p - mean of its group's dy)`` to the cluster of
+        its cur row (``cluster_matrix`` is the (C, n) 0/1 cluster indicator), so ``V'V/n`` of one event is about ``n
+        Var(g_e)``, ``covariance_block``'s value, and its scale follows L."""
+        C = cluster_matrix.shape[0]
+        V = np.zeros((C, self.k))
+        dV = None if dy is None else np.zeros((C, self.k, dy.shape[1]))
+        for e, (tc, tp, cc, cp, _) in enumerate(self._parts):
+            contrib = np.zeros(self.n)
+            dcon = None if dy is None else np.zeros((self.n, dy.shape[1]))
+            for cur, prev in ((tc, tp), (cc, cp)):
+                d = y[cur] - y[prev]
+                np.add.at(contrib, cur, n * self.L[e, cur] * (d - d.mean()))
+                if dcon is not None:
+                    dd = dy[cur] - dy[prev]
+                    np.add.at(dcon, cur, n * self.L[e, cur][:, None] * (dd - dd.mean(axis=0)))
+            V[:, e] = cluster_matrix @ contrib
+            if dV is not None:
+                dV[:, e, :] = cluster_matrix @ dcon
+        return V, dV
+
+    def covariance_block(self, sol: InnerSolution | None, linear: LinearFit | None) -> np.ndarray:
+        """covariance_block(sol, linear) -> n diag(Var(g_e)) at the log mc of ``sol``."""
+        assert sol is not None
+        y, _, _ = self.costs.log_costs(sol, False)
+        return self.n * np.diag(self.variances(y))
 
 
 @dataclass(frozen=True)
