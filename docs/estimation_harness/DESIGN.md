@@ -242,6 +242,33 @@ script's sum of squared residuals (`tests/test_blp_model.py`). The script's outp
 residual formulas, so the `gmy_blp` golden is unchanged. `petrin_replication/estimate_blp.py` stays on pyblp (demand
 and supply estimated jointly by pyblp's optimizer; the harness's supply block is PCM-specific).
 
+### 1.6 Supply-side blocks, joint weighting, a free bound and counterfactuals
+
+These pieces are generic; a paper wires them in its spec.
+
+- Supply instruments (`instruments.py`): `markup_shifters` (Gandhi-Houde columns over the firm's other products and over
+  rivals', plus the two product counts) move Nash markups and not costs; `within_differences` and
+  `difference_instruments` write a within-id first-difference moment E[dz dr] = 0 as a levels moment Z_d' r, so
+  `DifferenceIVMoments` and a `SupplyMoments` on Z_d need no new code. A problem may hold several supply blocks; they
+  share one log mc and one gamma over the union of their cost columns. `EventCostContinuityMoments` is a difference in
+  differences of Nash log mc across ownership events.
+- Joint weighting (`NFPGMMProblem.set_joint(mode)`): every product-level block under one clustered covariance, (beta,
+  gamma) concentrated in one GLS step, CUE through `cue_terms`. A spec turns it on in `PaperSpec.finish_problem` and
+  changes the aggregate block's instruments in `PaperSpec.linear_for`; both default to the old problem.
+- A parameter the inner model does not differentiate (`model.fd_columns`, e.g. the PCM's free bound a_lo) gets its
+  Jacobian column, and its CUE terms, by a one-sided difference of g with the model's step (`model.fd_step`); the
+  model's trial state is put back after the extra solve. The pipeline's `cue_profile` stage re-optimises every other
+  parameter at fixed values of one parameter, warm-started from the estimate, and reports the LR-style set.
+- `MixedLogitModel` takes an exponential law on one X column (`exp_column`, `exp_terms`, `exp_offset`), e.g. a lognormal
+  price sensitivity alpha_h = exp(e_h); its basis depends on theta and every analytic derivative carries over. With
+  `price_column` it also carries what supply blocks bind to, so the logit takes the PCM's moment set unchanged.
+- Counterfactuals (`counterfactuals.py`): a scenario sees one market through a `MarketDemand` adapter (shares, ds/dp,
+  consumer surplus at any price vector and product subset). `PCMMarketDemand` uses the kernel (frontier CS, Nash by the
+  bounded best responses of LEARNINGS 29); `LogitMarketDemand` uses the logit (log-sum CS, Nash by the zeta map).
+  `implied_costs`, `ownership_change` / `merger`, `cost_shock`, `removal_diversion` and `lerner_table` are
+  model-agnostic, so every model of a paper runs the same scenarios; the pipeline's `counterfactuals` stage calls the
+  spec's `counterfactuals(pipe, problem, result, out)`.
+
 ## 2. Problem, moments and parameters
 
 All shared dataclasses live in `nfp_harness/types.py`. WP0 writes that file in full and it is then

@@ -167,6 +167,21 @@ SIGMA_P = {"start": 2.5, "lower": 1.0, "upper": 4.0, "unit": 0.25}
 A_LO = 0.2
 #: --a-lo-free: the bounds of a_lo as a free parameter
 A_LO_FREE = (0.005, 0.5)
+#: counterfactuals (nfp_harness.counterfactuals), the same for the PCM and both logits: GMY's "Big 3 Collusion"
+#: (counterfactuals.m nCF 3: GM, Ford and the Chrysler line priced jointly, makeOwnership_counterfactual.m's
+#: chryslerSteady parents) in CF_YEARS; in CF_YEAR a merger of CF_MERGER, a CF_SHOCK_RATE cost increase on every
+#: product of CF_SHOCK_FIRM (an exchange-rate shock on an importer's whole line; the data has no plant location), and
+#: removal diversion of the CF_TOP best sellers; Lerner indices and observed-price consumer surplus in every year
+CF_YEARS = (1980, 1990, 2000, 2010, 2018)
+CF_YEAR = 2018
+CF_MERGER = ("gm", "ford")
+CF_SHOCK_FIRM = "toyota"
+CF_SHOCK_RATE = 0.10
+CF_TOP = 5
+#: bounded best responses of the PCM Nash (LEARNINGS 29): price box and sweeps
+CF_NASH = {"box": 0.10, "max_sweeps": 10}
+#: --a-lo-free: the CUE profile of a_lo after the estimate (pipeline stage cue_profile)
+A_LO_PROFILE = (0.01, 0.025, 0.05, 0.1, 0.2)
 SC_WEIGHT = 30.0         # mom_fnc.m line 109: second-choice residuals x 30
 PHI_BOUND = 4.0
 TASTE_CAP = 10.0         # $100k per sd: above the 1980-2018 price range ($11k-$100k)
@@ -633,6 +648,7 @@ class GMYSpec(PaperSpec):
         self.weighting = "default"
         self.drop_blocks: tuple[str, ...] = ()
         self.a_lo_free = False
+        self.cf_year = CF_YEAR
         self.a_lo = float(a_lo)
         self.prefit_rows = "price_purchase"
         self.antithetic_taste = False
@@ -781,9 +797,27 @@ class GMYSpec(PaperSpec):
 
     @property
     def chain(self) -> tuple[str, ...] | None:
-        """Stages of ``run --stage all``: joint_cue and joint_diag continue an estimate (cue, post); else the
-        pipeline's CHAIN."""
-        return ("cue", "post") if self.weighting in ("joint_cue", "joint_diag") else None
+        """Stages of ``run --stage all``: joint_cue and joint_diag continue an estimate (cue, post, the a_lo profile
+        when a_lo is free, then counterfactuals); else the pipeline's CHAIN."""
+        if self.weighting not in ("joint_cue", "joint_diag"):
+            return None
+        return ("cue", "post") + (("cue_profile",) if self.a_lo_free else ()) + ("counterfactuals",)
+
+    cue_profile_parameter = "a_lo"
+    cue_profile_values = A_LO_PROFILE
+
+    def counterfactuals(self, pipe: Any, problem: Any, result: Any, out: pathlib.Path) -> dict[str, Any]:
+        """``gmy_counterfactuals`` on the PCM at the estimate: ``PCMMarketDemand`` per market, Nash prices by bounded
+        best responses (CF_NASH)."""
+        from nfp_harness.counterfactuals import PCMMarketDemand
+
+        ev = result.evaluation
+        if ev is None or not ev.ok:
+            raise RuntimeError("counterfactuals: the estimate could not be re-evaluated")
+        model, theta, delta = problem.model, np.asarray(result.theta, dtype=float), np.asarray(ev.aux["delta"])
+        firms = self.products.firm_ids.to_numpy()
+        return gmy_counterfactuals(lambda t: PCMMarketDemand(model, theta, delta, t, firms, MIN_GAP), model.markets,
+                                   self.products, CF_NASH, cf_year=self.cf_year)
 
     def fixed_weighting(self, problem: Any, theta: np.ndarray) -> np.ndarray | None:
         """The fixed W of the cue stage: under joint_diag W = diag(S^-1) on the product rows at ``theta`` and the fixed
@@ -910,6 +944,9 @@ class GMYSpec(PaperSpec):
                             help=f"estimate a_lo as a free GMM parameter on [{A_LO_FREE[0]:g}, {A_LO_FREE[1]:g}], "
                                  f"starting at --a-lo (its Jacobian column by finite differences); part of the run "
                                  f"key")
+        parser.add_argument("--cf-year", type=int, default=CF_YEAR,
+                            help=f"counterfactuals: the year of the merger, cost shock and removal diversion (default "
+                                 f"{CF_YEAR}); post-estimation only, not in the run key")
         parser.add_argument("--prefit-rows", choices=PREFIT_ROWS, default="price_purchase",
                             help="micro rows of the prefit: price_purchase (the 20 price and purchase-rate rows, "
                                  "default) or age (the 8 age-price rows, phi_age and the age tastes free); part of the "
@@ -945,6 +982,7 @@ class GMYSpec(PaperSpec):
         drop = [DROP_ALIASES.get(b, b) for b in (getattr(args, "drop_block", None) or ())]
         self.set_weighting_mode(getattr(args, "weighting", None) or "default", drop)
         self.a_lo_free = bool(getattr(args, "a_lo_free", False))
+        self.cf_year = int(getattr(args, "cf_year", None) or CF_YEAR)
 
     def paper_run_key(self) -> dict[str, Any]:
         """Result-changing options beyond nu, seed and PaperSpec's shared ones: years (unless all 39), instruments,
@@ -1292,8 +1330,8 @@ class GMYSpec(PaperSpec):
             ms += [self.demand_fd_moment(plain=joint), self.supply_moment("fd")]
         elif which in ("demand_supply_msfd", "demand_supply_msfd_own"):   # one log mc, gamma shared on within-model columns
             ms += [self.supply_moment("ms"), self.demand_fd_moment(plain=joint), self.supply_moment("fd")]
-            if which == "demand_supply_msfd_own":   # log mc from the levels block's own cost object (one FD pass)
-                ms.append(self.event_cost_moment(costs=ms[-3]))
+            if which == "demand_supply_msfd_own" and not (joint and "event_cost" in self.drop_blocks):
+                ms.append(self.event_cost_moment(costs=ms[-3]))   # log mc from the levels block (one FD pass)
         if joint:
             ms = [m for m in ms if m.name not in self.drop_blocks or m.name == "aggregate"]
         return ms, Z_agg
@@ -1509,6 +1547,66 @@ class GMYSpec(PaperSpec):
         return row
 
     a_lo_band_row = band_row
+
+
+def big3_owner(firms_gmy: np.ndarray, years: np.ndarray) -> np.ndarray:
+    """GMY's Big 3 cartel ownership: gm, ford and the Chrysler line (chrysler before 1998, daimler 1998-2007,
+    cerberus 2008-2009, fiat from 2010; makeOwnership_counterfactual.m chryslerSteady) become one owner "BIG3"."""
+    f = np.asarray(firms_gmy).astype(str).astype(object)
+    y = np.asarray(years, dtype=int)
+    chrysler = (((y < 1998) & (f == "chrysler")) | ((y >= 1998) & (y < 2008) & (f == "daimler"))
+                | ((y >= 2008) & (y < 2010) & (f == "cerberus")) | ((y >= 2010) & (f == "fiat")))
+    out = f.copy()
+    out[chrysler | (f == "gm") | (f == "ford")] = "BIG3"
+    return out
+
+
+def gmy_counterfactuals(make_demand: Any, markets: Sequence[Any], products: pd.DataFrame,
+                        nash_kw: Mapping[str, Any] | None = None, cf_years: Sequence[int] = CF_YEARS,
+                        cf_year: int = CF_YEAR) -> dict[str, Any]:
+    """The GMY counterfactual set on any model: ``make_demand(t)`` returns market t's
+    ``nfp_harness.counterfactuals.MarketDemand`` (products in ``markets[t].rows`` order), ``products`` the (n,) row-order
+    product table (``firm_ids``, ``firm_ids_gmy`` when recoded, ``market_ids``, ``veh_type``). Returns Lerner tables
+    (by year and segment, at the observed-ownership implied costs), observed-price consumer surplus by year (price
+    units, $10k, per household), and the scenarios (CF_* constants)."""
+    from nfp_harness import counterfactuals as cf
+
+    kw = dict(nash_kw or {})
+    n = len(products)
+    p_all, c_all, s_all = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    firms_gmy = (products.firm_ids_gmy if "firm_ids_gmy" in products else products.firm_ids).to_numpy()
+    yrs = products.market_ids.to_numpy(int)
+    big3 = big3_owner(firms_gmy, yrs)
+    cs_by_year: dict[int, float] = {}
+    scen: dict[str, Any] = {}
+    for t, m in enumerate(markets):
+        y = int(m.market_id)
+        d = make_demand(t)
+        ic = cf.implied_costs(d)
+        r = np.asarray(d.rows)
+        p_all[r], c_all[r], s_all[r] = d.p0, ic["costs"], ic["shares"]
+        cs_by_year[y] = float(d.surplus(d.p0))
+        if y in cf_years:
+            scen[f"big3_collusion_{y}"] = cf.ownership_change(d, ic["costs"], big3[r], label="Big 3 collusion", **kw)
+        if y == cf_year:
+            scen[f"merger_{'_'.join(CF_MERGER)}_{y}"] = cf.merger(d, ic["costs"], *CF_MERGER, **kw)
+            mask = d.firm_ids.astype(str) == CF_SHOCK_FIRM
+            scen[f"cost_shock_{CF_SHOCK_FIRM}_{y}"] = cf.cost_shock(d, ic["costs"], mask, CF_SHOCK_RATE, **kw)
+            top = np.argsort(-ic["shares"])[:CF_TOP]
+            div = cf.removal_diversion(d, top.tolist())
+            seg = products.veh_type.astype(str).to_numpy()[r]
+            for row in div:
+                to = row["to"]
+                row["to_segment"] = {g: float(np.nansum(to[seg == g])) for g in sorted(set(seg))}
+                row["to_top"] = sorted(((float(v), int(products.index[r][k])) for k, v in enumerate(to)
+                                        if np.isfinite(v)), reverse=True)[:5]
+                row["to"] = None   # the full vector stays out of the JSON
+            scen[f"removal_diversion_{y}"] = div
+    lerner = cf.lerner_table(p_all, c_all, s_all, {"year": yrs, "segment": products.veh_type.astype(str).to_numpy()})
+    return {"lerner": lerner, "cs_observed_by_year": cs_by_year, "scenarios": scen,
+            "settings": {"cf_years": list(cf_years), "cf_year": cf_year, "merger": list(CF_MERGER),
+                         "shock_firm": CF_SHOCK_FIRM, "shock_rate": CF_SHOCK_RATE, "top": CF_TOP, "nash": kw,
+                         "units": "prices and costs in the data's price units ($10k); CS per household in the same units"}}
 
 
 def comparison_table(pcm: Mapping[str, Mapping[str, Any]], blp: Mapping[str, Mapping[str, Any]],

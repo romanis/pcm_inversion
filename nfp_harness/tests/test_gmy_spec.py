@@ -156,7 +156,7 @@ def test_joint_cue_drop_block_and_free_bound_options(gmy: Any) -> None:
     sp.a_lo_free = True
     key = sp.run_key()
     assert key["weighting"] == "joint_cue" and key["drop_blocks"] == ["event_cost"] and key["a_lo_free"] is True
-    assert sp.chain == ("cue", "post") and callable(sp.step2_weighting)
+    assert sp.chain == ("cue", "post", "cue_profile", "counterfactuals") and callable(sp.step2_weighting)
     lay = sp.layout()
     a = lay.specs[lay.names.index("a_lo")]
     assert a.free and (a.lower, a.upper) == gmy.A_LO_FREE

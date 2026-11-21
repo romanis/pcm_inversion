@@ -1015,3 +1015,54 @@ solution warm-starts nu 32 in 20 to 60 evaluations). One full 39-year first eval
 threads: 31 minutes, the slowest market (2017, 291 products) 15,711 evaluations on 8,192 draws. A delta solved at
 a_lo 0.2 warm-starts a_lo 0.1 and 0.3 in 18 to 38 evaluations, so one `run --stage warm` serves all three a_lo runs.
 The remaining cost is the cold path itself; a better cold start would need a different initial guess, not more draws.
+
+## 34. GMY on all 39 years: substitution is pinned, the markup level is a_lo; post-2008 margins reach BLP only at a_lo 0.1 (2026-11-20)
+
+(Entry 35 on the branch feat/gmy-pcm-estimation, where the Petrin a_lo band entry holds 33; numbered after master's 33 here.)
+
+**Setup.** GMY moments (CEX and MRI micro, second-choice correlations, a Sargan aggregate block on xi with GMY's
+excluded instruments, no supply block), 39 years, nu 32 x 2,000 CPS households, antithetic tastes, a_lo fixed at 0.1,
+0.2 and 0.3, then step 2 and a stability rerun at 64 draws. Runs gmy_pcm_1dc37b821f, gmy_pcm_3d9429594e and
+gmy_pcm_284c469079, each about 21 hours on 60 threads and up to 335 GB.
+
+**Finding 1: step 2 never moves.** All three made 0 accepted steps in step 2 (111-113 evaluations each), so every
+estimate is the step-1 point under the efficient aggregate weight. Under that weight the aggregate block is 18.9,
+19.3 and 19.8 against about 217-220 under the fixed weight.
+
+**Finding 2: substitution does not depend on a_lo.** Across the band:
+
+| | a_lo 0.1 | a_lo 0.2 | a_lo 0.3 |
+|---|---|---|---|
+| q (step 2) | 1,003.8 | 1,009.5 | 1,038.3 |
+| micro / aggregate / second choice | 774.8 / 18.9 / 210.1 | 796.5 / 19.3 / 193.8 | 813.4 / 19.8 / 205.1 |
+| second-choice RMSE | 0.075 | 0.072 | 0.075 |
+| electric second choice (data 0.383; GMY Table 4 0.132) | 0.379 | 0.383 | 0.382 |
+| purchase rate Q3/Q1 (data 3.64; Table 4 2.63) | 3.15 | 3.18 | 3.18 |
+| own-type diversion car / van / SUV / truck | 0.88 / 0.62 / 0.72 / 0.81 | 0.88 / 0.62 / 0.72 / 0.81 | 0.88 / 0.63 / 0.72 / 0.81 |
+| median own elasticity | -9.5 | -13.6 | -14.5 |
+| median Lerner, all years | 0.145 | 0.101 | 0.095 |
+
+The aggregate block moves by 0.9 across the band, so GMY's instruments say nothing about a_lo (entry 32's window law
+at work: changing a_lo re-sorts the same quantiles, the inversion absorbs the shift in delta). The 34.5 gap between
+a_lo 0.1 and 0.3 is almost all micro (38.6), which prefers the lower bound.
+
+**Finding 3: the Lerner gap to BLP is a pre-2008 gap.** Median Lerner, PCM a_lo 0.1 against GMY's Table 4 parameters
+evaluated with the same code: 1980 0.175 vs 0.317, 1999 0.112 vs 0.190, 2009 0.198 vs 0.186, 2015 0.161 vs 0.179,
+2018 0.179 vs 0.183. From 2008 on the two agree within 0.02. At a_lo 0.2 and 0.3 every year is about a third lower
+(a_lo 0.2: 1980 0.125, 2009 0.134, 2018 0.129), so the convergence is a property of a_lo 0.1 only.
+
+**Finding 4: 32 draws are enough for the economics, not for every spread.** Doubling to 64 draws and re-optimising
+moved the median elasticity by 4.1%, 6.1% and 4.1% and the median margin by 3.5%, 4.2% and 3.7% (a_lo 0.1, 0.2, 0.3);
+sigma_p by 0.03-0.05 and phi_inc by at most 0.003. sigma_truck rose by 0.22-0.36 in all three runs (about 1.6 se), so
+truck tastes are under-integrated at 32 draws; phi_age (+0.1) and pi_lux_age (+0.3) move inside one se. q at the
+estimate rose by 14.5, 18.0 and 23.8, so 32 draws understate q; the ranking across a_lo is unchanged. The harness's
+UNSTABLE flag fires on 17-22 parameters because its threshold is 0.1 natural unit (0.01 for a spread); headline
+changes are under its 10% threshold.
+
+**Flags common to all three.** SD_XI_BLOWUP (xi kurtosis 10.2, the top 92 products carry 26% of sum xi^2),
+WEAK_IDENTIFICATION (screen statistic 3e-4 to 5e-4), and sigma on z log number of trims at or near its cap of 10.
+Consumer surplus (about $111k per household in 1980 at a_lo 0.1) is not a headline.
+
+**Consequence.** Report GMY as a band in a_lo with substitution as the result. The markup level needs moments that
+see it: the rival-characteristic supply instruments (the 6-year slices show an interior minimum near a_lo 0.05), to
+be re-estimated with price-sensitivity parameters free at each a_lo.

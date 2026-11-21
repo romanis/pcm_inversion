@@ -122,7 +122,7 @@ __all__ = ["Pipeline", "RunConfig", "StageRefused", "GateFailed", "STAGES", "CHA
 log = logging.getLogger("nfp_harness.pipeline")
 
 STAGES = ("prefit", "gate", "extensive", "step1", "step2", "post", "stability", "sigma_p_band", "a_lo_band",
-          "margin_band", "warm", "cue")
+          "margin_band", "warm", "cue", "cue_profile", "counterfactuals")
 CHAIN = ("extensive", "step1", "step2", "post", "stability")
 STABILITY_SEED_OFFSET = 100_000
 STABILITY_ITERATIONS = 20
@@ -830,6 +830,74 @@ class Pipeline:
     def a_lo_band(self) -> list[dict[str, Any]]:
         """The a_lo band stage (module docstring, LEARNINGS 32). Returns the rows of a_lo_band/band.csv."""
         return self._band("a_lo_band")
+
+    def cue_profile(self) -> dict[str, Any]:
+        """The CUE profile of one parameter through the estimate: ``spec.cue_profile_parameter`` (default ``a_lo``)
+        fixed at each of ``spec.cue_profile_values`` (or ``--band-values``), every other parameter re-optimised under
+        the estimate's weighting (CUE), each point warm-started from the estimate's theta and model state. Writes
+        ``cue_profile/profile.json`` with q at every point, the estimate's q, and the LR-style set {v : q(v) - q_min
+        <= 3.84} (chi-square(1) at 95%, valid when q is a CUE / efficient objective)."""
+        spec = self.spec
+        par = str(getattr(spec, "cue_profile_parameter", "a_lo"))
+        values = [float(v) for v in (self.cfg.band_values or getattr(spec, "cue_profile_values", ()))]
+        if not values:
+            raise StageRefused("cue_profile: no values (spec.cue_profile_values or --band-values)")
+        problem, est, stage = self.estimate()
+        layout = problem.layout
+        if par not in layout.names:
+            raise StageRefused(f"cue_profile: {par!r} is not a parameter of {layout.names}")
+        k = layout.names.index(par)
+        state = getattr(problem.model, "state_dict", None)
+        est_state = state() if callable(state) else None
+        W = self._stage_state(stage).get("W")
+        weighting: Any = CUE() if W is None else Fixed(np.asarray(W, dtype=float))
+        out_dir = self.path / "cue_profile"
+        out_dir.mkdir(exist_ok=True)
+        rows: list[dict[str, Any]] = []
+        try:
+            for v in values:
+                tag = f"cueprof.{v:g}"
+                if self.rd.stage_done(f"{tag}.row"):
+                    rows.append(dict(json.loads(str(self.rd.load_stage(f"{tag}.row")["row"]))))
+                    continue
+                problem.layout = self._band_fixed(layout, par, v)
+                self._load_model_state(problem, est_state, f"the {stage} estimate")
+                theta0 = np.array(est.theta, dtype=float)
+                theta0[k] = v
+                log.info("cue_profile: %s = %g", par, v)
+                r = minimize(problem, weighting, self._options(stage=tag, theta0=theta0, max_iterations=self._limit()),
+                             checkpoint=self.rd)
+                row = {"value": v, "q": float(r.q), "convergence": r.convergence.value,
+                       "theta": dict(zip(layout.names, map(float, r.theta)))}
+                rows.append(row)
+                self.rd.save_stage(f"{tag}.row", {"row": json.dumps(to_jsonable(row))})
+        finally:
+            problem.layout = layout
+        q_est = float(est.q)
+        q_min = min([q_est] + [r["q"] for r in rows if np.isfinite(r["q"])])
+        inside = [r["value"] for r in rows if r["q"] - q_min <= 3.84]
+        summary = {"parameter": par, "estimate_stage": stage, "estimate": float(est.theta[k]), "q_estimate": q_est,
+                   "q_min": q_min, "rows": rows, "lr_set_3_84": inside,
+                   "note": "q(v) re-optimised over every other parameter; the LR set lists profile points within 3.84 "
+                           "of the minimum, the estimate itself included in the minimum"}
+        atomic_write(out_dir / "profile.json", json.dumps(to_jsonable(summary), indent=1).encode())
+        self.rd.save_stage("cue_profile", {"done": True})
+        return summary
+
+    def counterfactuals(self) -> dict[str, Any]:
+        """The spec's counterfactuals at the last finished estimate (``spec.counterfactuals(pipe, problem, result,
+        out)``, typically through ``nfp_harness.counterfactuals``); writes ``counterfactuals/summary.json``."""
+        hook = getattr(self.spec, "counterfactuals", None)
+        if not callable(hook):
+            raise StageRefused("this spec has no counterfactuals")
+        problem, res, stage = self.estimate()
+        out = self.path / "counterfactuals"
+        out.mkdir(exist_ok=True)
+        summary = {"estimate_stage": stage, "theta": dict(zip(problem.layout.names, map(float, res.theta)))}
+        summary.update(hook(self, problem, res, out))
+        atomic_write(out / "summary.json", json.dumps(to_jsonable(summary), indent=1).encode())
+        self.rd.save_stage("counterfactuals", {"estimate_stage": stage})
+        return summary
 
     # band name -> (spec attribute prefix, checkpoint tag prefix, default parameter)
     _BANDS = {"sigma_p_band": ("band", "band", "sigma_p"), "a_lo_band": ("a_lo_band", "aband", "a_lo")}
