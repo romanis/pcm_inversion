@@ -43,7 +43,9 @@ find_package(OpenMP)
 # create python library if pybind11 is found
 if(pybind11_FOUND)
 
-    pybind11_add_module(python_market_share "${ROOT}/market_share/pcm_market_share.cpp" "${ROOT}/python_bindings/market_share_python.cpp")
+    # pybind11 strips Release modules after linking; keep the symbols for core-dump debugging.
+    set(CMAKE_STRIP "")
+    pybind11_add_module(python_market_share "${ROOT}/market_share/pcm_geometry.cpp" "${ROOT}/market_share/pcm_market_share.cpp" "${ROOT}/python_bindings/market_share_python.cpp")
     target_include_directories(python_market_share PUBLIC ${Python_INCLUDE_DIRS})
     target_include_directories(python_market_share PUBLIC ${Boost_INCLUDE_DIR} )
     target_include_directories(python_market_share PUBLIC "${ROOT}/market_share/")
@@ -56,6 +58,19 @@ if(pybind11_FOUND)
     target_include_directories(python_pcm_inversion PUBLIC "${ROOT}/inversion_algorithm/")
     target_link_libraries(python_pcm_inversion PUBLIC Eigen3::Eigen )
     target_link_libraries(python_pcm_inversion PUBLIC market_inversion )
+
+    pybind11_add_module(python_pcm_demand "${ROOT}/python_bindings/pcm_demand_python.cpp")
+    target_include_directories(python_pcm_demand PUBLIC "${ROOT}/market_share/" "${ROOT}/demand_model/")
+    target_link_libraries(python_pcm_demand PUBLIC pcm_kernel Eigen3::Eigen)
+
+    # Estimation harness kernel module (docs/estimation_harness/DESIGN.md 1.2), written into the package.
+    pybind11_add_module(pcm_kernel_py
+        ${ROOT}/python_bindings/pcm_kernel_python.cpp ${ROOT}/python_bindings/bind_solve.cpp
+        ${ROOT}/python_bindings/bind_events.cpp ${ROOT}/python_bindings/bind_welfare.cpp
+        ${ROOT}/python_bindings/bind_groups.cpp ${ROOT}/python_bindings/bind_second_choice.cpp)
+    target_link_libraries(pcm_kernel_py PRIVATE pcm_kernel)
+    set_target_properties(pcm_kernel_py PROPERTIES OUTPUT_NAME pcm_kernel
+        LIBRARY_OUTPUT_DIRECTORY ${ROOT}/nfp_harness/_native)
     
 
 

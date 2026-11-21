@@ -2,7 +2,9 @@
 #define __PCM_MARKET_SHARE_H__
 
 #include <vector>
+#include <cmath>
 #include <Eigen/Dense>
+#include "pcm_geometry.hpp"
 
 
 using Eigen::MatrixXd;
@@ -65,9 +67,12 @@ namespace pcm_share{
      */
     Eigen::ArrayXd cond_share(const Eigen::ArrayXd& delta, const Eigen::ArrayXd& p, double sigma_p, bool check_positive_shares = true); 
 
-
+    /** The untruncated vertical-model starting point: pcm_geometry::initial_guess, kept here for the legacy callers. */
     Eigen::ArrayXd initial_guess(const Eigen::ArrayXd& shares_data, const Eigen::ArrayXd& p, double sigma_p);
 
-
 }
+
+/** The vertical frontier of one draw; the one implementation is pcm_geometry::index_positive_shares. */
+using pcm_geometry::index_positive_shares;
+
 #endif // __PCM_MARKET_SHARE_H__

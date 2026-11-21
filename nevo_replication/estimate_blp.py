@@ -6,7 +6,7 @@ plus the post-estimation tutorial for elasticities and markups under alternative
 ownership structures (single-product, actual multi-brand firms, full collusion),
 which is the decomposition of Nevo (1998/2001).
 
-Run:  PYTHONPATH=nevo_replication/.vendor python nevo_replication/blp_baseline.py
+Run:  PYTHONPATH=nevo_replication/.vendor python nevo_replication/estimate_blp.py
 """
 from __future__ import annotations
 
