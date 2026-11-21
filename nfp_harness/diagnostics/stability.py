@@ -6,7 +6,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from ..types import DiagnosticBlock, OptimizeResult
+from ..types import ConvergenceClass, DiagnosticBlock, OptimizeResult
 
 __all__ = ["STABILITY_DEFAULTS", "integration_stability", "multistart_summary"]
 
@@ -25,6 +25,9 @@ def integration_stability(result: OptimizeResult, reevaluate: Callable[[np.ndarr
 
     ``reevaluate`` re-runs at most 20 iterations from the estimate with draws doubled. STABLE if every
     parameter moves less than 0.5 SE (or 0.1 natural units without SEs), else UNSTABLE with the list.
+    INCONCLUSIVE (block status ``flag``) when the re-run did not evaluate the estimate: it ended INVERSION_FAILED
+    (e.g. its start point failed, so it took no step) or its q is not finite. Its parameters then cannot have moved, so a zero change says
+    nothing; the message gives the re-run's own reason (which markets failed).
 
     The change in q at the estimate is read from the first history record of the re-run when that
     record is at the estimate, else the endpoint q is compared. ``headlines`` maps a statistic name
@@ -44,6 +47,15 @@ def integration_stability(result: OptimizeResult, reevaluate: Callable[[np.ndarr
         block.values.update(status="FAILED", dq=None, changes={})
         block.messages.append(f"FAIL: Integration check failed: re-run with doubled draws raised "
                               f"{type(exc).__name__}: {exc}.")
+        return block
+    failed = _rerun_failure(re)
+    if failed:
+        block.status = "flag"
+        block.values.update(status="INCONCLUSIVE", dq=None, dq_endpoint=None, changes={}, headlines={},
+                            rerun_class=re.convergence.value, rerun_iterations=re.accepted_steps, unstable=[],
+                            reason=failed)
+        block.messages.append(f"FLAG: Integration INCONCLUSIVE with doubled draws: {failed}. No parameter or q "
+                              f"comparison is possible.")
         return block
     first = re.history[0] if re.history else None
     if first is not None and np.allclose(first.theta, theta, rtol=0, atol=1e-12) and np.isfinite(first.q):
@@ -79,6 +91,16 @@ def integration_stability(result: OptimizeResult, reevaluate: Callable[[np.ndarr
         block.messages.append(f"Integration STABLE with doubled draws: every parameter moved less than {unit_txt}; "
                               f"q at the estimate changed by {dq_at:+.4g}.")
     return block
+
+
+def _rerun_failure(re: OptimizeResult) -> str:
+    """Why the re-run did not evaluate the estimate, or '' when it did."""
+    msg = f" ({re.message})" if getattr(re, "message", "") else ""
+    if re.convergence is ConvergenceClass.INVERSION_FAILED:
+        return f"the re-run ended INVERSION_FAILED after {re.accepted_steps} accepted steps{msg}"
+    if not np.isfinite(re.q):
+        return f"the re-run ended {re.convergence.value} with q = {re.q}{msg}"
+    return ""
 
 
 def multistart_summary(results: Sequence[OptimizeResult], units: np.ndarray, tol: float = 0.1) -> dict[str, Any]:

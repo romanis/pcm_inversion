@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 #include <Eigen/Dense>
-#include "pcm_demand.hpp"
+#include "pcm_aggregate.hpp"
 
 /**
  * First frontier events along a direction, and frontier signatures
@@ -12,10 +12,10 @@
  *
  * Draw i's frontier F_i is the set of vertices of the increasing part of the upper convex hull of
  * {(0, 0)} U {(p_j, y_ij)}, y_ij = delta_j + x_j . t_i, excluding the origin. Collinear points are
- * not vertices, which matches index_positive_shares (pcm_market_share.cpp): a product is on F_i
+ * not vertices, which matches pcm_geometry::index_positive_shares: a product is on F_i
  * exactly when it has positive conditional share. Membership does not depend on c_i or sigma_p
  * (DESIGN F5), so the scale and sigma_p components of a direction never cause an event. With a bound
- * lo > 0 (pcm_demand::Params) the hull is that of (p_j, y_ij - lo_y,i p_j) with lo_y,i the bound in y units:
+ * lo > 0 (pcm_aggregate::Params) the hull is that of (p_j, y_ij - lo_y,i p_j) with lo_y,i the bound in y units:
  * a vertex has a window of positive mass exactly when its entry slope in y units exceeds lo_y,i, so F_i is the
  * set of products with positive conditional share under the bound. Under BoundKind::ALPHA lo_y,i = lo, so F5
  * still holds; under BoundKind::A lo_y,i = lo c_i, so membership depends on c_i (never on sigma_p) and the scale
@@ -57,20 +57,20 @@ constexpr int MASS_GRID = 64;
  * @throws std::invalid_argument on inconsistent sizes, unsorted or non-positive prices, non-finite input
  */
 StepEvents max_step(const Eigen::ArrayXd & delta, const Eigen::ArrayXd & delta_dot,
-                    const pcm_demand::Market & mk, const pcm_demand::Params & prm,
+                    const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm,
                     const Eigen::ArrayXd & dtheta, double tau_max, int n_threads);
 
 /** Hash of each draw's frontier F_i (the ordered product indices), one entry per draw. */
-std::vector<uint64_t> frontier_signature(const Eigen::ArrayXd & delta, const pcm_demand::Market & mk,
-                                         const pcm_demand::Params & prm, int n_threads);
+std::vector<uint64_t> frontier_signature(const Eigen::ArrayXd & delta, const pcm_aggregate::Market & mk,
+                                         const pcm_aggregate::Params & prm, int n_threads);
 
 /**
  * Realised affected mass for the guard of DESIGN 4.4: for each product j,
  * A_j = sum_{i: j in F_i, changed[i]} w_i / B_j with F_i and B_j taken at (delta, prm), 0 if B_j = 0.
  * changed[i] is typically frontier_signature at the trial point != frontier_signature here.
  */
-Eigen::ArrayXd affected_mass(const Eigen::ArrayXd & delta, const pcm_demand::Market & mk,
-                             const pcm_demand::Params & prm, const std::vector<uint8_t> & changed,
+Eigen::ArrayXd affected_mass(const Eigen::ArrayXd & delta, const pcm_aggregate::Market & mk,
+                             const pcm_aggregate::Params & prm, const std::vector<uint8_t> & changed,
                              int n_threads);
 
 }  // namespace pcm_events

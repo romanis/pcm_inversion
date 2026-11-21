@@ -28,11 +28,11 @@ find_package(Boost REQUIRED)
 find_package(Eigen3 3.4 REQUIRED NO_MODULE)
 find_package(OpenMP)
 
-add_library(pcm_market_share SHARED ./pcm_market_share.cpp)
+add_library(pcm_market_share SHARED ./pcm_geometry.cpp ./pcm_market_share.cpp)
 target_include_directories(pcm_market_share PUBLIC ${Boost_INCLUDE_DIR} )
 
 set_target_properties(pcm_market_share PROPERTIES PUBLIC_HEADER ./pcm_market_share.hpp)
-set_target_properties(pcm_market_share PROPERTIES PUBLIC_HEADER "${ROOT}/market_share/pcm_market_share.hpp")
+set_target_properties(pcm_market_share PROPERTIES PUBLIC_HEADER "${ROOT}/market_share/pcm_market_share.hpp;${ROOT}/market_share/pcm_geometry.hpp")
 
 
 target_link_libraries(pcm_market_share PUBLIC Eigen3::Eigen )

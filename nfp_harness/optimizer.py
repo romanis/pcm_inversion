@@ -92,10 +92,30 @@ class OptimizerOptions:
     floored at ``noise_Delta_floor`` (1e-3 natural units, the supply block's secant step): below it a rejection
     carries no information about the direction, so a rejection at the floor goes straight to the probe.
 
+    GMY round 1 (a trust-region collapse on a kinked objective: step 2 crawled at Delta 1e-3 for 56 steps while
+    0.1-unit steps from the same point lowered q by 913), each off by default, noise mode only:
+
+    - ``noise_Delta_floor`` is in natural units, so it is relative to each parameter's scale; a stage whose objective is
+      dominated by kinked blocks (second choices, step-function micro moments) sets it to the scale at which the
+      Gauss-Newton model is informative, e.g. 0.05, instead of the supply block's 1e-3 secant step.
+    - ``probe_restart_at_step``: a restart from a probe sets the trust radius to at least the winning probe step itself
+      (in natural units), not only its More-scaled length, so a probe that won at 0.1 along a coordinate whose More
+      weight is 0.01 does not restart at a radius of 0.001.
+    - ``probe_restart_gain`` (q units): a probe whose gain exceeds it restarts the stage even after
+      ``max_probe_restarts``, so the stage is not classified CONVERGED_NOISE while +-0.1-unit compass steps still lower
+      q by more than this amount. Each such restart lowers q by more than ``probe_restart_gain``, so the stage ends.
+
+    GMY round 2 (step 1 spent two hours on compass restarts gaining 1 to 3 on q near 3,870), off by default:
+
+    - ``probe_restart_gain_rel`` (a fraction of q at the probe's origin): a probe whose gain is at most
+      ``probe_restart_gain_rel`` x q never restarts the stage, also within ``max_probe_restarts``, and a probe whose gain
+      exceeds it restarts the stage past ``max_probe_restarts`` (with ``probe_restart_gain`` also set, past the cap the
+      gain must exceed both). Each restart lowers q by more than that fraction of q, so the stage ends.
+
     Outer solver: ``outer`` is ``"nested"`` (this module, the default) or ``"mpec"`` (``mpec.minimize_mpec``, IPOPT on
     (theta, delta) for demand-only problems, LEARNINGS 31) with ``mpec_hessian`` ``"gn"`` or ``"lbfgs"`` and at most
-    ``mpec_max_restarts`` lift-and-restart rounds. These three fields are left out of the repr, so the nested
-    options print, and hash in profile configurations, as before.
+    ``mpec_max_restarts`` lift-and-restart rounds. These three fields and ``probe_restart_gain_rel`` are left out of the
+    repr, so the options print, and hash in profile configurations, as before.
     """
 
     Delta_0: float = 0.3  # initial box radius, natural units
@@ -134,6 +154,9 @@ class OptimizerOptions:
     probe_gain_factor: float = 10.0
     max_probe_restarts: int = 5
     noise_Delta_floor: float = 1e-3  # natural units; noise mode only
+    probe_restart_at_step: bool = False
+    probe_restart_gain: float | None = None  # q units; None: max_probe_restarts always ends the stage
+    probe_restart_gain_rel: float | None = field(default=None, repr=False)  # fraction of q; None: no threshold
     outer: str = field(default="nested", repr=False)
     mpec_hessian: str = field(default="gn", repr=False)
     mpec_max_restarts: int = field(default=3, repr=False)
@@ -467,18 +490,26 @@ def _record(stage: str, it: int, accepted: bool, q: float, ev: Evaluation | None
 def _probe_noise(problem: Any, obj: _Objective, theta: np.ndarray, ev: Evaluation, arr: dict[str, np.ndarray],
                  h: float, heartbeat: Any = None, path: Any = None, stage: str = "", it: int = 0) -> tuple[float, int]:
     """(noise floor, evaluations): the largest change of any block of q over evaluations at theta +- h unit_k for
-    every free k (no Jacobian), against the accepted point ``ev`` (fixed weighting; NaN under CUE). The model
-    is restored to the accepted state after every probe."""
-    if obj.mode == "cue" or obj.W is None:
+    every free k (no Jacobian), against the accepted point ``ev``. Under a fixed weighting a block's q is
+    ``n g_b' W_bb g_b``; under CUE it is the block's term ``n g_b' (S^{-1} g)_b`` of ``q = n g' S(theta)^{-1} g`` with
+    each point's own S (the terms sum to q). The model is restored to the accepted state after every probe."""
+    if obj.mode != "cue" and obj.W is None:
         return float("nan"), 0
     n = _n_of(problem, ev)
     W = obj.W
     blocks = dict(ev.blocks) or {"all": slice(0, ev.g.size)}
 
-    def block_q(g: np.ndarray) -> dict[str, float]:
+    def block_q_of(e: Evaluation) -> dict[str, float]:
+        g = e.g
+        if obj.mode == "cue":
+            a = _solve_sym(np.asarray(problem.covariance(e), dtype=float), g)
+            return {b: float(n * g[sl] @ a[sl]) for b, sl in blocks.items()}
         return {b: float(n * g[sl] @ W[sl, sl] @ g[sl]) for b, sl in blocks.items()}
 
-    base = block_q(ev.g)
+    try:
+        base = block_q_of(ev)
+    except (NotImplementedError, np.linalg.LinAlgError, ValueError):
+        return float("nan"), 0
     floor, nev = 0.0, 0
     for k in np.nonzero(arr["free"])[0]:
         for sgn in (1.0, -1.0):
@@ -493,9 +524,22 @@ def _probe_noise(problem: Any, obj: _Objective, theta: np.ndarray, ev: Evaluatio
                 heartbeat(path, it, stage=stage)
             if not e.ok or not np.all(np.isfinite(e.g)):
                 continue
-            qb = block_q(e.g)
+            try:
+                qb = block_q_of(e)
+            except (NotImplementedError, np.linalg.LinAlgError, ValueError):
+                continue
             floor = max(floor, max(abs(qb[b] - base[b]) for b in blocks))
     return floor, nev
+
+
+def _probe_steps(steps: tuple[float, ...], fail_cap: float) -> tuple[float, ...]:
+    """The probe steps no longer than ``fail_cap`` (a step length at which trials failed to evaluate); when every step
+    is longer, the steps scaled so the largest equals the cap."""
+    ok = tuple(s for s in steps if s <= fail_cap)
+    if ok or not math.isfinite(fail_cap):
+        return ok if ok else tuple(steps)
+    m = max(steps)
+    return tuple(s * fail_cap / m for s in steps)
 
 
 def _terminal_probe(problem: Any, obj: _Objective, theta: np.ndarray, q: float, d_gn: np.ndarray,
@@ -644,8 +688,9 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         heartbeat(checkpoint.path, it, stage=stage)
     if not ev.ok or ev.G is None:
         _call_hook(problem, "restore", theta)
-        msg = (f"accepted point could not be evaluated on resume (status {ev.status.value})" if resume is not None
-               else f"start point could not be evaluated (status {ev.status.value})")
+        msg = (f"accepted point could not be evaluated on resume (status {ev.status.value}{_failed_markets(ev)})"
+               if resume is not None else f"start point could not be evaluated (status {ev.status.value}"
+               f"{_failed_markets(ev)})")
         if resume is None:
             history.append(_record(stage, it, False, float("nan"), None, obj, float("nan"), Delta, 1.0, ev.status,
                                    time.monotonic() - t_e, theta))
@@ -682,6 +727,11 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
 
     model: _Model | None = None
     probe_due = ""         # why the next step goes to the terminal probe (a sub-noise rejection, one at the floor)
+    # The radius floor in force: noise_Delta_floor, lowered to half of any radius at which a trial failed to
+    # evaluate, so the floor never pushes the stage back to a step length known to leave the evaluable region.
+    floor = float(options.noise_Delta_floor)
+    fail_cap = math.inf    # half the smallest radius at which a trial failed to evaluate; caps the probe steps too
+    since_fail = 0         # evaluated trials since the last failed one; every 10 of them double fail_cap again
     probe_notes: list[str] = []
 
     def noise_mode() -> bool:
@@ -735,13 +785,19 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
             probe_due = ""
             need = options.probe_gain_factor * noise_floor
             pt, pq, n_probe, summary, win = _terminal_probe(
-                problem, obj, theta, q, d_gn, arr, tuple(options.probe_steps), heartbeat,
+                problem, obj, theta, q, d_gn, arr, _probe_steps(options.probe_steps, fail_cap), heartbeat,
                 None if checkpoint is None else checkpoint.path, stage, it, gain_needed=need)
             nev += n_probe
             log.info("stage %s it %d: %s; %s", stage, it, why, summary)
             probe_notes.append(f"{why}; {summary}")
             gain = q - pq
-            restart = win > 0 and gain > need and probe_restarts < options.max_probe_restarts
+            rel = None if options.probe_restart_gain_rel is None else options.probe_restart_gain_rel * abs(q)
+            past = [x for x in (options.probe_restart_gain, rel) if x is not None]
+            restart = win > 0 and gain > need and (rel is None or gain > rel) and (
+                probe_restarts < options.max_probe_restarts or (bool(past) and gain > max(past)))
+            if win > 0 and gain > need and rel is not None and gain <= rel:
+                probe_notes.append(f"the probe's gain {gain:.4g} is at most {options.probe_restart_gain_rel:g} x q = "
+                                   f"{rel:.4g}, so the stage does not restart from it")
             ev_p = problem.evaluate(pt, True) if restart else None
             if ev_p is not None:
                 nev += 1
@@ -764,7 +820,8 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
             dk = scales(model, None)
             w_new = _more_weights(dk, options.more_scale_clip) if options.more_scaling else np.ones(int(f.sum()))
             Delta = min(options.Delta_max, max(float(np.max(np.abs(w_new * d_win))) if d_win.size else 0.0,
-                                               0.25 * options.Delta_0, options.noise_Delta_floor))
+                                               (float(win) if options.probe_restart_at_step else 0.0),
+                                               0.25 * options.Delta_0, floor))
             lm = 0.0
             acc += 1
             rec = _record(stage, it, True, q, ev, obj, float("nan"), Delta, 1.0, EvalStatus.OK, 0.0, theta)
@@ -807,11 +864,16 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
         if not trial.ok or trial.G is None or not np.all(np.isfinite(trial.g)):
             _call_hook(problem, "restore", theta)
             status = trial.status if not trial.ok else EvalStatus.NUMERICAL
-            Delta = 0.25 * dinf
-            if noise_mode() and Delta < options.noise_Delta_floor:
-                if not probe_due and Delta_used <= options.noise_Delta_floor * (1 + 1e-9):
-                    probe_due = f"a trial at the radius floor {options.noise_Delta_floor:g} failed to evaluate"
-                Delta = options.noise_Delta_floor
+            # A failed evaluation (e.g. an inversion that does not converge) says the step left the region where the
+            # model evaluates, which is information about the step length: the radius shrinks below the noise floor
+            # (down to Delta_min) instead of being reset to it. Flooring it here repeated the same failing step, and
+            # the terminal probe at +-0.1 units failed the same way. The floor still applies to rejections of
+            # evaluated trials below.
+            Delta = max(0.25 * dinf, options.Delta_min)
+            if noise_mode():
+                fail_cap = min(fail_cap, max(0.5 * Delta_used, options.Delta_min))
+                floor = min(floor, fail_cap)
+                since_fail = 0
             rec = _record(stage, it, False, float("nan"), trial, obj, float("nan"), Delta_used, tau_cap, status, secs,
                           trial_theta, pred_mass, real_mass)
             history.append(rec)
@@ -838,12 +900,20 @@ def _run_stage(problem: Any, mode: str, W: np.ndarray | None, W1: np.ndarray | N
             Delta = 0.25 * dinf
         elif rho > 0.75 and dinf >= 0.9 * Delta:
             Delta = min(2.0 * Delta, options.Delta_max)
-        if noise_mode() and Delta < options.noise_Delta_floor:
+        if math.isfinite(fail_cap):
+            # growth stays below a step length that failed to evaluate; the cap relaxes after 10 evaluated trials,
+            # since a failure says the region was left at that point, not everywhere
+            since_fail += 1
+            if since_fail >= 10:
+                fail_cap, since_fail = 2.0 * fail_cap, 0
+                floor = min(float(options.noise_Delta_floor), fail_cap)
+            Delta = min(Delta, max(fail_cap, options.Delta_min))
+        if noise_mode() and Delta < floor:
             # below the secant step a rejection says nothing about the direction: floor the radius, and a rejection
             # already at the floor goes to the probe
-            if not accept and not probe_due and Delta_used <= options.noise_Delta_floor * (1 + 1e-9):
-                probe_due = f"a rejection at the radius floor {options.noise_Delta_floor:g}"
-            Delta = options.noise_Delta_floor
+            if not accept and not probe_due and Delta_used <= floor * (1 + 1e-9):
+                probe_due = f"a rejection at the radius floor {floor:g}"
+            Delta = floor
         if tau_cap < 1.0 and rho > 0.75:
             q_mass = min(options.q_mass_max, 1.5 * q_mass)
         if math.isfinite(real_mass) and math.isfinite(pred_mass) and real_mass > 2.0 * pred_mass:
@@ -912,6 +982,16 @@ def _finish(problem: Any, cls: ConvergenceClass, theta: np.ndarray, ev: Evaluati
         checkpoint.save_stage(stage, state)
         checkpoint.save(state)
     return res
+
+
+def _failed_markets(ev: Any) -> str:
+    """'; markets <id>: <kernel status> (<stages>), ...' for the markets of a failed evaluation that did not solve
+    (the model's ``per_market`` records), or '' when the evaluation carries none."""
+    pm = [m for m in (ev.aux.get("per_market") or []) if isinstance(m, dict) and m.get("status", "ok") != "ok"]
+    if not pm:
+        return ""
+    return "; markets " + ", ".join(f"{m.get('market_id')}: {m.get('kernel_status', m.get('status'))}"
+                                    + (f" ({m['stages']})" if m.get("stages") else "") for m in pm)
 
 
 def _rebuild_done(problem: Any, mode: str, st: dict[str, Any], options: OptimizerOptions,

@@ -260,7 +260,8 @@ def segmented_corner(theta: np.ndarray, layout: Any, price_range: float | None, 
                      thresholds: Mapping[str, Any] | None = None,
                      binary_columns: Sequence[str] = ()) -> dict[str, Any]:
     """SEGMENTED_CORNER (LEARNINGS 13): for a taste spread on a binary column,
-    ``2 (1 - Phi(range / sigma)) > 0.2``, or cross-group diversion below 1%.
+    ``2 (1 - Phi(range / sigma)) > 0.2``, or cross-group diversion below 1%: the share of the sales-weighted inside
+    diversion that leaves its group, pooled over groups (``economics.pooled_cross_group_diversion``).
 
     ``binary_columns`` names the 0/1 characteristics (body dummies for Petrin)."""
     th = _merge(thresholds)
@@ -277,7 +278,8 @@ def segmented_corner(theta: np.ndarray, layout: Any, price_range: float | None, 
             f"({100 * h['share_beyond']:.0f}% have taste beyond the price range {price_range:.4g})." for h in hits]
     div_hit = cross_group_diversion is not None and cross_group_diversion < th["corner_diversion"]
     if div_hit:
-        msgs.append(f"Cross-group diversion is {100 * cross_group_diversion:.2f}%, below "
+        msgs.append(f"Cross-group diversion (sales-weighted inside diversion leaving its group) is "
+                    f"{100 * cross_group_diversion:.2f}%, below "
                     f"{100 * th['corner_diversion']:.0f}%: groups are separate markets.")
     ev = {"parameters": hits, "price_range": price_range, "cross_group_diversion": cross_group_diversion}
     return _result("SEGMENTED_CORNER", bool(hits) or div_hit, ev, " ".join(msgs))

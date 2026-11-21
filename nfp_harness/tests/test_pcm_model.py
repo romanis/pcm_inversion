@@ -12,6 +12,8 @@ import math
 import os
 import pathlib
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -250,6 +252,33 @@ def test_draws_and_markets(small: dict[str, Any]) -> None:
     x1 = prods["x1"]
     assert u[0] == pytest.approx(1.0 / x1.std()) and u[1] == 1.0 and u[4] == 0.1
     model.close()
+
+
+def test_antithetic_taste_draws(small: dict[str, Any]) -> None:
+    """``antithetic`` pairs the taste draws of the named dimensions within each market (exactly zero sum); the
+    demographic basis and the weights do not move, and the default draws are those of a model built without it."""
+    import math
+
+    syn = small
+    lay = synthetic_layout()
+    ref = PCMModel(PCMSpec(CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2)
+    off = PCMModel(PCMSpec(CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2, antithetic=())
+    one = PCMModel(PCMSpec(CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2, antithetic=("nu1",))
+    every = PCMModel(PCMSpec(CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2, antithetic=True)
+    assert ref.antithetic == () and one.antithetic == ("nu1",) and every.antithetic == ("nu0", "nu1")
+    for t in range(ref.T):
+        b0 = np.asarray(ref.kernel_market(t).taste_basis)
+        np.testing.assert_array_equal(np.asarray(off.kernel_market(t).taste_basis), b0)
+        b1 = np.asarray(one.kernel_market(t).taste_basis)
+        b2 = np.asarray(every.kernel_market(t).taste_basis)
+        assert math.fsum(b1[:, 1]) == 0.0 and math.fsum(b1[:, 0]) != 0.0
+        assert math.fsum(b2[:, 0]) == 0.0 and math.fsum(b2[:, 1]) == 0.0
+        np.testing.assert_array_equal(b2[:, 2], b0[:, 2])   # pi_x1_demo: the agent's demo, not a draw
+        np.testing.assert_array_equal(np.asarray(every.kernel_market(t).weights), np.asarray(ref.kernel_market(t).weights))
+    for m in (ref, off, one, every):
+        m.close()
+    with pytest.raises(ValueError, match="taste draw dimensions"):
+        PCMModel(PCMSpec(CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2, antithetic=("demo",))
 
 
 def test_status_not_exception(small: dict[str, Any]) -> None:
@@ -529,4 +558,69 @@ def test_a_bound_moves_with_the_price_scale(small: dict[str, Any]) -> None:
     rows = np.concatenate([m.rows for m in ma.markets])
     np.testing.assert_allclose(D, fd[rows], rtol=1e-4, atol=1e-6)
     for m in (ma, ml):
+        m.close()
+
+
+def _bound_layout(a: float) -> ParameterLayout:
+    return ParameterLayout(list(synthetic_layout().specs) + [ParameterSpec("a_lo", "bound", None, None, a, a, a,
+                                                                           unit=0.1, free=False)])
+
+
+def test_state_under_another_bound_is_a_warm_start(small: dict[str, Any]) -> None:
+    """A state solved at a_lo 0.3 warm-starts a model at a_lo 0.2 (a delta file reused across a_lo values): the warm
+    stage and the path in a_lo solve it, with no cold stage, to the cold answer."""
+    spec = PCMSpec(CHARS)
+    m3 = PCMModel(spec, small["data"], _bound_layout(0.3), small["nu"], small["seed"], total_threads=2)
+    s3 = m3.solve(np.r_[THETA_TRUE, 0.3], KernelRequests(), False)
+    assert s3.status is EvalStatus.OK
+    m3.commit(np.r_[THETA_TRUE, 0.3])
+    m2 = PCMModel(spec, small["data"], _bound_layout(0.2), small["nu"], small["seed"], total_threads=2)
+    cold = m2.solve(np.r_[THETA_TRUE, 0.2], KernelRequests(), False)
+    assert all(pm["stages"].startswith("cold ok") for pm in cold.per_market)
+    m2.load_state_dict(m3.state_dict())
+    warm = m2.solve(np.r_[THETA_TRUE, 0.2], KernelRequests(), False)
+    assert warm.status is EvalStatus.OK
+    for pm in warm.per_market:
+        assert pm["stages"].startswith("warm") and "cold" not in pm["stages"], pm["stages"]
+    np.testing.assert_allclose(warm.delta, cold.delta, atol=1e-7)
+    for m in (m3, m2):
+        m.close()
+
+
+def test_finished_markets_hand_their_threads_on(small: dict[str, Any]) -> None:
+    """``_rebalance``: as markets finish, the ones still running get every thread; the last one holds them all."""
+    model = PCMModel(PCMSpec(CHARS), small["data"], synthetic_layout(), small["nu"], small["seed"], total_threads=12)
+
+    class Budget:
+        value = 1
+
+    budgets = [Budget(), Budget()]
+    gate = [threading.Event() for _ in budgets]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(gate[t].wait, 30) for t in range(2)]
+        gate[0].set()   # market 0 finishes first
+        done = pool.submit(model._rebalance, futures, budgets)
+        for _ in range(3000):
+            if budgets[1].value == 12:
+                break
+            time.sleep(0.01)
+        assert budgets[1].value == 12
+        gate[1].set()
+        done.result(timeout=30)
+    model.close()
+
+
+def test_cold_draws_reaches_the_kernel(small: dict[str, Any]) -> None:
+    """``cold_draws`` turns on the kernel's draw homotopy for markets with no warm start (off by default)."""
+    m0 = PCMModel(PCMSpec(CHARS), small["data"], synthetic_layout(), small["nu"], small["seed"], total_threads=2)
+    m1 = PCMModel(PCMSpec(CHARS), small["data"], synthetic_layout(), small["nu"], small["seed"], total_threads=2,
+                  cold_draws=16)
+    a, b = m0.solve(THETA_TRUE, KernelRequests(), False), m1.solve(THETA_TRUE, KernelRequests(), False)
+    assert a.status is EvalStatus.OK and b.status is EvalStatus.OK
+    assert all(pm["stages"].startswith("cold ok") for pm in a.per_market)
+    assert all(pm["stages"].startswith("draws R=") for pm in b.per_market), [pm["stages"] for pm in b.per_market]
+    np.testing.assert_allclose(a.delta, b.delta, atol=1e-7)
+    with pytest.raises(ValueError):
+        PCMModel(PCMSpec(CHARS), small["data"], synthetic_layout(), small["nu"], small["seed"], cold_draws=-1)
+    for m in (m0, m1):
         m.close()

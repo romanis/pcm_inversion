@@ -13,17 +13,17 @@ namespace py = pybind11;
 
 namespace {
 
-// A market is either a registered pcm_demand::Market (if some module registered the type) or any
+// A market is either a registered pcm_aggregate::Market (if some module registered the type) or any
 // mapping / object with x, p, weights, taste_basis, taste_col and optionally scale_basis.
-pcm_demand::Market to_market(const py::object & obj) {
-    if (py::isinstance<pcm_demand::Market>(obj)) return obj.cast<pcm_demand::Market>();
+pcm_aggregate::Market to_market(const py::object & obj) {
+    if (py::isinstance<pcm_aggregate::Market>(obj)) return obj.cast<pcm_aggregate::Market>();
     const bool is_map = py::isinstance<py::dict>(obj);
     auto has = [&](const char * k) { return is_map ? obj.cast<py::dict>().contains(k) : py::hasattr(obj, k); };
     auto get = [&](const char * k) -> py::object {
         if (!has(k)) throw py::value_error(std::string("market is missing '") + k + "'");
         return is_map ? py::object(obj.cast<py::dict>()[k]) : obj.attr(k);
     };
-    pcm_demand::Market mk;
+    pcm_aggregate::Market mk;
     mk.x = get("x").cast<Eigen::MatrixXd>();
     mk.p = get("p").cast<Eigen::ArrayXd>();
     mk.weights = get("weights").cast<Eigen::ArrayXd>();
@@ -41,8 +41,8 @@ void bind_events(py::module_ & m) {
           [](const Eigen::ArrayXd & delta, const Eigen::ArrayXd & delta_dot, const py::object & market,
              const Eigen::ArrayXd & theta, const Eigen::ArrayXd & phi, double sigma_p, const Eigen::ArrayXd & dtheta,
              double tau_max, int n_threads, double alpha_lo, double a_lo) {
-              const pcm_demand::Market mk = to_market(market);
-              const pcm_demand::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "max_step");
+              const pcm_aggregate::Market mk = to_market(market);
+              const pcm_aggregate::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "max_step");
               pcm_events::StepEvents ev;
               {
                   py::gil_scoped_release release;
@@ -75,8 +75,8 @@ void bind_events(py::module_ & m) {
     m.def("frontier_signature",
           [](const Eigen::ArrayXd & delta, const py::object & market, const Eigen::ArrayXd & theta,
              const Eigen::ArrayXd & phi, double sigma_p, int n_threads, double alpha_lo, double a_lo) {
-              const pcm_demand::Market mk = to_market(market);
-              const pcm_demand::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "frontier_signature");
+              const pcm_aggregate::Market mk = to_market(market);
+              const pcm_aggregate::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "frontier_signature");
               std::vector<uint64_t> sig;
               {
                   py::gil_scoped_release release;
@@ -96,8 +96,8 @@ void bind_events(py::module_ & m) {
           [](const Eigen::ArrayXd & delta, const py::object & market, const Eigen::ArrayXd & theta,
              const Eigen::ArrayXd & phi, double sigma_p, const py::array_t<bool, py::array::c_style | py::array::forcecast> & changed,
              int n_threads, double alpha_lo, double a_lo) {
-              const pcm_demand::Market mk = to_market(market);
-              const pcm_demand::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "affected_mass");
+              const pcm_aggregate::Market mk = to_market(market);
+              const pcm_aggregate::Params prm = bound_params(theta, phi, sigma_p, alpha_lo, a_lo, "affected_mass");
               if (changed.ndim() != 1) throw py::value_error("changed must be one-dimensional");
               std::vector<uint8_t> ch(changed.size());
               for (py::ssize_t i = 0; i < changed.size(); ++i) ch[i] = changed.data()[i] ? 1 : 0;

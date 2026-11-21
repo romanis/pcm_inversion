@@ -87,16 +87,23 @@ pcm_inversion/
       __init__.py
       pcm.py                       PCM adapter: markets, draws, kernel calls, threads, warm starts
       pcm_post.py                  elasticities, diversion, Nash costs, CS, counterfactuals
+      blp.py                       MixedLogitModel: the BLP contraction on the InnerModel interface (1.5)
     data.py                        tie breaking, QMC draws, agent crossing (model-agnostic helpers)
+    paper.py                       PaperSpec: what every paper's spec shares (1.4)
     _native/
       __init__.py                  imports pcm_kernel, explains how to build if it is missing
       pcm_kernel.cpython-312-x86_64-linux-gnu.so   build output (gitignored)
     tests/                         pytest tests, one file per module
+  market_share/
+    pcm_geometry.hpp / .cpp        layer 0: one draw's vertical choice problem (3.0)
   demand_model/
-    pcm_kernel.hpp / .cpp          solve_market (inversion + derivatives + micro parts)
+    pcm_aggregate.hpp / .cpp       layer 1: shares and derivatives over draws, the one draw loop (3.0)
+    pcm_invert.hpp / .cpp          layer 2: inversion and the solve_market stage machine (3.0)
+    pcm_kernel.hpp / .cpp          facade: solve_market (inversion + derivatives + micro parts)
     pcm_events.hpp / .cpp          max_step and frontier signatures
     pcm_welfare.hpp / .cpp         consumer surplus by frontier formula
-    pcm_kernel_test.cpp, pcm_events_test.cpp, pcm_welfare_test.cpp
+    pcm_groups.hpp / .cpp, pcm_second_choice.hpp / .cpp
+    pcm_*_test.cpp                 one gtest file per module
   python_bindings/
     pcm_kernel_python.cpp          PYBIND11_MODULE(pcm_kernel, m) calling the three bind_* functions
     bind_solve.cpp, bind_events.cpp, bind_welfare.cpp
@@ -116,8 +123,9 @@ Results go to `petrin_replication/results/harness/<run_id>/`, which `.gitignore`
 
 ### 1.2 CMake
 
-Existing targets (`pcm_market_share`, `market_inversion`, `pcm_demand`, `python_pcm_demand`, ...)
-are not changed. Additions:
+Existing targets (`pcm_market_share`, `market_inversion`, `python_pcm_demand`, ...) are not changed; the
+`pcm_demand` shared library is gone and `python_pcm_demand` links `pcm_kernel`. The kernel library (its current
+source list is in `demand_model/CMakeLists.txt`) as first added:
 
 `demand_model/CMakeLists.txt`:
 
@@ -135,7 +143,7 @@ foreach(t pcm_kernel_test pcm_events_test pcm_welfare_test)
 endforeach()
 ```
 
-The static library recompiles `pcm_demand.cpp` and `pcm_market_share.cpp` so the Python module is
+The static library recompiles `pcm_geometry.cpp` and `pcm_market_share.cpp` so the Python module is
 self-contained and does not depend on a shared library found through the build tree's RPATH.
 
 `python_bindings/CMakeLists.txt`, inside `if(pybind11_FOUND)`:
@@ -177,6 +185,62 @@ sys.path[:0] = [str(ROOT), str(ROOT / "nevo_replication" / ".vendor")]
 The environment lines must run before numpy is imported, so they live in the script, not in the
 package. `nfp_harness.runtime.check_environment()` warns if they were not set. Python tests run with
 `python -m pytest nfp_harness/tests`.
+
+### 1.4 Paper specs (`nfp_harness/paper.py`)
+
+A paper is a subclass of `paper.PaperSpec` in its replication folder's `estimate_pcm.py`; `pipeline.main(spec)` runs
+it. The border: the spec says what the paper is, the harness does everything a second paper would do the same way.
+Harness code never names a paper.
+
+The paper writes its data loader (products, agents, X1, Z, clusters), `base_layout()` (the nonlinear parameters with
+starts, bounds and units, nothing applied), `pcm_spec()` (kernel columns and solve settings), `moment_list(moments)`
+(the moments of each moment set), `normalisations` and `payload()` (the report's normalisation lines and the hashed
+description of what changes results), its own options (`add_paper_arguments`, `configure_paper`, `paper_run_key`),
+the pipeline's declarative fields (prefit and extensive free sets, gate profiles and rules, band values, optimizer
+options) and its postestimation (`post`, `headlines`, band rows, counterfactuals). Everything else is `PaperSpec` or
+the pipeline:
+
+- the options every paper shares: `--robustness` (choices and the switches that set the bound are spec fields),
+  `--a-lo`, `--fix`, `--start-theta` (`start_theta_keep` names the parameters that keep their starts),
+  `--start-theta-except`, `--warm-delta`, `--cold-draws`, `--max-iterations`, `--outer`, `--start-gate`, beside the
+  pipeline's own (`--stage`, `--nu`, `--seed`, `--threads`, `--detach`, `--band-values`, ...);
+- the run key: the paper's entries plus each shared option that differs from its default, and always `a_lo` and the
+  bound kind, so a run without an option keeps its directory (`nfp_harness/tests/test_run_keys.py` pins the run
+  directories and spec hashes of representative command lines of both papers); the spec hash adds the shared options
+  that are set to the paper's payload;
+- the layout the problems use: `base_layout()` with the start theta and the fixed values applied; warm starts from
+  another run's stage, matched by market and parameter name; the model (`PCMModel` on the paper's products and
+  agents, seed offset `draw_seed_offset`) and the `NFPGMMProblem` of a moment set; the named flat directions (the
+  utility-scale direction, plus `flat_directions`);
+- weighting, declared instead of coded: `concentrate_rows` and `start_concentrate_rows` (moment rows up-weighted by
+  `upweight` in the prefit and gate concentration and in the gate-minimum start, which also zeroes calibration rows;
+  `weighting.upweight_rows`), calibration rows bound in every W the stages minimise (`weighting.bind_calibration`),
+  and `step2_weighting` as a rule name (`weighting.STEP2_RULES`, e.g. `efficient_on_excluded`: W2 efficient on the
+  excluded instruments with beta kept at OLS, the other blocks fixed);
+- shared postestimation pieces: `pcm_post.point_economics` (a profile point's economics), `group_diversion_table`,
+  `elasticities_by_agent_group` (own elasticities of each agent group's demand), `draw_labels`,
+  `comparison.trimmed_mean`, `near_twins`, `load_summaries`, `pipeline.estimate_columns` (a band row's `at_bound`,
+  `q:<block>` and `theta:<name>`), `pipeline.at_band_points` (a band finish hook's per-point re-evaluation),
+  `pipeline.evaluation_record` and `diagnostics.identification.identification_summary`.
+
+### 1.5 BLP on the same problem path (`nfp_harness/models/blp.py`)
+
+`MixedLogitModel` is a random-coefficients logit inner model on the `InnerModel` interface `PCMModel` implements:
+theta is (pi on (characteristic, demographic) pairs, sigma on characteristics), one simulated consumer per agent,
+every market inverted by the BLP contraction with SQUAREM from the accepted delta (`commit`, `restore`,
+`warm_from_delta`), in parallel over markets. `solve` returns `shares`, `probabilities` and, when moments ask, the
+logit second-choice matrices of `SecondChoiceMoments` and the household sums of `GroupMicroMoments`, so an
+`NFPGMMProblem` takes the BLP model and the PCM interchangeably at the problem boundary. With `need_jacobian=True` it
+returns the analytic Jacobian: D_t = -(ds/ddelta)^{-1} ds/dtheta per market by the implicit function theorem from the
+logit probabilities, the partials of the household sums, the second-choice adjoint, and `ds_dp` (with the caller's
+linear price coefficient), so the Gauss-Newton optimizer fits a BLP problem as it fits a PCM one. The formulas are in
+the module docstring; `tests/test_blp_model.py` checks each against central differences, on synthetic markets and on
+GMY 1999, and recovers a known theta by `optimizer.minimize`. It does not serve micro parts (`RatioMicroMoment`).
+`gmy_replication/estimate_blp.py` solves its contraction through it, and `GMYLogit.problem()` builds GMY's step-1
+objective as an `NFPGMMProblem` with the harness's micro and second-choice moments; its q under W1 equals the
+script's sum of squared residuals (`tests/test_blp_model.py`). The script's outputs still come from the authors'
+residual formulas, so the `gmy_blp` golden is unchanged. `petrin_replication/estimate_blp.py` stays on pyblp (demand
+and supply estimated jointly by pyblp's optimizer; the harness's supply block is PCM-specific).
 
 ## 2. Problem, moments and parameters
 
@@ -381,7 +445,57 @@ Model, per draw i in a market with N products sorted by strictly increasing pric
 `log c_i = phi . scale_basis_i`, `a_i ~ LogNormal(0, sigma_p)`. Write `y_ij = delta_j + x_j . t_i`.
 Draw i's frontier F_i is the set of vertices of the increasing part of the upper convex hull of
 `{(0, 0)} U {(p_j, y_ij)}`, excluding the origin. Product j in F_i is bought by draw i for
-`a c_i` in `(e_{next}, e_j)`, where e are the hull slopes (`cond_vertical` in `pcm_demand.cpp`).
+`a c_i` in `(e_{next}, e_j)`, where e are the hull slopes (`pcm_geometry::cond_share`).
+
+### 3.0 Kernel modules
+
+The kernel is split by purpose into three layers, four functionals built on them and one facade. Each module
+below states what it does and what it may not know. Names elsewhere in this document that predate the split
+(`pcm_demand::shares`, `pcm_demand::invert`, `cond_vertical`) are now `pcm_aggregate::shares`,
+`pcm_invert::invert` and `pcm_geometry::cond_share`.
+
+**`pcm_geometry` (layer 0, `market_share/pcm_geometry.{hpp,cpp}`).** One consumer's vertical choice problem: the
+increasing upper hull of `{(0, 0)} U {(p_j, d_j)}` with an optional lower truncation `a_lo` of the price
+sensitivity, and on it that draw's shares and `cond_share` derivatives (in d, sigma, p and log c),
+`index_positive_shares`, the per-draw hull gap behind `frontier_lift` (`frontier_gap`), `initial_guess` with and
+without a bound, `draw_anatomy`, and the truncated-lognormal `ln_terms`/`make_trunc`. Its input is one draw
+`(d, p, sigma, a_lo)`. It may not know draws, weights, `Market`, `Params`, theta or phi, inversion, moments or
+papers: a function that takes a weight or a draw index is not geometry.
+
+**`pcm_aggregate` (layer 1, `demand_model/pcm_aggregate.{hpp,cpp}`).** Integration of layer-0 per-draw
+functionals over a `Market`'s draws, through `taste_basis` and `scale_basis`, into market shares and their
+derivatives in `(delta, theta, phi, sigma_p, p)` (`shares`) and the lift of zero-share products (`frontier_lift`).
+It owns `Market`, `Params`, the bound kinds, the per-market `ThreadBudget`, `conditional_quality` (a draw's
+`(delta + x t_i) / c_i`) and the one draw loop `for_each_draw_block`: fixed blocks of 64 draws, a dynamic OpenMP
+schedule over blocks and a serial reduction in block order, so every result is bit-identical for every thread
+count. Every functional that integrates over draws runs through that loop. It may not know data shares,
+inversion or moments.
+
+**`pcm_invert` (layer 2, `demand_model/pcm_invert.{hpp,cpp}`).** Solving delta so that
+`pcm_aggregate::shares(delta) == s_data` for one market: the damped Newton core on log shares with
+Levenberg-Marquardt damping, the frontier repair, the heterogeneity and share-path continuations (`invert`), and
+the stage machine of `solve_market` (`solve`): warm, theta path (with the bound moving along), the cold-stage
+draw homotopy (`cold_draws`) and cold. It knows layer 1 and its own options. It may not know moments, GMM or
+papers.
+
+**Functionals (`pcm_welfare`, `pcm_second_choice`, `pcm_groups`, `pcm_events`).** Separate modules because their
+outputs are different objects, not columns of the share Jacobian: consumer surplus by the frontier formula (3.4),
+the exact second-choice matrix and its adjoint, per-household purchase-weighted sums for grouped micro moments,
+and first frontier events and frontier signatures for step control (3.3). Each computes its per-draw quantity
+from layer-0 geometry and integrates it with layer 1's `for_each_draw_block`; none writes its own draw loop. They
+may not know inversion, moments or papers.
+
+**`pcm_kernel` (facade, `demand_model/pcm_kernel.{hpp,cpp}`).** The binding-facing entry points: `solve_market`
+validates the input, sets the call's thread team and budget, runs `pcm_invert::solve`, then one
+`evaluate_market` pass (shares, derivatives and micro parts at the returned delta) and the `FullPivLU` solve for
+ddelta/dtheta; `evaluate_market` and `frontier_anatomy` are the draw passes at a fixed delta. It holds no
+geometry, aggregation or inversion logic of its own.
+
+**Legacy (`market_share/pcm_market_share`, `inversion_algorithm/`).** `pcm_share::unc_share` (taste integrated on
+a sparse grid) and the published-paper inversions (`invert_shares_nlopt`, `cone_newton`) are unchanged and not on
+the harness path. Their untruncated `cond_share` overloads, `initial_guess` and `index_positive_shares` forward
+to `pcm_geometry`. The Python module `python_pcm_demand` keeps its name; no paper script uses it since Nevo moved onto
+the harness.
 
 ### 3.1 Market input
 
@@ -445,8 +559,14 @@ Algorithm (moves `_solve_market` from Python into C++, all with the GIL released
 3. Theta-path stage, if step 2 failed and `prm_warm` is given: solve along
    `theta(tau) = theta_warm + tau (theta - theta_warm)` with tau stepping from 0 to 1 (start step 0.5,
    double on success, halve on failure, stop below 0.01 or when `path_seconds` is spent), each solve
-   warm-started from the last converged tau.
-4. Cold stage: `invert(s_data, mk, prm, empty, tol, cold_evals)`.
+   warm-started from the last converged tau. A warm start solved under another bound (`prm_warm->lo != prm.lo`,
+   same kind) moves the bound along the same path, a continuation in a_lo: a delta solved at a_lo 0.2 is a warm
+   start at 0.1 and 0.3 (`PCMModel` passes the stored state's a_lo as `lo_warm`).
+4. Cold stage: `invert(s_data, mk, prm, empty, tol, cold_evals)`. With `cold_draws > 0` (off by default) a draw
+   homotopy runs first: the same cold path on every k-th draw (k a power of `cold_draw_factor`, 8, with at least
+   `cold_draws` draws left), then each finer level warm-started from the coarser solution with `warm_evals`, up to
+   all draws; the plain cold stage runs only if a level fails. At the GMY round-5 step-1 theta a cold GMY market at
+   65,536 draws needed thousands of share evaluations; from a solution on 8,192 draws it needs 20 to 60.
 5. Status: `OK` if the residual is below tol, `INFEASIBLE_START` if no feasible delta was ever
    found, else `NOT_CONVERGED`.
 6. Derivatives at the converged delta: one `pcm_demand::shares(..., true)` pass (with ds/dp only if
@@ -563,7 +683,11 @@ Petrin). Each `solve_market` call gets `n_threads`. Allocation with total T = `o
 - afterwards: weight = exponential moving average (factor 0.5) of measured CPU work
   `seconds_t * n_threads_t` from previous evaluations;
 - `n_t = max(1, floor(T w_t / sum w))`, leftover threads to the markets with the largest weight.
-The allocation is written to the run log every evaluation. `OMP_WAIT_POLICY=PASSIVE` (section 1.3)
+The allocation is written to the run log every evaluation. It is only the starting team size: each market's call
+holds a `pcm_kernel.ThreadBudget` that the kernel reads before every share evaluation, and when a market finishes
+its threads go to the markets still running (`allocate_threads` on their weights), so the last market of an
+evaluation runs on all T threads instead of the one it started with (39 GMY markets on 60 threads started with one
+each). Results do not depend on it (fixed 64-draw blocks). `OMP_WAIT_POLICY=PASSIVE` (section 1.3)
 stops idle teams from spinning.
 
 ### 3.6 Kernel unit tests (tiny markets with hand-computed answers)
@@ -661,7 +785,9 @@ summarised in the report (`kink_limited_steps`, `predicted_vs_realised_mass`).
   `S = blockdiag(S_aggregate_clustered, n V_micro)`, re-concentrate beta (`set_weighting`), restart
   the optimizer at theta_hat_1 with a fresh history segment. Stage boundaries are checkpointed.
   Step 2 starts only if the step-1 report has no `SCALE_ARTIFACT` or `SD_XI_BLOWUP` (section 5.4);
-  otherwise the run stops and says so, because W2 would inherit the degenerate point.
+  otherwise the run stops and says so, because W2 would inherit the degenerate point. When the aggregate
+  block is in Sargan form (`SarganIVMoments`, scale-free) `SD_XI_BLOWUP` is a warning and step 2 runs: that
+  form cannot be lowered by shrinking xi, and a concentrated xi drives it toward n h_jj, not 0 (LEARNINGS 19).
 - `CUE`: `q = n g' S(theta)^{-1} g`. Gradient exact from `cue_terms` (LEARNINGS 1 formula),
   Hessian approximated by `2 n G' S^{-1} G` in the same trust-region loop, acceptance on the actual q.
   The micro block of S is held at its value at the CUE start point and the report states it. CUE is
@@ -1038,7 +1164,10 @@ spec = Spec(
 )
 ```
 
-No new estimation code: the same model adapter, optimizer, diagnostics and report.
+No new estimation code: the same model adapter, optimizer, diagnostics and report. As built,
+`nevo_replication/estimate_pcm.py` is `NevoSpec(PaperSpec)`: the Gauss-Hermite grid crossed with each market's 20
+agents enters through `PaperSpec.taste_nodes` (`PCMModel(taste_nodes=...)`), the scale bases are the raw agent
+columns as in the pre-harness script, and the `nevo_pcm` golden holds that script's delta, xi and g bit for bit.
 
 ## 7. Work packages
 

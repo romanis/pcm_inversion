@@ -1,4 +1,5 @@
 #include "pcm_events.hpp"
+#include "pcm_aggregate.hpp"
 
 #include <omp.h>
 #include <algorithm>
@@ -13,13 +14,26 @@ using Eigen::MatrixXd;
 
 namespace {
 
-constexpr int BLOCK = 64;
+// The caller's team (n_threads <= 0) or n_threads; never the thread budget, so the caller's setting is unchanged.
+pcm_aggregate::DrawLoop draw_loop(int n_threads)
+{
+    return pcm_aggregate::DrawLoop{0, n_threads > 0 ? n_threads : omp_get_max_threads()};
+}
 
-int team_size(int n_threads) { return n_threads > 0 ? n_threads : omp_get_max_threads(); }
+// The frontiers of one block of draws, flattened in draw order.
+struct FrontierBlock {
+    std::vector<int> flat;
+    std::vector<int> sizes;
+};
 
-int n_blocks_of(int R) { return std::max(1, (R + BLOCK - 1) / BLOCK); }
+// Appends a block's frontiers to flat / off (draw i's vertices are flat[off[i]..off[i+1])).
+void append_block(const FrontierBlock & blk, std::vector<int> & flat, std::vector<long> & off)
+{
+    flat.insert(flat.end(), blk.flat.begin(), blk.flat.end());
+    for (int s : blk.sizes) off.push_back(off.back() + s);
+}
 
-void check_market(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm,
+void check_market(const ArrayXd & delta, const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm,
                   const char * who)
 {
     const int N = static_cast<int>(delta.size());
@@ -38,14 +52,14 @@ void check_market(const ArrayXd & delta, const pcm_demand::Market & mk, const pc
         fail("delta, theta, taste_basis and weights must be finite");
     if (!(prm.lo >= 0.0) || !std::isfinite(prm.lo)) fail("the bound lo must be finite and non-negative");
     const int Q = static_cast<int>(prm.phi.size());
-    if (prm.lo > 0.0 && prm.bound_kind == pcm_demand::BoundKind::A && Q > 0) {
+    if (prm.lo > 0.0 && prm.bound_kind == pcm_aggregate::BoundKind::A && Q > 0) {
         if (mk.scale_basis.rows() != R || mk.scale_basis.cols() != Q) fail("scale_basis must be R x Q (Q = size of phi)");
         if (!mk.scale_basis.allFinite() || !prm.phi.allFinite()) fail("scale_basis and phi must be finite");
     }
 }
 
 // log c_i of draw i (0 without scale parameters)
-double log_scale(const pcm_demand::Market & mk, const pcm_demand::Params & prm, int i)
+double log_scale(const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm, int i)
 {
     return prm.phi.size() > 0 ? (mk.scale_basis.row(i).array() * prm.phi.transpose()).sum() : 0.0;
 }
@@ -55,20 +69,20 @@ double log_scale(const pcm_demand::Market & mk, const pcm_demand::Params & prm, 
 // units) only if e > a_lo,i, that is if its slope in y units exceeds lo_y,i, so the increasing part of the
 // sheared hull is the set of products with a window of positive mass. Under ALPHA lo_y,i = lo whatever c_i
 // (F5 holds); under A lo_y,i = lo c_i, so membership depends on c_i, never on sigma_p.
-double bound_in_y(const pcm_demand::Params & prm, const pcm_demand::Market & mk, int i)
+double bound_in_y(const pcm_aggregate::Params & prm, const pcm_aggregate::Market & mk, int i)
 {
     if (!(prm.lo > 0.0)) return 0.0;
-    return prm.bound_kind == pcm_demand::BoundKind::A ? prm.lo * std::exp(log_scale(mk, prm, i)) : prm.lo;
+    return prm.bound_kind == pcm_aggregate::BoundKind::A ? prm.lo * std::exp(log_scale(mk, prm, i)) : prm.lo;
 }
 
-void shear(const pcm_demand::Params & prm, const pcm_demand::Market & mk, int i, ArrayXd & y)
+void shear(const pcm_aggregate::Params & prm, const pcm_aggregate::Market & mk, int i, ArrayXd & y)
 {
     const double b = bound_in_y(prm, mk, i);
     if (b > 0.0) y -= b * mk.p;
 }
 
 // y = base + sum_m coef_m * taste_basis(i, m) * x.col(taste_col[m])
-void affine_utility(const ArrayXd & base, const pcm_demand::Market & mk, const ArrayXd & coef, int i, ArrayXd & y)
+void affine_utility(const ArrayXd & base, const pcm_aggregate::Market & mk, const ArrayXd & coef, int i, ArrayXd & y)
 {
     y = base;
     for (int m = 0; m < coef.size(); ++m) {
@@ -171,40 +185,32 @@ uint64_t hash_frontier(const std::vector<int> & H)
 }
 
 // Frontier of every draw at (delta, theta), flattened: draw i's vertices are flat[off[i]..off[i+1]).
-void all_frontiers(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm,
+void all_frontiers(const ArrayXd & delta, const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm,
                    int n_threads, std::vector<int> & flat, std::vector<long> & off)
 {
     const int R = static_cast<int>(mk.weights.size());
-    const int nb = n_blocks_of(R);
-    std::vector<std::vector<int>> part(nb);
-    std::vector<std::vector<int>> sizes(nb);
-#pragma omp parallel for schedule(dynamic, 1) num_threads(team_size(n_threads)) if(nb > 1)
-    for (int b = 0; b < nb; ++b) {
+    flat.clear();
+    off.assign(1, 0);
+    pcm_aggregate::for_each_draw_block<FrontierBlock>(R, [&](FrontierBlock & blk, int i0, int i1) {
         ArrayXd y;
         std::vector<int> H;
         H.reserve(delta.size() + 1);
-        for (int i = b * BLOCK; i < std::min(R, (b + 1) * BLOCK); ++i) {
+        for (int i = i0; i < i1; ++i) {
             affine_utility(delta, mk, prm.theta, i, y);
             shear(prm, mk, i, y);
             frontier(y, mk.p, H);
-            part[b].insert(part[b].end(), H.begin(), H.end());
-            sizes[b].push_back(static_cast<int>(H.size()));
+            blk.flat.insert(blk.flat.end(), H.begin(), H.end());
+            blk.sizes.push_back(static_cast<int>(H.size()));
         }
-    }
-    flat.clear();
-    off.assign(1, 0);
-    for (int b = 0; b < nb; ++b) {
-        flat.insert(flat.end(), part[b].begin(), part[b].end());
-        for (int s : sizes[b]) off.push_back(off.back() + s);
-    }
+    }, [&](const FrontierBlock & blk) { append_block(blk, flat, off); }, draw_loop(n_threads));
 }
 
 }  // namespace
 
 namespace pcm_events {
 
-StepEvents max_step(const ArrayXd & delta, const ArrayXd & delta_dot, const pcm_demand::Market & mk,
-                    const pcm_demand::Params & prm, const ArrayXd & dtheta, double tau_max, int n_threads)
+StepEvents max_step(const ArrayXd & delta, const ArrayXd & delta_dot, const pcm_aggregate::Market & mk,
+                    const pcm_aggregate::Params & prm, const ArrayXd & dtheta, double tau_max, int n_threads)
 {
     check_market(delta, mk, prm, "pcm_events::max_step");
     const int N = static_cast<int>(delta.size());
@@ -221,21 +227,20 @@ StepEvents max_step(const ArrayXd & delta, const ArrayXd & delta_dot, const pcm_
 
     const ArrayXd dtaste = dtheta.head(M);   // sigma_p never moves a frontier; scale only through an A bound
     const ArrayXd dphi = dtheta.segment(M, Q);
-    const bool scale_moves = prm.lo > 0.0 && prm.bound_kind == pcm_demand::BoundKind::A && Q > 0;
+    const bool scale_moves = prm.lo > 0.0 && prm.bound_kind == pcm_aggregate::BoundKind::A && Q > 0;
 
     StepEvents out;
     out.tau_draw.resize(R);
     out.kind_draw.resize(R);
     out.product_draw.resize(R);
 
-    const int nb = n_blocks_of(R);
-    std::vector<std::vector<int>> part(nb), sizes(nb);
-#pragma omp parallel for schedule(dynamic, 1) num_threads(team_size(n_threads)) if(nb > 1)
-    for (int b = 0; b < nb; ++b) {
+    std::vector<int> flat;
+    std::vector<long> off(1, 0);
+    pcm_aggregate::for_each_draw_block<FrontierBlock>(R, [&](FrontierBlock & blk, int i0, int i1) {
         ArrayXd y, v;
         std::vector<int> H;
         H.reserve(N + 1);
-        for (int i = b * BLOCK; i < std::min(R, (b + 1) * BLOCK); ++i) {
+        for (int i = i0; i < i1; ++i) {
             affine_utility(delta, mk, prm.theta, i, y);
             shear(prm, mk, i, y);
             affine_utility(delta_dot, mk, dtaste, i, v);
@@ -246,10 +251,10 @@ StepEvents max_step(const ArrayXd & delta, const ArrayXd & delta_dot, const pcm_
             out.tau_draw[i] = ev.tau;
             out.kind_draw[i] = ev.kind;
             out.product_draw[i] = ev.product;
-            part[b].insert(part[b].end(), H.begin(), H.end());
-            sizes[b].push_back(static_cast<int>(H.size()));
+            blk.flat.insert(blk.flat.end(), H.begin(), H.end());
+            blk.sizes.push_back(static_cast<int>(H.size()));
         }
-    }
+    }, [&](const FrontierBlock & blk) { append_block(blk, flat, off); }, draw_loop(n_threads));
 
     // Serial reduction in draw order: deterministic and O(sum_i |F_i|).
     const int G = MASS_GRID;
@@ -257,25 +262,19 @@ StepEvents max_step(const ArrayXd & delta, const ArrayXd & delta_dot, const pcm_
     ArrayXd B = ArrayXd::Zero(N);
     ArrayXd max_tau = ArrayXd::Constant(N, -std::numeric_limits<double>::infinity());
     MatrixXd hist = MatrixXd::Zero(N, G);   // hist(j, g): event mass of j first counted at grid point g
-    int i = 0;
-    for (int b = 0; b < nb; ++b) {
-        size_t pos = 0;
-        for (int s : sizes[b]) {
-            const double w = mk.weights[i], t = out.tau_draw[i];
-            int g = -1;
-            if (out.kind_draw[i] != 0) {
-                g = std::min(G - 1, static_cast<int>(std::ceil(t / tau_max * (G - 1))));
-                while (g > 0 && grid_tau(g - 1) >= t) --g;
-                while (g < G - 1 && grid_tau(g) < t) ++g;
-            }
-            for (int q = 0; q < s; ++q) {
-                const int j = part[b][pos + q];
-                B[j] += w;
-                max_tau[j] = std::max(max_tau[j], t);
-                if (g >= 0) hist(j, g) += w;
-            }
-            pos += s;
-            ++i;
+    for (int i = 0; i < R; ++i) {
+        const double w = mk.weights[i], t = out.tau_draw[i];
+        int g = -1;
+        if (out.kind_draw[i] != 0) {
+            g = std::min(G - 1, static_cast<int>(std::ceil(t / tau_max * (G - 1))));
+            while (g > 0 && grid_tau(g - 1) >= t) --g;
+            while (g < G - 1 && grid_tau(g) < t) ++g;
+        }
+        for (long q = off[i]; q < off[i + 1]; ++q) {
+            const int j = flat[q];
+            B[j] += w;
+            max_tau[j] = std::max(max_tau[j], t);
+            if (g >= 0) hist(j, g) += w;
         }
     }
     out.buyer_mass = B;
@@ -297,29 +296,27 @@ StepEvents max_step(const ArrayXd & delta, const ArrayXd & delta_dot, const pcm_
     return out;
 }
 
-std::vector<uint64_t> frontier_signature(const ArrayXd & delta, const pcm_demand::Market & mk,
-                                         const pcm_demand::Params & prm, int n_threads)
+std::vector<uint64_t> frontier_signature(const ArrayXd & delta, const pcm_aggregate::Market & mk,
+                                         const pcm_aggregate::Params & prm, int n_threads)
 {
     check_market(delta, mk, prm, "pcm_events::frontier_signature");
     const int R = static_cast<int>(mk.weights.size());
     std::vector<uint64_t> sig(R);
-    const int nb = n_blocks_of(R);
-#pragma omp parallel for schedule(dynamic, 1) num_threads(team_size(n_threads)) if(nb > 1)
-    for (int b = 0; b < nb; ++b) {
+    pcm_aggregate::for_each_draw_block<pcm_aggregate::NoAcc>(R, [&](pcm_aggregate::NoAcc &, int i0, int i1) {
         ArrayXd y;
         std::vector<int> H;
         H.reserve(delta.size() + 1);
-        for (int i = b * BLOCK; i < std::min(R, (b + 1) * BLOCK); ++i) {
+        for (int i = i0; i < i1; ++i) {
             affine_utility(delta, mk, prm.theta, i, y);
             shear(prm, mk, i, y);
             frontier(y, mk.p, H);
             sig[i] = hash_frontier(H);
         }
-    }
+    }, [](const pcm_aggregate::NoAcc &) {}, draw_loop(n_threads));
     return sig;
 }
 
-ArrayXd affected_mass(const ArrayXd & delta, const pcm_demand::Market & mk, const pcm_demand::Params & prm,
+ArrayXd affected_mass(const ArrayXd & delta, const pcm_aggregate::Market & mk, const pcm_aggregate::Params & prm,
                       const std::vector<uint8_t> & changed, int n_threads)
 {
     check_market(delta, mk, prm, "pcm_events::affected_mass");

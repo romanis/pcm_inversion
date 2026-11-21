@@ -12,7 +12,7 @@ import numpy as np
 
 from .types import ParameterSpec
 
-__all__ = ["ParameterSpec", "ParameterLayout", "SIGMA_P_UNIT"]
+__all__ = ["ParameterSpec", "ParameterLayout", "SIGMA_P_UNIT", "parse_fixed"]
 
 #: Natural unit of the log-alpha spread sigma_p (DESIGN 2.5).
 SIGMA_P_UNIT = 0.1
@@ -204,6 +204,24 @@ class ParameterLayout:
             new._units = units
         return new
 
+    def fixed(self, values: Mapping[str, float]) -> ParameterLayout:
+        """A new layout with each named parameter fixed (``free=False``) at its value; a parameter's bounds widen to
+        the value when it lies outside them (a fixed parameter such as the bound a_lo has lower = upper = its value).
+        Used by the band stages and by a spec's calibration of a parameter (e.g. sigma_p on a band)."""
+        changes: dict[str, dict[str, Any]] = {}
+        for name, v in values.items():
+            if name not in self.names:
+                raise KeyError(f"no parameter named {name!r}")
+            v = float(v)
+            if not np.isfinite(v):
+                raise ValueError(f"{name}: a fixed value must be finite, got {v}")
+            sp = self.specs[self.names.index(name)]
+            ch: dict[str, Any] = {"free": False, "start": v}
+            if not sp.lower <= v <= sp.upper:
+                ch.update(lower=min(sp.lower, v), upper=max(sp.upper, v))
+            changes[name] = ch
+        return self.replace(changes)
+
     def with_starts(self, theta: np.ndarray) -> ParameterLayout:
         """A new layout whose starts are theta. Theta must lie within the bounds."""
         theta = np.asarray(theta, dtype=float)
@@ -222,3 +240,21 @@ class ParameterLayout:
                 "unit": None if units is None else float(units[k]),
             })
         return out
+
+
+def parse_fixed(items: Sequence[str] | None) -> dict[str, float]:
+    """parse_fixed(["sigma_p=3.0", ...]) -> {"sigma_p": 3.0, ...}: the ``NAME=VALUE`` items of a ``--fix`` option, for
+    ``ParameterLayout.fixed``. A name given twice is refused."""
+    out: dict[str, float] = {}
+    for it in items or ():
+        name, sep, val = str(it).partition("=")
+        name = name.strip()
+        if not sep or not name:
+            raise ValueError(f"--fix takes NAME=VALUE, got {it!r}")
+        if name in out:
+            raise ValueError(f"--fix: {name} given twice")
+        try:
+            out[name] = float(val)
+        except ValueError:
+            raise ValueError(f"--fix {it!r}: {val!r} is not a number") from None
+    return out

@@ -237,6 +237,10 @@ def test_two_step_weight_and_gate() -> None:
     assert ok
     ok, why = ts.gate(["SD_XI_BLOWUP", "RUN_TO_BOUND"])
     assert not ok and "SD_XI_BLOWUP" in why
+    ok, why = ts.gate(["SD_XI_BLOWUP"], warn_only=("SD_XI_BLOWUP",))
+    assert ok and why.startswith("WARNING: the step-1 point shows SD_XI_BLOWUP; step 2 runs")
+    ok, why = ts.gate(["SD_XI_BLOWUP", "SCALE_ARTIFACT"], warn_only=("SD_XI_BLOWUP",))
+    assert not ok and "SCALE_ARTIFACT" in why and "SD_XI_BLOWUP" not in why
     problem.set_weighting(W2)  # S is block diagonal, so W2 is accepted
     assert Fixed(W2).mode == "fixed" and ts.mode == "two_step" and CUE().mode == "cue"
 

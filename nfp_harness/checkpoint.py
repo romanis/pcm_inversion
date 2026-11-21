@@ -37,6 +37,9 @@ from .types import EvalStatus, HistoryRecord
 
 __all__ = [
     "RunDirectory",
+    "read_stage_file",
+    "stage_parameter_names",
+    "stage_theta",
     "SpecMismatchError",
     "atomic_write",
     "hash_options",
@@ -204,6 +207,52 @@ def _reorder(row: list[str], old: list[str], new: list[str]) -> list[str]:
 def _sib(stem: pathlib.Path, suffix: str) -> pathlib.Path:
     """``stem`` plus a suffix, without ``with_suffix`` (stage names may contain dots)."""
     return stem.with_name(stem.name + suffix)
+
+
+def read_stage_file(path: str | pathlib.Path) -> dict[str, Any]:
+    """read_stage_file(path) -> the state of one stored stage (``<run dir>/stages/<stage>.npz`` or its ``.json``), read
+    without a RunDirectory and without the spec-hash check: for reading another run's stage (a warm start)."""
+    p = pathlib.Path(path)
+    stem = p.with_name(p.name[:-len(".npz")]) if p.name.endswith(".npz") else (
+        p.with_name(p.name[:-len(".json")]) if p.name.endswith(".json") else p)
+    doc = json.loads(_sib(stem, ".json").read_text())
+    for candidate in (_sib(stem, ".npz"), _sib(stem, ".prev.npz")):
+        if not candidate.exists():
+            continue
+        with np.load(candidate, allow_pickle=False) as z:
+            if str(z["__token__"]) == doc["token"]:
+                return _join(doc["state"], {k: z[k] for k in z.files if k != "__token__"})
+    raise RuntimeError(f"stage {stem} has no matching array file (token {doc['token']})")
+
+
+def stage_parameter_names(path: str | pathlib.Path) -> list[str] | None:
+    """stage_parameter_names(path) -> the layout names of a stored stage (``<run dir>/stages/<stage>.npz``) in theta
+    order, read from the ``theta_<name>`` columns of its run's ``history.csv`` header; None when the run directory has
+    no history. For mapping another run's theta onto a layout by name."""
+    hist = pathlib.Path(path).resolve().parent.parent / "history.csv"
+    if not hist.exists():
+        try:   # a stage that stores its names (pipeline stage ``warm``) and has no history
+            names = read_stage_file(path).get("parameter_names")
+        except (OSError, ValueError, KeyError, RuntimeError):
+            names = None
+        return [str(n) for n in names] if isinstance(names, (list, tuple)) and names else None
+    with open(hist, newline="") as fh:
+        header = next(csv.reader(fh), [])
+    names = [c[len("theta_"):] for c in header if c.startswith("theta_")]
+    return names or None
+
+
+def stage_theta(path: str | pathlib.Path, names: Sequence[str]) -> dict[str, float]:
+    """stage_theta(path, names) -> {parameter name: value} of a stored stage's theta, named by its run's history.csv
+    (``stage_parameter_names``); a stage without names is read positionally against ``names``, which then must have
+    its length."""
+    th = np.asarray(read_stage_file(path)["theta"], dtype=float)
+    src = stage_parameter_names(path)
+    if src is None or len(src) != th.size:
+        if th.size != len(names):
+            raise ValueError(f"{path}: {th.size} parameters without names, this layout has {len(names)}")
+        src = list(names)
+    return dict(zip(src, map(float, th)))
 
 
 def _utc_now() -> str:
