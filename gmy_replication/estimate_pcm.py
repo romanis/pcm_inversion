@@ -172,14 +172,16 @@ A_LO_FREE = (0.005, 0.5)
 #: chryslerSteady parents) in CF_YEARS; in CF_YEAR a merger of CF_MERGER, a CF_SHOCK_RATE cost increase on every
 #: product of CF_SHOCK_FIRM (an exchange-rate shock on an importer's whole line; the data has no plant location), and
 #: removal diversion of the CF_TOP best sellers; Lerner indices and observed-price consumer surplus in every year
-CF_YEARS = (1980, 1990, 2000, 2010, 2018)
+CF_YEARS = (1980, 2018)
 CF_YEAR = 2018
 CF_MERGER = ("gm", "ford")
 CF_SHOCK_FIRM = "toyota"
 CF_SHOCK_RATE = 0.10
 CF_TOP = 5
-#: bounded best responses of the PCM Nash (LEARNINGS 29): price box and sweeps
-CF_NASH = {"box": 0.10, "max_sweeps": 10}
+#: bounded best responses of the PCM Nash (LEARNINGS 29): price box, sweeps and golden-section bracket. One shares
+#: evaluation of 2018 at nu 64 x 2,000 households takes 0.19 s on 80 threads and a sweep needs about 12 per product,
+#: so a solve on 295 products is about an hour at 5 sweeps; CF_YEARS keeps the six PCM solves to about six hours
+CF_NASH = {"box": 0.10, "max_sweeps": 5, "golden_tol": 1e-2}
 #: --a-lo-free: the CUE profile of a_lo after the estimate (pipeline stage cue_profile)
 A_LO_PROFILE = (0.01, 0.025, 0.05, 0.1, 0.2)
 SC_WEIGHT = 30.0         # mom_fnc.m line 109: second-choice residuals x 30

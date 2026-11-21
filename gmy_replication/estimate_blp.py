@@ -673,7 +673,7 @@ def main() -> None:
     ap.add_argument("--start-theta", default=None,
                     help="same-moments: named starts (a harness stage .npz, e.g. the PCM's, for pcm_matched; a "
                          "same-moments JSON)")
-    ap.add_argument("--tag", default="", help="same-moments: suffix of the output names")
+    ap.add_argument("--tag", default="", help="suffix of the output names (default none)")
     ap.add_argument("--counterfactuals", action="store_true",
                     help="published / fit: also run the shared counterfactuals at the estimate (off by default, so "
                          "the outputs of a plain run are unchanged); same-moments with --max-nfev 0: run them at the "
@@ -686,7 +686,8 @@ def main() -> None:
         args.drop_block = [gmy_pcm.DROP_ALIASES.get(b, b) for b in (args.drop_block or ())]
         same_moments_main(args)
         return
-    tag = f"blp_{args.stage}_h{args.households}" + (f"_{len(args.years)}y" if args.years else "")
+    tag = (f"blp_{args.stage}_h{args.households}" + (f"_{len(args.years)}y" if args.years else "")
+           + (f"_{args.tag}" if args.tag else ""))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                         handlers=[logging.FileHandler(OUT / f"{tag}.log"), logging.StreamHandler()])
     data = gmy_pcm.load_data(n_households=args.households, seed=SEED, years=args.years)
