@@ -984,6 +984,10 @@ class GroupMicroMoments:
     has no households) of a dict with ``columns`` (the product columns of S after P, in order), ``S`` (G_t, C+1)
     (column 0 = P_g, then S_g[c]), ``d_delta`` (G_t, C+1, J_t) partials in delta_t (price order), ``d_theta``
     (G_t, C+1, P) partials in theta (layout order), both None without a Jacobian, and ``w`` (G_t,) agent weights.
+    Optional ``M`` (G_t, C+1), each household's conditional mean m_g (column 0 = 1), with ``M_d_delta`` and
+    ``M_d_theta`` shaped as ``d_delta`` and ``d_theta``: a model whose households all buy with positive probability
+    (a logit) gives it, so a household whose P_g underflows keeps its exact m_g instead of S_g / P_g (no digits left)
+    or being dropped as a never-buyer at P_g = 0; buyers are then the households of positive weight.
 
     The covariance is fixed, ``diag(variances)``, so W1 = (n V)^{-1} and a row contributes (f / sd)^2 to q (GMY's
     weight diag(1 / variance), deviation D6). ``bind(markets, n, P)`` and ``bind_agents(agents, agent_rows)``
@@ -1083,6 +1087,13 @@ class GroupMicroMoments:
             raise KeyError(f"{self.name}: group sums lack product column {char!r} (have {cols})")
         return 1 + cols.index(char)
 
+    @staticmethod
+    def _buyers(entry: dict[str, Any]) -> np.ndarray:
+        """(G,) households with P_g > 0: those of positive weight where the model gives ``M``, else S_g0 > 0."""
+        if "M" in entry:
+            return np.asarray(entry["w"]) > 0
+        return np.asarray(entry["S"])[:, 0] > 0
+
     def moments(self, sol: InnerSolution, need_jacobian: bool) -> tuple[np.ndarray, np.ndarray | None,
                                                                          np.ndarray | None]:
         """(model values (k,), d_delta (k, n), d_theta (k, P)): the GMY quantities M_a - M_b and A_a / A_b."""
@@ -1091,10 +1102,11 @@ class GroupMicroMoments:
         mem = [self._member[t] for t in self._in]
         # pooled set statistics
         W, Wp, never = {}, {}, {}
+        buys = [self._buyers(e) for e in entries]
         for s in self.sets:
             W[s] = sum(float(e["w"][m[s]].sum()) for e, m in zip(entries, mem))
-            Wp[s] = sum(float(e["w"][m[s] & (np.asarray(e["S"])[:, 0] > 0)].sum()) for e, m in zip(entries, mem))
-            never[s] = sum(int(np.sum(m[s] & ~(np.asarray(e["S"])[:, 0] > 0))) for e, m in zip(entries, mem))
+            Wp[s] = sum(float(e["w"][m[s] & b].sum()) for e, m, b in zip(entries, mem, buys))
+            never[s] = sum(int(np.sum(m[s] & ~b)) for m, b in zip(mem, buys))
             if not W[s] > 0:
                 raise ValueError(f"{self.name}: set {s!r} has no households in the dataset's markets")
         den = Wp if self.never_buyers == "drop" else W
@@ -1102,20 +1114,24 @@ class GroupMicroMoments:
         self.last_info = {"micro_never_buyers": never, "micro_households": n_hh,
                           "micro_never_buyer_share_max": max(never[s] / max(n_hh[s], 1) for s in self.sets)}
         stats: dict[tuple[str, str | None], float] = {}
-        coefs: list[list[np.ndarray]] = [[] for _ in entries]   # per market: list over rows of (G, C+1)
+        coefs: list[list[np.ndarray]] = [[] for _ in entries]   # per market: list over rows of (G, C+1), on S
+        coefs_m: list[list[np.ndarray]] = [[] for _ in entries]  # the same on M, where the model gives it
 
         def side(s: str, char: str | None) -> float:
             key = (s, char)
             if key not in stats:
                 tot = 0.0
-                for e, m in zip(entries, mem):
+                for e, m, bt in zip(entries, mem, buys):
                     S = np.asarray(e["S"])
                     if char is None:
                         tot += float(S[m[s], 0].sum())
                     else:
                         c = self._column(e, char)
-                        buy = m[s] & (S[:, 0] > 0)
-                        tot += float(np.sum(e["w"][buy] * S[buy, c] / S[buy, 0]))
+                        buy = m[s] & bt
+                        if "M" in e:
+                            tot += float(np.sum(e["w"][buy] * np.asarray(e["M"])[buy, c]))
+                        else:
+                            tot += float(np.sum(e["w"][buy] * S[buy, c] / S[buy, 0]))
                 stats[key] = tot / (W[s] if char is None else den[s])
             return stats[key]
 
@@ -1125,13 +1141,17 @@ class GroupMicroMoments:
             value[r_i] = a - b if r.kind == "diff" else a / b
             if not need_jacobian:
                 continue
-            for t_i, (e, m) in enumerate(zip(entries, mem)):
+            for t_i, (e, m, bt) in enumerate(zip(entries, mem, buys)):
                 S = np.asarray(e["S"])
                 K = np.zeros_like(S)
+                KM = np.zeros_like(S)
                 if r.kind == "diff":
                     c = self._column(e, r.char)
                     for s, sign in ((r.set_a, 1.0), (r.set_b, -1.0)):
-                        buy = m[s] & (S[:, 0] > 0)
+                        buy = m[s] & bt
+                        if "M" in e:   # d m_g = d M_g
+                            KM[buy, c] += sign * e["w"][buy] / den[s]
+                            continue
                         coef = sign * e["w"][buy] / (den[s] * S[buy, 0])
                         K[buy, c] += coef
                         K[buy, 0] -= coef * S[buy, c] / S[buy, 0]
@@ -1139,6 +1159,7 @@ class GroupMicroMoments:
                     K[m[r.set_a], 0] += (1.0 / b) / W[r.set_a]
                     K[m[r.set_b], 0] += -(a / b ** 2) / W[r.set_b]
                 coefs[t_i].append(K)
+                coefs_m[t_i].append(KM)
         if not need_jacobian:
             return value, None, None
         d_delta = np.zeros((self.k, self._n))
@@ -1151,6 +1172,13 @@ class GroupMicroMoments:
             dT = np.asarray(e["d_theta"], dtype=float)
             d_delta[:, self._markets[t].rows] += Kt @ dD.reshape(-1, dD.shape[-1])
             part = Kt @ dT.reshape(-1, dT.shape[-1])
+            if "M" in e:
+                if e.get("M_d_delta") is None or e.get("M_d_theta") is None:
+                    raise ValueError(f"{self.name}: conditional means M without their derivatives")
+                KMt = np.stack([K.ravel() for K in coefs_m[t_i]])
+                mD = np.asarray(e["M_d_delta"], dtype=float)
+                d_delta[:, self._markets[t].rows] += KMt @ mD.reshape(-1, mD.shape[-1])
+                part = part + KMt @ np.asarray(e["M_d_theta"], dtype=float).reshape(-1, dT.shape[-1])
             d_theta = part if d_theta is None else d_theta + part
         assert d_theta is not None
         return value, d_delta, d_theta

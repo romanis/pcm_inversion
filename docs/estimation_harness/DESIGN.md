@@ -230,7 +230,10 @@ theta is (pi on (characteristic, demographic) pairs, sigma on characteristics), 
 every market inverted by the BLP contraction with SQUAREM from the accepted delta (`commit`, `restore`,
 `warm_from_delta`), in parallel over markets. `solve` returns `shares`, `probabilities` and, when moments ask, the
 logit second-choice matrices of `SecondChoiceMoments` and the household sums of `GroupMicroMoments`, so an
-`NFPGMMProblem` takes the BLP model and the PCM interchangeably at the problem boundary. With `need_jacobian=True` it
+`NFPGMMProblem` takes the BLP model and the PCM interchangeably at the problem boundary. The household sums also carry
+each household's E[x | purchase] computed in log space (`M`), which `GroupMicroMoments` uses in place of S / P: under
+a lognormal price law a very price-sensitive household's purchase probability underflows (P = 0 or a denormal), and
+S / P would drop it or keep one or two digits, which makes q jump. With `need_jacobian=True` it
 returns the analytic Jacobian: D_t = -(ds/ddelta)^{-1} ds/dtheta per market by the implicit function theorem from the
 logit probabilities, the partials of the household sums, the second-choice adjoint, and `ds_dp` (with the caller's
 linear price coefficient), so the Gauss-Newton optimizer fits a BLP problem as it fits a PCM one. The formulas are in

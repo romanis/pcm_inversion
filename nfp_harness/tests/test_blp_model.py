@@ -337,6 +337,62 @@ def test_problem_jacobian_with_iv_group_micro_and_second_choice_matches_finite_d
     model.close()
 
 
+def test_group_micro_keeps_households_whose_purchase_probability_underflows() -> None:
+    """Under a lognormal price law a very price-sensitive household's P_h = sum_j P_jh underflows (here household 0
+    of every market: price coefficient -exp(7.5) ~ -1800, every inside utility below -1800, P_h = 0 in floating
+    point). Its E[x1 | purchase] is still an ordinary number (the cheapest-ish product's x1). GroupMicroMoments must
+    count it with that value (``M`` of the logit's group sums) instead of dropping it as a never-buyer or taking S / P
+    from denormals, and g must stay differentiable there: the analytic G matches central differences."""
+    from scipy.special import softmax
+
+    d = synthetic()
+    n = d["n"]
+    x1 = np.concatenate([X[:, 1] for X in d["X"]])
+    X1 = np.column_stack([np.ones(n), x1])
+    Z = np.column_stack([X1, np.random.default_rng(1).normal(size=(n, 2))])
+    nu2 = [np.column_stack([v, np.random.default_rng(9 + t).normal(size=v.shape[0])]) for t, v in enumerate(d["nu"])]
+    offset = [np.r_[7.5, np.full(59, 0.1)] for _ in range(3)]
+    agents = pd.DataFrame({"market_ids": np.repeat([mk.market_id for mk in d["markets"]], 60),
+                           "rich": np.concatenate([(D[:, 0] > 1.0).astype(float) for D in d["D"]]),
+                           "poor": np.concatenate([(D[:, 0] <= 1.0).astype(float) for D in d["D"]])})
+    agents.loc[[0, 60, 120], ["rich", "poor"]] = (0.0, 1.0)   # the extreme households in one set
+    m = MixedLogitModel(d["markets"], d["X"], d["D"], d["w"], nu2, [], [1], d["shares"], threads=2, price_column=2,
+                        exp_column=2, exp_terms=(("D", 0), ("nu", 1)), exp_offset=offset,
+                        product_columns={"x1": x1}, agents=agents,
+                        agent_rows=[np.arange(60 * t, 60 * (t + 1)) for t in range(3)], tol=1e-15)
+    theta = np.array([1.1, 0.1, 0.3])   # sigma_x1, phi_income, sigma_p
+    micro = GroupMicroMoments("micro", MicroDataset("survey", 1), [GroupMomentRow("diff", "x1", "rich", "poor"),
+                                                                   GroupMomentRow("ratio", None, "rich", "poor")],
+                              np.array([0.1, 1.2]), np.array([0.01, 0.01]))
+    layout = ParameterLayout([ParameterSpec(nm, "taste", None, None, v, lo, 5.0, unit=0.1)
+                              for nm, v, lo in zip(("sigma_x1", "phi_income", "sigma_p"), theta, (0.0, -5.0, 0.0))])
+    prob = NFPGMMProblem(m, [IVMoments(Z, None), micro], LinearIV(X1, Z), layout, max_step=False)
+    ev = prob.evaluate(theta, need_jacobian=True)
+    assert ev.ok, ev.status
+    sol = ev.aux["solution"]
+    # the underflow: household 0 has P_h = 0 in every market, so S / P has no digits for it
+    for t in range(3):
+        assert sol.outputs["probabilities"][t][:, 0].sum() == 0.0
+        assert sol.outputs["group_sums"][t]["S"][0, 0] == 0.0
+    assert micro.last_info["micro_never_buyers"] == {"rich": 0, "poor": 0}
+    # reference: every household's E[x1 | purchase] from its inside-good logit in log space
+    ref = {}
+    for s in ("rich", "poor"):
+        num = den = 0.0
+        for t, mk in enumerate(d["markets"]):
+            u = sol.delta[mk.rows][:, None] + m.X[t] @ m.coefficients(theta, t)
+            cond = softmax(u, axis=0).T @ d["X"][t][:, 1]
+            sel = agents[s].to_numpy()[60 * t:60 * (t + 1)] > 0.5
+            num += float(d["w"][t][sel] @ cond[sel])
+            den += float(d["w"][t][sel].sum())
+        ref[s] = num / den
+    np.testing.assert_allclose(micro.predicted(sol)[0], ref["rich"] - ref["poor"], rtol=1e-12)
+    fd = central_fd(lambda th: prob.evaluate(th, need_jacobian=False).g, theta, 1e-5)
+    for name, rows in ev.blocks.items():
+        assert rel_err(ev.G[rows], fd[rows]) < 1e-6, name
+    m.close()
+
+
 def recovery_data(T: int = 20, J: int = 8, H: int = 100, seed: int = 4) -> dict:
     """Markets whose data shares come from a known theta, beta and xi orthogonal to Z in the sample, so g(true) = 0:
     X = [const, x1, price] with price endogenous, pi on price x income, sigma on x1."""

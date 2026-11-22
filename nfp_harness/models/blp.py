@@ -227,9 +227,15 @@ class MixedLogitModel:
         Pwa = P * (self.w[t] * a)
         return np.diag(Pwa.sum(axis=1)) - Pwa @ P.T
 
-    def group_sums(self, theta: np.ndarray, t: int, P: np.ndarray, cols: Sequence[str], derivatives: bool
-                   ) -> dict[str, Any]:
-        """Per-household sums of market t (contract of ``moments.GroupMicroMoments``; one household per agent)."""
+    def group_sums(self, theta: np.ndarray, t: int, P: np.ndarray, cols: Sequence[str], derivatives: bool,
+                   delta: np.ndarray | None = None) -> dict[str, Any]:
+        """Per-household sums of market t (contract of ``moments.GroupMicroMoments``; one household per agent).
+
+        With ``delta`` (market t's mean utilities, as ``solve`` passes them) the entry also carries ``M`` (H, C+1),
+        each household's E[U | purchase] from its inside-good logit Q_jh = exp(u_jh) / sum_k exp(u_kh) in log space,
+        and, with ``derivatives``, ``M_d_delta`` (H, C+1, J) and ``M_d_theta`` (H, C+1, P). A logit household always
+        buys with positive probability, but P_h = sum_j P_jh underflows for a very price-sensitive one (the lognormal
+        law), and S / P_h then loses every digit and is dropped once P_h is 0; M does not."""
         missing = [c for c in cols if c not in self.product_columns]
         if missing:
             raise KeyError(f"group sums of columns the model was not given: {missing}")
@@ -244,6 +250,17 @@ class MixedLogitModel:
             out["d_delta"] = (w[:, None, None] * P.T[:, None, :]) * (U.T[None, :, :] - Ubar[:, :, None])
             UX = np.einsum("jh,jc,jp->hcp", P, U, Xc)
             out["d_theta"] = (w[:, None] * B)[:, None, :] * (UX - Ubar[:, :, None] * xbar[:, None, :])
+        if delta is not None:
+            u = np.asarray(delta, dtype=float)[:, None] + self.X[t] @ self.coefficients(theta, t)
+            Q = np.exp(u - u.max(axis=0))
+            Q /= Q.sum(axis=0)
+            M = Q.T @ U                                                        # (H, C+1)
+            out["M"] = M
+            if derivatives:
+                xq = Q.T @ Xc
+                out["M_d_delta"] = Q.T[:, None, :] * (U.T[None, :, :] - M[:, :, None])
+                out["M_d_theta"] = B[:, None, :] * (np.einsum("jh,jc,jp->hcp", Q, U, Xc)
+                                                    - M[:, :, None] * xq[:, None, :])
         return out
 
     def second_choice_adjoint(self, theta: np.ndarray, t: int, P: np.ndarray, A: np.ndarray, B: np.ndarray
@@ -309,7 +326,7 @@ class MixedLogitModel:
         if requests.group_sums:
             cols = list(requests.group_sums)
             outputs["group_sums"] = list(self.pool.map(
-                lambda t: self.group_sums(theta, t, Ps[t], cols, need_jacobian), T))
+                lambda t: self.group_sums(theta, t, Ps[t], cols, need_jacobian, deltas[t]), T))
         if requests.price_derivatives:
             outputs["ds_dp"] = [self.price_derivatives(theta, t, Ps[t]) for t in T]
         outputs["theta"] = theta.copy()
