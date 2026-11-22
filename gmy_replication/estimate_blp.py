@@ -341,7 +341,7 @@ def _pcm_matched_design(spec: Any, start_theta: Mapping[str, float] | None) -> d
     lay = spec.layout()
     if start_theta:
         lay = lay.replace({n: {"start": float(np.clip(v, s.lower, s.upper))} for n, v in start_theta.items()
-                           for s in [lay.specs[lay.names.index(n)]] if n in lay.names and s.free})
+                           if n in lay.names for s in [lay.specs[lay.names.index(n)]] if s.free})
     chars = ["prices"] + [c for c in spec.kernel_chars]
     pattern, unobs, demog, names, starts, lower, upper = [], [], [], [], [], [], []
     scale = float(spec.alpha_median)
@@ -384,7 +384,8 @@ def _pcm_matched_design(spec: Any, start_theta: Mapping[str, float] | None) -> d
 def same_moments_problem(threads: int, households: int = 2000, years: tuple[int, ...] = SAME_YEARS,
                          fd_max_gap: int = 3, seed: int = SEED, utility: str = "gmy",
                          moments: str = "demand_supply_msfd_own", drop_blocks: Sequence[str] = (),
-                         start_theta: Mapping[str, float] | None = None) -> tuple[Any, Any, dict[str, Any]]:
+                         start_theta: Mapping[str, float] | None = None, cost_shifters: str = "excluded"
+                         ) -> tuple[Any, Any, dict[str, Any]]:
     """(NFPGMMProblem, GMYSpec, design): a mixed logit (``MixedLogitModel``, the harness's BLP contraction) on the
     moment blocks of the PCM's ``--moments <moments> --weighting joint_cue [--drop-block ...]`` problem
     (``GMYSpec.moment_blocks``): the same products (twins merged, shares below 1e-5 dropped, price ties spread), the
@@ -401,6 +402,7 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
         raise ValueError(f"utility must be one of {UTILITIES}, got {utility!r}")
     spec = gmy_pcm.GMYSpec(years=years, households=households)
     spec.fd_max_gap = int(fd_max_gap)
+    spec.set_cost_shifters(cost_shifters)
     spec.set_moments(moments)
     spec.set_weighting_mode("joint_cue", list(drop_blocks))
     ms, _ = spec.moment_blocks(moments, True)
@@ -447,7 +449,8 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
                                             unit=1.0) for n, v, l_, h in zip(names, start, lo, hi)])
     prob = NFPGMMProblem(model, ms, spec.linear_for("all"), layout, max_step=False)
     prob.set_joint("cue")
-    design.update(moments=moments, drop_blocks=list(spec.drop_blocks), fd_max_gap=int(fd_max_gap))
+    design.update(moments=moments, drop_blocks=list(spec.drop_blocks), fd_max_gap=int(fd_max_gap),
+                  cost_shifters=cost_shifters)
     return prob, spec, design
 
 
@@ -616,14 +619,19 @@ def same_moments_main(args: Any) -> None:
                         handlers=[logging.FileHandler(OUT / f"{tag}.log"), logging.StreamHandler()])
     t0 = time.time()
     st = _start_theta(args.start_theta)
+    # a pcm_matched same-moments fit of its own (it names log_alpha0) is a warm start of the logit's layout as it
+    # stands; a PCM stage file is read in the PCM's units by _pcm_matched_design
+    own_fit = args.utility == "pcm_matched" and "log_alpha0" in st
     prob, spec, design = same_moments_problem(args.threads, households=args.households, years=years,
                                               fd_max_gap=args.fd_max_gap, utility=args.utility,
                                               moments=args.moments, drop_blocks=args.drop_block or (),
-                                              start_theta=st if args.utility == "pcm_matched" else None)
+                                              start_theta=st if args.utility == "pcm_matched" and not own_fit
+                                              else None,
+                                              cost_shifters=args.cost_shifters)
     prob.segments = spec.products[spec.groups].astype(str).to_numpy()   # type: ignore[attr-defined]
     log.info("%s: %d products, %d moments, identification %s", design, prob.n, prob.k, prob.identification)
     theta0 = prob.layout.starts()
-    if args.utility == "gmy" and st:
+    if (args.utility == "gmy" or own_fit) and st:
         theta0 = np.array([st.get(n, v) for n, v in zip(prob.layout.names, theta0)])
     if args.max_nfev <= 0:   # evaluate only
         out = {"design": design, "theta0": dict(zip(prob.layout.names, map(float, theta0)))}
@@ -673,6 +681,8 @@ def main() -> None:
     ap.add_argument("--start-theta", default=None,
                     help="same-moments: named starts (a harness stage .npz, e.g. the PCM's, for pcm_matched; a "
                          "same-moments JSON)")
+    ap.add_argument("--cost-shifters", choices=gmy_pcm.COST_SHIFTER_MODES, default="excluded",
+                    help="same-moments: as the PCM's --cost-shifters")
     ap.add_argument("--tag", default="", help="suffix of the output names (default none)")
     ap.add_argument("--counterfactuals", action="store_true",
                     help="published / fit: also run the shared counterfactuals at the estimate (off by default, so "

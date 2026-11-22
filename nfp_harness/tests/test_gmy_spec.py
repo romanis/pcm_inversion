@@ -486,3 +486,28 @@ def test_trimmed_mean_and_near_twins(gmy: Any) -> None:
     p = pd.DataFrame({"market_ids": [1, 1, 1, 1, 2], "veh_type": ["car", "car", "van", "car", "car"],
                       "prices_data": [1.0, 1.005, 1.002, 2.0, 1.0]})
     assert near_twins(p, gmy.NEAR_TWIN_GAP, "veh_type", "prices_data") == {1: 2, 2: 0}
+
+
+def test_cost_shifters_in_the_cost_equation(gmy: Any) -> None:
+    """--cost-shifters in_cost: the cost shifters join the cost equation, only markup shifters stay excluded, the
+    default design is unchanged and the mode is part of the run key."""
+    sp = gmy.GMYSpec((1998, 1999))
+    sp.set_moments("demand_supply_msfd")
+    base = (sp.cost_basis.copy(), sp.Z_supply.copy(), sp.Z_supply_ms.copy(), sp.supply_fd_design[0].copy())
+    key0 = sp.paper_run_key()
+    sp.set_cost_shifters("in_cost")
+    k0 = base[0].shape[1]
+    assert sp.cost_basis.shape[1] > k0
+    assert set(gmy.SUPPLY_EXCLUDED) & set(sp.cost_names)
+    np.testing.assert_array_equal(sp.cost_basis[:, :k0], base[0])
+    k = sp.cost_basis.shape[1]
+    np.testing.assert_array_equal(sp.Z_supply, sp.cost_basis)            # levels block just identified
+    ms = sp.Z_supply_ms
+    np.testing.assert_array_equal(ms[:, :k], sp.cost_basis)
+    assert ms.shape[1] - k <= 2 * len(gmy.MARKUP_SHIFTER_CHARS) + 2       # markup shifters only
+    assert sp.paper_run_key()["cost_shifters"] == "in_cost" and "cost_shifters" not in key0
+    sp.set_cost_shifters("excluded")
+    for a, b in zip(base, (sp.cost_basis, sp.Z_supply, sp.Z_supply_ms, sp.supply_fd_design[0])):
+        np.testing.assert_array_equal(a, b)
+    with pytest.raises(ValueError):
+        sp.set_cost_shifters("both")

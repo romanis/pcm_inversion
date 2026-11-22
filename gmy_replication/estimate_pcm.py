@@ -217,6 +217,8 @@ MARKUP_SHIFTER_CHARS = GH_CONTINUOUS
 #: --moments demand_supply_fd: time-varying cost shifters differenced within model (data_blp.csv ``model``)
 FD_SHIFTERS = SUPPLY_EXCLUDED
 FD_MAX_GAP = 1
+#: --cost-shifters: SUPPLY_EXCLUDED as excluded supply instruments (default) or as cost-equation regressors
+COST_SHIFTER_MODES = ("excluded", "in_cost")
 #: the cleanest ownership events among US car makers 1980-2018, as (name, public transition year T, target makes).
 #: ``GMYSpec.ownership_events`` compares T - 1 with T + 1 (T is a mixed year) and keeps an event only when the data's ``parent`` of every target make differs between the two years; minority stakes the
 #: data do not code are not listed
@@ -650,6 +652,7 @@ class GMYSpec(PaperSpec):
         self.weighting = "default"
         self.drop_blocks: tuple[str, ...] = ()
         self.a_lo_free = False
+        self.cost_shifters = "excluded"
         self.cf_year = CF_YEAR
         self.a_lo = float(a_lo)
         self.prefit_rows = "price_purchase"
@@ -719,22 +722,49 @@ class GMYSpec(PaperSpec):
         keep = drop_collinear_columns(Z, keep=self.X1.shape[1])
         self.Z = Z[:, keep]
         self.Z_names = list(self.X1_names) + [ex_names[k - self.X1.shape[1]] for k in keep[self.X1.shape[1]:]]
-        w = np.column_stack([np.ones(len(p)) if c == "const" else p[c].to_numpy(float) for c in COST_BASIS])
-        self.cost_keep = keep_rank(w)
-        self.cost_basis = w[:, self.cost_keep]
-        # the excluded supply instruments standardised, as the demand side's: steel_weight is of order 6e5, so unscaled
-        # its square set lambda_max of Z_s'Z_s / n to 4e11 and the 2SLS weight (Z_s'Z_s / n)^-1 of step 1 was refused
-        # as not positive definite (lambda_min / lambda_max 1e-16; 3e-6 once scaled). The 2SLS supply block does not
-        # depend on the column scale of Z_s.
-        Zs = np.column_stack([self.cost_basis, standardise(np.column_stack([p[c].to_numpy(float)
-                                                                            for c in SUPPLY_EXCLUDED]))])
-        self.Z_supply = drop_collinear(Zs, keep=self.cost_basis.shape[1])
+        self.build_cost_design()
         # Clusters of the aggregate (and supply) block: the model (product_ids), not make2. linearDemand.do clusters
         # its standard errors by make2, but make2 has 56 levels against 112 aggregate moments, so the clustered S of
         # step 2 would be singular (rank <= 56) and W2 = S^-1 would not exist.
         self.clusters = p.product_ids.to_numpy()
         self._loaded = key
         self.apply_ownership_coding()
+
+    def set_cost_shifters(self, mode: str) -> None:
+        """Where GMY's time-varying cost shifters SUPPLY_EXCLUDED (the lagged exchange rate, steel weight, the NAFTA and
+        KORUS terms) enter the supply side: ``excluded`` (default) keeps them out of the cost equation as excluded
+        instruments, so the supply blocks require implied cost to be uncorrelated with them; ``in_cost`` puts them in
+        the cost equation as regressors (standardised), and only markup shifters stay excluded: the levels block is
+        then just identified, supply_ms keeps the markup shifters, and supply_fd differences the markup shifters in
+        place of the cost shifters (LEARNINGS 35). The demand difference block keeps the cost shifters either way."""
+        if mode not in COST_SHIFTER_MODES:
+            raise ValueError(f"cost shifters must be one of {COST_SHIFTER_MODES}, got {mode!r}")
+        self.cost_shifters = mode
+        if self._loaded is not None:
+            self.build_cost_design()
+
+    def build_cost_design(self) -> None:
+        """cost_basis (the cost equation's regressors), cost_names and Z_supply under ``cost_shifters``."""
+        p = self.products
+        w = np.column_stack([np.ones(len(p)) if c == "const" else p[c].to_numpy(float) for c in COST_BASIS])
+        names = list(COST_BASIS)
+        shifters = np.column_stack([p[c].to_numpy(float) for c in SUPPLY_EXCLUDED])
+        in_cost = self.cost_shifters == "in_cost"
+        if in_cost:
+            w = np.column_stack([w, standardise(shifters)])
+            names += list(SUPPLY_EXCLUDED)
+        self.cost_keep = keep_rank(w)
+        self.cost_basis = w[:, self.cost_keep]
+        self.cost_names = [names[k] for k in self.cost_keep]
+        # the excluded supply instruments standardised, as the demand side's: steel_weight is of order 6e5, so unscaled
+        # its square set lambda_max of Z_s'Z_s / n to 4e11 and the 2SLS weight (Z_s'Z_s / n)^-1 of step 1 was refused
+        # as not positive definite (lambda_min / lambda_max 1e-16; 3e-6 once scaled). The 2SLS supply block does not
+        # depend on the column scale of Z_s.
+        if in_cost:
+            self.Z_supply = self.cost_basis
+        else:
+            Zs = np.column_stack([self.cost_basis, standardise(shifters)])
+            self.Z_supply = drop_collinear(Zs, keep=self.cost_basis.shape[1])
 
     @staticmethod
     def linear_design(p: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
@@ -946,6 +976,11 @@ class GMYSpec(PaperSpec):
                             help=f"estimate a_lo as a free GMM parameter on [{A_LO_FREE[0]:g}, {A_LO_FREE[1]:g}], "
                                  f"starting at --a-lo (its Jacobian column by finite differences); part of the run "
                                  f"key")
+        parser.add_argument("--cost-shifters", choices=COST_SHIFTER_MODES, default="excluded",
+                            help="supply side: excluded (default) keeps the lagged exchange rate, steel weight and the "
+                                 "trade-agreement terms out of the cost equation as excluded instruments; in_cost puts "
+                                 "them in the cost equation and keeps only markup shifters excluded (LEARNINGS 35); "
+                                 "part of the run key when not excluded")
         parser.add_argument("--cf-year", type=int, default=CF_YEAR,
                             help=f"counterfactuals: the year of the merger, cost shock and removal diversion (default "
                                  f"{CF_YEAR}); post-estimation only, not in the run key")
@@ -984,6 +1019,7 @@ class GMYSpec(PaperSpec):
         drop = [DROP_ALIASES.get(b, b) for b in (getattr(args, "drop_block", None) or ())]
         self.set_weighting_mode(getattr(args, "weighting", None) or "default", drop)
         self.a_lo_free = bool(getattr(args, "a_lo_free", False))
+        self.set_cost_shifters(getattr(args, "cost_shifters", None) or "excluded")
         self.cf_year = int(getattr(args, "cf_year", None) or CF_YEAR)
 
     def paper_run_key(self) -> dict[str, Any]:
@@ -1017,6 +1053,8 @@ class GMYSpec(PaperSpec):
             out["drop_blocks"] = list(self.drop_blocks)
         if self.a_lo_free:
             out["a_lo_free"] = True
+        if self.cost_shifters != "excluded":
+            out["cost_shifters"] = self.cost_shifters
         return out
 
     @property
@@ -1172,7 +1210,7 @@ class GMYSpec(PaperSpec):
         """The log-cost supply block. ``kind``: ``levels`` (GMY's cost shifters, ``--moments demand_supply``),
         ``ms`` (those plus the markup shifters, ``demand_supply_ms``) or ``fd`` (within-model first differences,
         ``demand_supply_fd``)."""
-        names = [f"gamma[{c}]" for k, c in enumerate(COST_BASIS) if k in self.cost_keep]
+        names = [f"gamma[{c}]" for c in self.cost_names]
         w, Z, name = self.cost_basis, self.Z_supply, "supply"
         if kind == "ms":
             Z, name = self.Z_supply_ms, "supply_ms"
@@ -1190,6 +1228,8 @@ class GMYSpec(PaperSpec):
         block (the first columns equal ``Z_supply``'s), collinear columns dropped."""
         p = self.products
         ms, _ = markup_shifters(p, MARKUP_SHIFTER_CHARS)
+        if self.cost_shifters == "in_cost":   # the cost shifters are regressors in cost_basis; markup shifters only
+            return drop_collinear(np.column_stack([self.cost_basis, standardise(ms)]), keep=self.cost_basis.shape[1])
         ex = np.column_stack([np.column_stack([p[c].to_numpy(float) for c in SUPPLY_EXCLUDED]), ms])
         return drop_collinear(np.column_stack([self.cost_basis, standardise(ex)]), keep=self.cost_basis.shape[1])
 
@@ -1225,8 +1265,17 @@ class GMYSpec(PaperSpec):
         dw = self.cost_basis[cur] - self.cost_basis[prev]
         keep = drop_collinear_columns(dw, keep=0)   # a constant d trend stays: the intercept of the differences
         w = self.cost_basis[:, keep]
-        Zd = difference_instruments(cur, prev, np.column_stack([w, self.fd_shifters()]))
+        excluded = self.fd_markup_shifters() if self.cost_shifters == "in_cost" else self.fd_shifters()
+        Zd = difference_instruments(cur, prev, np.column_stack([w, excluded]))
         return drop_collinear(Zd, keep=len(keep)), w, keep
+
+    def fd_markup_shifters(self) -> np.ndarray:
+        """(n, k) markup shifters (``markup_shifters`` of MARKUP_SHIFTER_CHARS), standardised; columns with no
+        within-model variation over the pairs are dropped. The excluded set of supply_fd under ``in_cost``."""
+        cur, prev = self.fd_pairs
+        ms, _ = markup_shifters(self.products, MARKUP_SHIFTER_CHARS)
+        z = standardise(ms)
+        return z[:, drop_collinear_columns(z[cur] - z[prev], keep=0)]
 
     def demand_fd_moment(self, plain: bool = False) -> Any:
         """E[d z d xi] = 0 over the within-model pairs, the aggregate block's form (Sargan unless fixed_w or
@@ -1428,7 +1477,9 @@ class GMYSpec(PaperSpec):
                 **({"ownership": {"coding": "public_record", "recoded": self.recoded_ownership,
                                   "events": [list(e[:2]) + [list(e[2])] for e in OWNERSHIP_EVENTS]}}
                    if self.moments in OWN_MOMENTS else {}),
-                **({"a_lo_free": list(A_LO_FREE)} if self.a_lo_free else {})}
+                **({"a_lo_free": list(A_LO_FREE)} if self.a_lo_free else {}),
+                **({"cost_shifters": {"mode": self.cost_shifters, "in_cost": list(SUPPLY_EXCLUDED)}}
+                   if self.cost_shifters != "excluded" else {})}
 
     def gate_profiles(self) -> list[tuple[str, str, dict[str, Any]]]:
         """The sigma_p ray profile (section 3): lambda in {0.5, 1, 2} times the start spreads, sigma_p in {1.5, ..,
