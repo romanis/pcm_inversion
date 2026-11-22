@@ -1066,3 +1066,115 @@ Consumer surplus (about $111k per household in 1980 at a_lo 0.1) is not a headli
 **Consequence.** Report GMY as a band in a_lo with substitution as the result. The markup level needs moments that
 see it: the rival-characteristic supply instruments (the 6-year slices show an interior minimum near a_lo 0.05), to
 be re-estimated with price-sensitivity parameters free at each a_lo.
+
+## 35. GMY 39 years, extended moments: the cost shifters belong in the cost equation, a_lo is identified only by supply and income-make moments, and the literature has never estimated the tail (2026-11-22)
+
+**Setup.** GMY moments extended with an aggregate block on xi, a markup-shifter supply block (supply_ms), within-model
+demand differences (demand_fd) and within-model supply differences (supply_fd), joint CUE, ownership block dropped.
+39 years, 2,000 CPS households, PCM at nu 64 with a_lo free. Comparators: a mixed logit with the PCM's utility on the
+same moments and weight (pcm_matched), and a mixed logit with GMY's utility. Second choices carry GMY's weight of 30.
+
+**Finding 1: the old supply blocks excluded true cost shifters.** supply_ms and supply_fd treated the lagged exchange
+rate, steel weight and the NAFTA and Korea trade terms as excluded instruments, i.e. required implied marginal cost to
+be uncorrelated with them. GMY do the opposite: the exchange rate is the excluded instrument for price on the demand
+side (codes/linearDemand.do line 120) and a regressor in their post-estimation cost equation (codes/counterfactuals.m
+lines 101-108, Table 12, "RXR"). Steel weight and the trade terms appear nowhere in their estimation. The exclusion was
+ours. It rewards specifications whose markups are large and variable enough to absorb shifter-driven price changes:
+under it the GMY-utility logit paid 174.7 on supply_fd at a median Lerner of 0.054. Fix (4e71ced, --cost-shifters
+in_cost): the six shifters enter the cost equation, only markup shifters are excluded, supply_fd differences markup
+shifters, demand unchanged. GMY-utility logit refit: median Lerner 0.054 -> 0.093, median own elasticity -21.7 ->
+-12.5, supply_ms 147.8 -> 99.8, supply_fd 174.7 -> 161.9. The default stays the old spec so earlier runs reproduce.
+The 8-year low-a_lo result leaned on supply_fd and must be re-run under in_cost before it is quoted.
+
+**Finding 2: the pcm_matched logit was stuck, not converged.** GMY's micro moments average E[x | purchase] per
+household as S_h / P_h. With the PCM's lognormal price sensitivity (sigma_p 1.75) some price coefficients reach
+-8,747, every inside utility is below -745, and P_h underflows: 462 households had P_h = 0 exactly and were dropped as
+never-buyers, 27 more were denormal (P_h 3.5e-323 gave 9.0 for an exact 9.0502). q jumped in steps, the
+finite-difference Jacobian was wrong, least squares rejected 18 steps and stopped at q 897.1 with gradient 1.3e5. Fix
+(27b7e58): the conditional mean in log space; PCM goldens bit-identical, GMY-utility logit within 2e-9 in q. Refits
+fall to 806.5 (old supply spec) and 779.4 (in_cost) and are still creeping. The earlier median Lerner 0.31 and own
+elasticity -4.0 for pcm_matched are void.
+
+**Finding 3: q under one moment set is not comparable with q under another.** in_cost removes 6 restrictions from
+supply_ms, swaps 6 for 8 in supply_fd and adds 6 cost coefficients (overidentifying df 85 -> 87). Across moment sets
+only each J against its own df can be compared. GMY's classic fit was estimated on 1,000 households, so rescored on
+2,000 it is not the minimum of the 2,000-household classic objective; it must be refit on the same draws before a
+cross-fit table.
+
+**Finding 4: the PCM's gap to the matched logit is structural.** At the old-spec CUE points (exact re-evaluation, q
+matched to 1e-12) the PCM was 1,286.7 against the logit's 897.1. The gap sits in micro +206 (the PCM overshoots CEX
+income-price gradients, z +10.8 on Q5 - Q1, and undershoots MRI, z -10.2: one price sensitivity sets both whether and
+how much a household pays), second choices +127 (too similar to first choices on footprint, horsepower, luxury, SUV;
+1999 footprint 0.816 vs 0.680) and supply_ms +90 (partly the $500 cost floor, which clips 132 logit products against
+12 PCM products). The PCM is better on the aggregate block (about -29) and on age x price (142 vs 205). Compass rounds
+gain 1-5 in q per 3-4 hours, so descent does not close it.
+
+**Finding 5: GMY's weight of 30 under-weights second choices.** 500 draws of secondChoice_bootstrap.mat through the
+same moment code (after the small-share drop) give a median SE of 0.0071 (0.0031-0.019) per correlation against
+0.033 implied by 30, a median 22x more weight. Re-scored blocks: pcm_matched 75 -> 2,224, GMY-utility 77 -> 2,345.
+Second choices are where the PCM loses, so the 30 helps it. Keep 30 as GMY's headline; report bootstrap weights as a
+robustness check that favours the logit.
+
+**Finding 6: which moments identify a_lo.** Local tests at the old-spec PCM point (a_lo 0.057): sensitivity t per
+0.01 of a_lo, information gain on a_lo's SE given the existing blocks, and each block's own profile over 0.025-0.1.
+
+| Candidate | sum t^2 | Gain on a_lo SE (efficient W) | Own profile |
+|---|---|---|---|
+| C4 supply: rival distances in characteristic space (in_cost) | 0.61 | +35% (0.0027 -> 0.0023) | falls with a_lo, opposite to existing supply |
+| C6c: premium-make purchase share by income quintile (CEX, MRI, 10 rows) | 7.6 | +10% (+47% diagonal W) | interior minimum near 0.05 |
+| C6b/C6d/C6e: luxury, European brand, log hp by income | 2.4-5.0 | +3-10% each | monotone, badly fit |
+| C6a: price paid at Q5 | 6.1 | +1% (redundant) | |
+| C3: exchange rate x price rank, luxury, EU | 0.04 | 0% | flat |
+| C4 demand form | 0.01 | 0% | flat |
+| C5: top-quintile income share x price rank | 0.02 | 0% | flat |
+
+Demand-side instruments carry nothing: a change in a_lo is absorbed into delta by the inversion, so xi barely moves
+along any exogenous instrument (entry 34 again). The existing moments pin a_lo locally through the income-price micro
+rows and supply_fd; with other parameters fixed q is +105 at 0.025 and +119 at 0.1, but on 8 years the re-optimised
+profile was nearly flat, so this is local only. Price-band competition measures are endogenous (rival prices are set
+in the same equilibrium); only characteristic-space distances are defensible, under the usual assumption that
+characteristics are set before prices. The gas-guzzler tax is out (mpg responds to it). The luxury tax is plausible
+but list prices near the threshold respond to it. Data limits: CPS incomes are winsorised at $225k, two CEX College /
+NoCollege level rows contradict their difference row, there is no household purchase data (true price-paid quantiles
+need BLS CEX microdata; MRI is proprietary), and income reaches luxury and brand only through price sensitivity.
+
+**Finding 7: the literature assumes the tail; nobody estimates it.** Review of the applied PCM papers from Song
+(2007, CPUs) and Berry and Pakes (2007), working-paper versions where journals blocked access:
+- Why shares cannot identify it: shares pin alpha only at the cutoffs between neighbours. Markups depend on the
+  density at those cutoffs (Berry, Linton and Pakes 2004, eq. 19); surplus of the top product's buyers depends on
+  E[1/alpha] below the lowest cutoff, which shares say nothing about (Berry and Haile 2014, section 5.2, Theorem 2).
+  Only a parametric family links the two, which is why a_lo moves markups and welfare together here.
+- Who names it: Song (2007): E(1/alpha | top buyers) "increases exponentially" as alpha -> 0; he reports only a
+  conservative lower bound (top buyers indifferent to the next product) and checks that welfare trends survive; his
+  logit welfare is 10-13x his PCM welfare. Berry and Pakes (2007): reservation prices above observed prices cannot
+  be estimated nonparametrically. Bajari and Benkard (2005): drop products whose surplus bound is infinite. Tebaldi,
+  Torgovitsky and Yang (2023): removing a product has "no logical upper bound" while small price changes are tight.
+- Fixes in use, all assumed: lognormal with normalised location (Song; Berry and Pakes; Lucarelli et al.; the
+  location drops out of dollar welfare, only the shape matters); bounded support (Bresnahan's uniform; Petrin's
+  truncated chi-square on tastes, not price); a functional-form floor (Thomassen: alpha1 + alpha2 exp(-alpha3 income),
+  alpha1 > 0, the closest analogue to a_lo, fixed by assumption); income-scaled sensitivity (Petrin ln(y - p); GMY
+  linear in demographics with no unobserved part); a WTP cap as a multiple of price (Thomassen 2014); reporting
+  devices (lower bounds, price indices by alpha group, local price changes only).
+- What has pinned the level: cost-side instruments (pin the dispersion, fragile: Song's dispersion moves from 0.84
+  to 1.55 with the market-size definition); outside calibration (MicroBLP's -11 from GM's market elasticity); income
+  micro moments (the income gradient, not the tail within a cell); second choices (substitution, not level).
+- Not covered: Nosko on CPUs, Crawford-Shcherbakov-Shum, Lee-Sovinsky, Igami et al., Miller-Yeo.
+
+**Our contribution, ranked.**
+1. Estimate the lower support point of price sensitivity (a_lo) from data and profile surplus, markups and the GMM
+   objective jointly over it. This turns Song's one-sided bound into an interval and shows how markups and welfare
+   co-move with a tail parameter, which no paper reports. The free-a_lo run and its profile stage deliver it.
+2. Tail-targeted moments: premium-make purchase shares by income quintile (C6c, the only candidate with an interior
+   minimum) and, with CEX microdata, shares of top-income buyers above price thresholds.
+3. Identify the markup level from characteristic-space rival distances on the supply side (C4, -35% on a_lo's SE),
+   with cost shifters correctly in the cost equation, not from demand-side instruments, which carry no information
+   on a_lo in the PCM.
+4. Tie the bound to a primitive: an income-based floor or a WTP cap, not a functional form.
+5. Outside margin data for luxury segments to pin the density at the lowest cutoffs.
+6. A welfare split: the part identified from observed cutoffs against the part extrapolated below the lowest one.
+7. A stability check: the a_lo profile across market-size definitions (Song's dispersion fragility).
+
+**Consequence.** Final moment set for the three-way comparison: in_cost supply, C4 rival distances in supply_ms, and
+C6c with GMY's 33 micro rows under the bootstrap covariance. Refit the PCM (two a_lo starts) and the matched logit on
+it, refit GMY's classic logit on the same 2,000 households, and score all three on both moment sets, comparing q only
+within a moment set.
