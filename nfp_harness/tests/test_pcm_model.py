@@ -524,8 +524,13 @@ def test_bound_parameter(small: dict[str, Any], kind: str) -> None:
     old["alpha_lo"] = st["a_lo"]
     mb.load_state_dict(old)
     assert mb.state_dict()["a_lo"].tolist() == st["a_lo"].tolist()
-    with pytest.raises(ValueError):
-        PCMModel(spec, small["data"], with_bound(0.3, free=True), small["nu"], small["seed"])
+    with pytest.raises(ValueError):   # a free bound must stay positive on its whole range
+        PCMModel(spec, small["data"], ParameterLayout(list(base.specs) + [
+            ParameterSpec("a_lo", "bound", None, None, 0.3, 0.0, 1.0, unit=0.1, free=True)]), small["nu"],
+            small["seed"])
+    mf = PCMModel(spec, small["data"], with_bound(0.3, free=True), small["nu"], small["seed"])
+    assert mf.fd_columns == (5,) and mb.fd_columns == ()
+    mf.close()
     with pytest.raises(ValueError):
         PCMModel(PCMSpec(CHARS, bound_kind="b"), small["data"], base, small["nu"], small["seed"])
     for m in (m0, mz, mb):

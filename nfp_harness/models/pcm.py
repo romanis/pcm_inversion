@@ -315,9 +315,9 @@ class PCMModel:
         if len(bound) > 1:
             raise ValueError(f"PCM takes at most one bound (a_lo) parameter, got {len(bound)}")
         for k in bound:
-            if specs[k].free or specs[k].lower < 0:
-                raise ValueError(f"{specs[k].name}: the bound a_lo is a fixed, non-negative parameter "
-                                 f"(free=False, lower >= 0)")
+            if specs[k].lower < 0 or (specs[k].free and not specs[k].lower > 0):
+                raise ValueError(f"{specs[k].name}: the bound a_lo is non-negative, and positive on its whole range "
+                                 f"when free (lower > 0)")
         if sp.bound_kind not in ("a", "alpha"):
             raise ValueError(f"PCMSpec.bound_kind must be 'a' or 'alpha', got {sp.bound_kind!r}")
         #: what the bound parameter bounds: "a" (a_i, kernel keyword a_lo) or "alpha" (alpha_i, keyword alpha_lo)
@@ -326,6 +326,9 @@ class PCMModel:
         self._bound: int | None = bound[0] if bound else None
         #: layout columns the kernel does not differentiate (the bound): zero in D and the micro d_theta
         self.bound_columns: tuple[int, ...] = tuple(bound)
+        #: free layout columns the kernel does not differentiate: ``NFPGMMProblem`` takes their Jacobian columns by a
+        #: finite difference of g (``fd_step``), one extra solve per column and Jacobian
+        self.fd_columns: tuple[int, ...] = tuple(k for k in bound if specs[k].free)
         self._order = np.array(taste + scale + sigp, dtype=int)  # kernel column c is layout index _order[c]
         self.P_kernel = int(self._order.size)
         agent_cols = set() if agents is None else {c for c in (agents.columns if hasattr(agents, "columns")
@@ -861,6 +864,21 @@ class PCMModel:
         """restore(theta): discard the trial state."""
         with self._lock:
             self._trial = [None] * self.T
+
+    def fd_step(self, theta: np.ndarray, k: int) -> float:
+        """Step of the finite-difference Jacobian column ``k`` (an ``fd_columns`` entry, the free bound): 2% of the
+        bound, at least 1e-4, a secant over the size of a trust-region step rather than the slope of one frontier
+        piece (LEARNINGS 25)."""
+        return max(1e-4, 0.02 * abs(float(np.asarray(theta, dtype=float).ravel()[k])))
+
+    def snapshot_trial(self) -> list[Any]:
+        """The trial states, so an auxiliary solve (a finite-difference column) can be undone by ``restore_trial``."""
+        with self._lock:
+            return list(self._trial)
+
+    def restore_trial(self, snap: list[Any]) -> None:
+        with self._lock:
+            self._trial = list(snap)
 
     def warm_from_delta(self, delta: np.ndarray, theta: np.ndarray) -> int:
         """warm_from_delta(delta, theta) -> markets set: every market whose (n,) row-order ``delta`` entries are finite

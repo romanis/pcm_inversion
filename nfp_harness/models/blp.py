@@ -3,7 +3,11 @@
     u_ijt = delta_jt + sum_k C_ik x_jtk + eps_ijt,  eps type-1 extreme value,  u_i0t = 0
     C_ik  = sum_{(k, d) in pattern} pi_kd D_id + sum_{k in unobs} sigma_k nu_ik
 
-theta is ``(pi in pattern order, sigma in unobs order)``. Each agent i of market t (weight w_i, demographics D_i, taste
+theta is ``(pi in pattern order, sigma in unobs order)``, then, with an exponential law (``exp_column``), the
+coefficients of ``exp_terms``: agent h's coefficient on X column ``exp_column`` gains ``-exp(e_h)`` with ``e_h =
+offset_h + sum_e theta_e z_he`` (``exp_offset`` per market, z_he a demographic or a taste draw), a lognormal price
+sensitivity such as the PCM's ``log alpha_h = log c_h + phi' d_h + sigma_p nu_h``. Its basis is ``b_he = -exp(e_h)
+z_he`` on that column, so every derivative below holds with that basis. Each agent i of market t (weight w_i, demographics D_i, taste
 draws nu_i) is one simulated consumer; market shares are s_t = P_t w_t with P_t (J_t, H_t) the logit choice
 probabilities. ``solve`` inverts every market by the BLP contraction accelerated by SQUAREM (Varadhan and Roland 2008),
 in parallel over markets, from the accepted delta (``commit`` / ``restore``, a warm start ``warm_from_delta``), and
@@ -45,7 +49,8 @@ __all__ = ["MixedLogitModel"]
 
 class MixedLogitModel:
     """MixedLogitModel(markets, X, D, weights, nu, pattern, unobs, shares, threads=1, tol=1e-13, max_iterations=5000,
-    product_columns=None, agents=None, agent_rows=None, price_column=None, price_coefficient=0.0).
+    product_columns=None, agents=None, agent_rows=None, price_column=None, price_coefficient=0.0, exp_column=None,
+    exp_terms=(), exp_offset=None).
 
     Per market t (in ``markets`` order): ``X[t]`` (J_t, K) the characteristics with a coefficient, ``D[t]`` (H_t, Dm)
     the agents' demographics, ``weights[t]`` (H_t,) their weights, ``nu[t]`` (H_t, len(unobs)) their taste draws,
@@ -53,15 +58,19 @@ class MixedLogitModel:
     with a sigma. ``product_columns`` ({name: (n,) array in product-table order}) are the columns group sums may ask
     for; ``agents`` and ``agent_rows`` (the agent-table rows of each market's agents) are what household-level micro
     moments bind to. ``price_column`` (an X column) and ``price_coefficient`` (the mean linear price coefficient in
-    delta) define ``ds_dp``. The contraction starts at the logit inversion log s_j - log s_0 until a delta is
-    accepted."""
+    delta) define ``ds_dp``; with ``price_column`` the model also carries what supply moments bind to
+    (``spec.share_column``, ``products``, ``kernel_market(t).p``). ``exp_column`` (an X column), ``exp_terms``
+    (``("D", d)`` or ``("nu", m)`` per exponential coefficient) and ``exp_offset`` (per market (H_t,), default 0)
+    define the exponential law (module docstring). The contraction starts at the logit inversion log s_j - log s_0
+    until a delta is accepted."""
 
     def __init__(self, markets: Sequence[MarketIndex], X: Sequence[np.ndarray], D: Sequence[np.ndarray],
                  weights: Sequence[np.ndarray], nu: Sequence[np.ndarray], pattern: Sequence[tuple[int, int]],
                  unobs: Sequence[int], shares: Sequence[np.ndarray], threads: int = 1, tol: float = 1e-13,
                  max_iterations: int = 5000, product_columns: Mapping[str, np.ndarray] | None = None,
                  agents: Any = None, agent_rows: Sequence[np.ndarray] | None = None, price_column: int | None = None,
-                 price_coefficient: float = 0.0) -> None:
+                 price_coefficient: float = 0.0, exp_column: int | None = None,
+                 exp_terms: Sequence[tuple[str, int]] = (), exp_offset: Sequence[np.ndarray] | None = None) -> None:
         self.markets = list(markets)
         self.n_products = int(sum(np.asarray(m.rows).size for m in self.markets))
         self.X, self.D, self.w, self.nu = list(X), list(D), list(weights), list(nu)
@@ -80,17 +89,50 @@ class MixedLogitModel:
         self.agent_rows = None if agent_rows is None else [np.asarray(r) for r in agent_rows]   # micro moments
         self.price_column = None if price_column is None else int(price_column)
         self.price_coefficient = float(price_coefficient)
+        self.exp_column = None if exp_column is None else int(exp_column)
+        self.exp_terms = [(str(k), int(i)) for k, i in exp_terms]
+        if self.exp_terms and self.exp_column is None:
+            raise ValueError("exp_terms need exp_column")
+        if any(k not in ("D", "nu") for k, _ in self.exp_terms):
+            raise ValueError(f"exp_terms kinds must be 'D' or 'nu', got {self.exp_terms}")
+        self.exp_offset = ([np.zeros(h) for h in self.H] if exp_offset is None
+                           else [np.asarray(o, dtype=float) for o in exp_offset])
+        if self.price_column is not None:   # what supply moments bind to (SupplyMoments.bind, log_costs)
+            from types import SimpleNamespace
+
+            s = np.empty(self.n_products)
+            for mk, ls in zip(self.markets, self.log_s):
+                s[np.asarray(mk.rows)] = np.exp(ls)
+            self.spec = SimpleNamespace(share_column="shares")
+            self.products = {"shares": s}
+            self._prices = [SimpleNamespace(p=np.asarray(x[:, self.price_column], dtype=float)) for x in self.X]
         self.pool = ThreadPoolExecutor(max_workers=max(1, min(int(threads), len(self.markets))))
         self.evaluations = 0
 
     @property
     def P(self) -> int:
-        return len(self.pattern) + len(self.unobs)
+        return len(self.pattern) + len(self.unobs) + len(self.exp_terms)
 
     @property
     def theta_columns(self) -> np.ndarray:
         """(P,) the X column each theta parameter multiplies."""
-        return np.array([c for c, _ in self.pattern] + self.unobs, dtype=int)
+        return np.array([c for c, _ in self.pattern] + self.unobs + [self.exp_column] * len(self.exp_terms), dtype=int)
+
+    def kernel_market(self, t: int) -> Any:
+        """Market t's prices as ``.p`` (``price_column`` of X), what supply moments read."""
+        return self._prices[t]
+
+    def _exp_z(self, t: int) -> np.ndarray:
+        """(H_t, E) the variables of the exponential law's coefficients."""
+        cols = [self.D[t][:, i] if k == "D" else self.nu[t][:, i] for k, i in self.exp_terms]
+        return np.column_stack(cols) if cols else np.zeros((self.H[t], 0))
+
+    def exp_coefficient(self, theta: np.ndarray, t: int) -> np.ndarray:
+        """(H_t,) ``-exp(e_h)``, each agent's exponential coefficient on ``exp_column`` (zeros without the law)."""
+        if not self.exp_terms:
+            return np.zeros(self.H[t])
+        th = np.asarray(theta, dtype=float)[len(self.pattern) + len(self.unobs):]
+        return -np.exp(self.exp_offset[t] + self._exp_z(t) @ th)
 
     # ------------------------------------------------------------------ one market
 
@@ -101,11 +143,19 @@ class MixedLogitModel:
             C[c] += theta[k] * self.D[t][:, d]
         for m, c in enumerate(self.unobs):
             C[c] += theta[len(self.pattern) + m] * self.nu[t][:, m]
+        if self.exp_terms:
+            assert self.exp_column is not None
+            C[self.exp_column] += self.exp_coefficient(theta, t)
         return C
 
-    def basis(self, t: int) -> np.ndarray:
-        """(H_t, P) b_hp: d C_h,c(p) / d theta_p for each agent of market t."""
+    def basis(self, t: int, theta: np.ndarray | None = None) -> np.ndarray:
+        """(H_t, P) b_hp: d C_h,c(p) / d theta_p for each agent of market t (``theta`` is needed by the exponential
+        law's columns, ``-exp(e_h) z_he``)."""
         cols = [self.D[t][:, d] for _, d in self.pattern] + [self.nu[t][:, m] for m in range(len(self.unobs))]
+        if self.exp_terms:
+            if theta is None:
+                raise ValueError("the exponential law's basis depends on theta")
+            cols += list((self.exp_coefficient(theta, t)[:, None] * self._exp_z(t)).T)
         return np.column_stack(cols) if cols else np.zeros((self.H[t], 0))
 
     @staticmethod
@@ -151,7 +201,7 @@ class MixedLogitModel:
 
     def share_derivatives(self, theta: np.ndarray, t: int, P: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """(ds/ddelta (J, J), ds/dtheta (J, P)) of market t at choice probabilities P (module docstring)."""
-        w, B, Xc = self.w[t], self.basis(t), self.X[t][:, self.theta_columns]
+        w, B, Xc = self.w[t], self.basis(t, theta), self.X[t][:, self.theta_columns]
         Pw = P * w
         ds_dd = np.diag(Pw.sum(axis=1)) - Pw @ P.T
         xbar = P.T @ Xc                                  # (H, P): xbar_h,c(p)
@@ -163,17 +213,29 @@ class MixedLogitModel:
         ds_dd, ds_dt = self.share_derivatives(theta, t, P)
         return -np.linalg.solve(ds_dd, ds_dt)
 
+    def price_coefficients(self, theta: np.ndarray, t: int) -> np.ndarray:
+        """(H_t,) each agent's price coefficient ``price_coefficient + C_h,price``."""
+        if self.price_column is None:
+            raise ValueError("MixedLogitModel needs price_column for price coefficients")
+        return self.price_coefficient + self.coefficients(np.asarray(theta, dtype=float), t)[self.price_column]
+
     def price_derivatives(self, theta: np.ndarray, t: int, P: np.ndarray) -> np.ndarray:
         """(J, J) ds_j/dp_k of market t at P with the agent price coefficients ``price_coefficient + C_h,price``."""
         if self.price_column is None:
             raise ValueError("MixedLogitModel needs price_column for ds_dp")
-        a = self.price_coefficient + self.coefficients(theta, t)[self.price_column]
+        a = self.price_coefficients(theta, t)
         Pwa = P * (self.w[t] * a)
         return np.diag(Pwa.sum(axis=1)) - Pwa @ P.T
 
-    def group_sums(self, theta: np.ndarray, t: int, P: np.ndarray, cols: Sequence[str], derivatives: bool
-                   ) -> dict[str, Any]:
-        """Per-household sums of market t (contract of ``moments.GroupMicroMoments``; one household per agent)."""
+    def group_sums(self, theta: np.ndarray, t: int, P: np.ndarray, cols: Sequence[str], derivatives: bool,
+                   delta: np.ndarray | None = None) -> dict[str, Any]:
+        """Per-household sums of market t (contract of ``moments.GroupMicroMoments``; one household per agent).
+
+        With ``delta`` (market t's mean utilities, as ``solve`` passes them) the entry also carries ``M`` (H, C+1),
+        each household's E[U | purchase] from its inside-good logit Q_jh = exp(u_jh) / sum_k exp(u_kh) in log space,
+        and, with ``derivatives``, ``M_d_delta`` (H, C+1, J) and ``M_d_theta`` (H, C+1, P). A logit household always
+        buys with positive probability, but P_h = sum_j P_jh underflows for a very price-sensitive one (the lognormal
+        law), and S / P_h then loses every digit and is dropped once P_h is 0; M does not."""
         missing = [c for c in cols if c not in self.product_columns]
         if missing:
             raise KeyError(f"group sums of columns the model was not given: {missing}")
@@ -183,11 +245,22 @@ class MixedLogitModel:
         out: dict[str, Any] = {"columns": list(cols), "S": (U.T @ P).T * w[:, None], "d_delta": None, "d_theta": None,
                                "w": w}
         if derivatives:
-            B, Xc = self.basis(t), self.X[t][:, self.theta_columns]
+            B, Xc = self.basis(t, theta), self.X[t][:, self.theta_columns]
             Ubar, xbar = P.T @ U, P.T @ Xc                                     # (H, C+1), (H, P)
             out["d_delta"] = (w[:, None, None] * P.T[:, None, :]) * (U.T[None, :, :] - Ubar[:, :, None])
             UX = np.einsum("jh,jc,jp->hcp", P, U, Xc)
             out["d_theta"] = (w[:, None] * B)[:, None, :] * (UX - Ubar[:, :, None] * xbar[:, None, :])
+        if delta is not None:
+            u = np.asarray(delta, dtype=float)[:, None] + self.X[t] @ self.coefficients(theta, t)
+            Q = np.exp(u - u.max(axis=0))
+            Q /= Q.sum(axis=0)
+            M = Q.T @ U                                                        # (H, C+1)
+            out["M"] = M
+            if derivatives:
+                xq = Q.T @ Xc
+                out["M_d_delta"] = Q.T[:, None, :] * (U.T[None, :, :] - M[:, :, None])
+                out["M_d_theta"] = B[:, None, :] * (np.einsum("jh,jc,jp->hcp", Q, U, Xc)
+                                                    - M[:, :, None] * xq[:, None, :])
         return out
 
     def second_choice_adjoint(self, theta: np.ndarray, t: int, P: np.ndarray, A: np.ndarray, B: np.ndarray
@@ -200,7 +273,7 @@ class MixedLogitModel:
         with np.errstate(divide="ignore", invalid="ignore"):
             inv_r = np.where(rest > 0, 1.0 / rest, 0.0)
         q = P * inv_r                                                          # P_jh / r_jh
-        Bt, Xc = self.basis(t), self.X[t][:, self.theta_columns]
+        Bt, Xc = self.basis(t, theta), self.X[t][:, self.theta_columns]
         A = np.asarray(A, dtype=float).copy()
         A[:, np.arange(J), np.arange(J)] = 0.0
         out_d = np.empty((A.shape[0], J))
@@ -253,9 +326,10 @@ class MixedLogitModel:
         if requests.group_sums:
             cols = list(requests.group_sums)
             outputs["group_sums"] = list(self.pool.map(
-                lambda t: self.group_sums(theta, t, Ps[t], cols, need_jacobian), T))
+                lambda t: self.group_sums(theta, t, Ps[t], cols, need_jacobian, deltas[t]), T))
         if requests.price_derivatives:
             outputs["ds_dp"] = [self.price_derivatives(theta, t, Ps[t]) for t in T]
+        outputs["theta"] = theta.copy()
         D = None
         status = EvalStatus.OK
         if need_jacobian:

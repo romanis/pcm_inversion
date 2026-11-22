@@ -348,10 +348,20 @@ class PaperSpec:
             layout = layout.replace(layout_changes)
         model = self.build_model(layout, nu, seed, threads)
         ms = self.moment_list(moments, **kw)
-        prob = NFPGMMProblem(model, ms, self.linear(), layout, max_step=self.use_max_step,
+        prob = NFPGMMProblem(model, ms, self.linear_for(moments), layout, max_step=self.use_max_step,
                              evaluate_only=moments in self.evaluate_only_moments)
         prob.normalisations = self.problem_normalisations(moments, **kw)   # type: ignore[attr-defined]
+        self.finish_problem(prob, moments)
         return prob
+
+    def linear_for(self, moments: str) -> LinearIV:
+        """The linear IV of moment set ``moments`` (default ``linear()`` for every set; a paper whose sets differ in
+        the aggregate block's instruments overrides it)."""
+        return self.linear()
+
+    def finish_problem(self, problem: NFPGMMProblem, moments: str) -> None:
+        """Hook run on every problem ``build_problem`` returns (default: nothing), e.g. ``problem.set_joint(mode)``
+        for a joint product-level weighting."""
 
     def market_rows(self, market: Any) -> np.ndarray:
         """Rows of ``self.products`` of ``market`` in the PCM model's order (price order, stable)."""

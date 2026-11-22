@@ -37,8 +37,10 @@ from .types import (
 )
 from .weighting import cluster_sums, clustered_covariance
 
-__all__ = ["Moment", "IVMoments", "SarganIVMoments", "MicroDataset", "MicroPart", "RatioMicroMoment", "MICRO_OUTPUTS",
-           "product_part", "SupplyMoments", "SupplyDomainError", "MarginMoment", "GroupMomentRow", "GroupMicroMoments",
+__all__ = ["Moment", "IVMoments", "SarganIVMoments", "DifferenceIVMoments", "DifferenceSarganIVMoments", "MicroDataset",
+           "MicroPart", "RatioMicroMoment", "MICRO_OUTPUTS",
+           "product_part", "SupplyMoments", "SupplyDomainError", "MarginMoment", "CostEvent",
+           "EventCostContinuityMoments", "GroupMomentRow", "GroupMicroMoments",
            "GROUP_OUTPUTS", "SecondChoiceMoments", "SECOND_CHOICE_OUTPUTS", "SECOND_CHOICE_ADJOINT"]
 
 #: A micro part, a pair (agent weight h, product weight v with outside value v0); see ``types.MicroPartRequest``.
@@ -153,6 +155,32 @@ class SarganIVMoments(IVMoments):
 
     def cluster_terms(self, xi: np.ndarray, dxi: np.ndarray | None) -> tuple[np.ndarray, np.ndarray | None]:
         raise NotImplementedError("SarganIVMoments is not used with CUE")
+
+
+class _DifferenceBlock:
+    """Mixin of the first-difference IV blocks: a second IV block on xi beside the aggregate one. It does not
+    concentrate beta (beta comes from the aggregate block), so it is not ``is_aggregate``; ``is_difference`` asks
+    ``NFPGMMProblem.initial_weighting`` for its 2SLS weight ``(Z_d'Z_d/n)^{-1}``."""
+
+    is_aggregate = False
+    is_micro = False
+    is_difference = True
+
+
+class DifferenceIVMoments(_DifferenceBlock, IVMoments):
+    """First-difference demand moments ``E[dz dxi] = 0`` over pairs of rows of one id in successive periods, as
+    ``g = Z_d' xi / n`` with ``Z_d = instruments.difference_instruments(cur, prev, z)`` (``Z_d' xi = dZ' D xi``). xi is the
+    aggregate block's, so time-invariant characteristics and fixed effects drop out of every pair."""
+
+    def __init__(self, Z_d: np.ndarray, clustering_ids: np.ndarray | None = None, name: str = "demand_fd") -> None:
+        super().__init__(Z_d, clustering_ids, name)
+
+
+class DifferenceSarganIVMoments(_DifferenceBlock, SarganIVMoments):
+    """``DifferenceIVMoments`` in the scale-free form of ``SarganIVMoments`` (divided by ``sqrt(xi'xi/n)``)."""
+
+    def __init__(self, Z_d: np.ndarray, clustering_ids: np.ndarray | None = None, name: str = "demand_fd") -> None:
+        super().__init__(Z_d, clustering_ids, name)
 
 
 class MicroDataset:
@@ -790,6 +818,145 @@ GROUP_OUTPUTS = "group_sums"
 
 
 @dataclass(frozen=True)
+class CostEvent:
+    """One event of ``EventCostContinuityMoments``: products whose ownership incentives change between two periods
+    (``treated``) and products whose do not (``control``), each as row pairs (cur, prev) of the same product in the
+    two periods. ``match`` (n_treated, n_control), rows summing to one, gives each treated pair its own control mix
+    (e.g. controls of the same type); None is the plain control mean."""
+
+    name: str
+    treated: tuple[np.ndarray, np.ndarray]
+    control: tuple[np.ndarray, np.ndarray]
+    match: np.ndarray | None = None
+
+
+class EventCostContinuityMoments:
+    """Cost continuity across ownership events: a difference in differences of implied log marginal cost.
+
+    For event e with treated pairs (c_j, p_j) and control pairs (c'_l, p'_l), dy = y[cur] - y[prev] with y = log mc
+    from the Nash FOCs under each period's own ownership (``costs.log_costs``, a ``SupplyMoments``), and
+
+        g_e = mean_j ( dy_j - sum_l A_jl dy'_l ),
+
+    which is zero when costs of products that continue unchanged do not jump at the ownership change beyond the
+    controls' change. Under a wrong price sensitivity the recomputed markup change does not match the observed price
+    change and the residual shows up in dy. g = L y with L (k, n) fixed by the pairs, so ``d_theta = L dy/dtheta``
+    (the cost object's total derivative) and ``d_delta`` is None.
+
+    Covariance: the products are independent draws, so Var(g_e) = var(dy_treated) / n_t + var(dy_control) sum_l
+    c_l^2 with c = mean over j of A_j; ``covariance_block`` returns n diag(Var) (q = n g'Wg with W = its inverse is
+    the sum of squared studentised contrasts t_e = g_e / sd(g_e)). ``needs_evaluated_weight`` asks
+    ``NFPGMMProblem.initial_weighting`` for that weight at theta0. Not for CUE.
+    """
+
+    name: str
+    is_aggregate = False
+    is_micro = False
+    is_supply = False
+    needs_evaluated_weight = True
+
+    def __init__(self, costs: SupplyMoments, events: Sequence[CostEvent], name: str = "event_cost") -> None:
+        """EventCostContinuityMoments(costs, events, name="event_cost"); ``costs`` computes log mc (its own
+        instruments are not used)."""
+        if not events:
+            raise ValueError("no events")
+        self.costs = costs
+        self.events = list(events)
+        self.name = name
+        self.n = int(costs.n)
+        self.k = len(self.events)
+        self.L = np.zeros((self.k, self.n))
+        self._parts: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+        for e, ev in enumerate(self.events):
+            tc, tp = (np.asarray(a, dtype=int).ravel() for a in ev.treated)
+            cc, cp = (np.asarray(a, dtype=int).ravel() for a in ev.control)
+            if tc.size == 0 or cc.size == 0 or tc.size != tp.size or cc.size != cp.size:
+                raise ValueError(f"event {ev.name!r}: treated and control need equal-length non-empty pairs")
+            for a in (tc, tp, cc, cp):
+                if a.min() < 0 or a.max() >= self.n:
+                    raise ValueError(f"event {ev.name!r}: row index outside 0..{self.n - 1}")
+            if np.intersect1d(np.r_[tc, tp], np.r_[cc, cp]).size:
+                raise ValueError(f"event {ev.name!r}: a row is both treated and control")
+            A = np.full((tc.size, cc.size), 1.0 / cc.size) if ev.match is None else np.asarray(ev.match, float)
+            if A.shape != (tc.size, cc.size) or np.any(A < 0) or not np.allclose(A.sum(axis=1), 1.0):
+                raise ValueError(f"event {ev.name!r}: match must be ({tc.size}, {cc.size}) with rows summing to one")
+            c = A.mean(axis=0)
+            np.add.at(self.L[e], tc, 1.0 / tc.size)
+            np.add.at(self.L[e], tp, -1.0 / tc.size)
+            np.add.at(self.L[e], cc, -c)
+            np.add.at(self.L[e], cp, c)
+            self._parts.append((tc, tp, cc, cp, c))
+
+    def bind_costs(self, model: object, P: int, units: np.ndarray | None = None) -> None:
+        """Attach the inner model to the cost object unless the problem already did (a supply block of its own)."""
+        if self.costs.model is not model:
+            self.costs.bind(model, P, units=units)
+
+    def requests(self) -> KernelRequests:
+        return self.costs.requests()
+
+    def covariance_requests(self) -> KernelRequests:
+        return self.costs.requests()
+
+    def evaluate(self, sol: InnerSolution, linear: LinearFit, need_jacobian: bool) -> MomentBlock:
+        """evaluate(sol, linear, need_jacobian) -> MomentBlock(value = L log mc, d_theta = L dlog mc/dtheta)."""
+        y, dy, _ = self.costs.log_costs(sol, need_jacobian)
+        return MomentBlock(name=self.name, value=self.L @ y, d_delta=None,
+                           d_theta=self.L @ dy if need_jacobian and dy is not None else None, data=None)
+
+    def variances(self, y: np.ndarray) -> np.ndarray:
+        """(k,) Var(g_e) at log mc ``y`` (class docstring)."""
+        out = np.empty(self.k)
+        for e, (tc, tp, cc, cp, c) in enumerate(self._parts):
+            dt, dc = y[tc] - y[tp], y[cc] - y[cp]
+            vt = float(np.var(dt, ddof=1)) if dt.size > 1 else 0.0
+            vc = float(np.var(dc, ddof=1)) if dc.size > 1 else 0.0
+            out[e] = vt / dt.size + vc * float(c @ c)
+        return out
+
+    def summary(self, y: np.ndarray) -> list[dict[str, Any]]:
+        """Per event: name, pair counts, g_e, sd(g_e), t_e and the mean change of treated and control log mc."""
+        g, v = self.L @ y, self.variances(y)
+        rows = []
+        for e, (ev, (tc, tp, cc, cp, _)) in enumerate(zip(self.events, self._parts)):
+            sd = float(np.sqrt(v[e]))
+            rows.append({"event": ev.name, "treated": int(tc.size), "control": int(cc.size), "g": float(g[e]),
+                         "sd": sd, "t": float(g[e]) / sd if sd > 0 else float("nan"),
+                         "d_log_mc_treated": float(np.mean(y[tc] - y[tp])),
+                         "d_log_mc_control": float(np.mean(y[cc] - y[cp]))})
+        return rows
+
+    def cluster_terms(self, y: np.ndarray, dy: np.ndarray | None, cluster_matrix: Any, n: int
+                      ) -> tuple[np.ndarray, np.ndarray | None]:
+        """Per-cluster contributions for a joint clustered covariance (``NFPGMMProblem.set_joint``): (C, k) and
+        (C, k, P). A pair p of event e contributes ``n L_e[cur_p] (dy_p - mean of its group's dy)`` to the cluster of
+        its cur row (``cluster_matrix`` is the (C, n) 0/1 cluster indicator), so ``V'V/n`` of one event is about ``n
+        Var(g_e)``, ``covariance_block``'s value, and its scale follows L."""
+        C = cluster_matrix.shape[0]
+        V = np.zeros((C, self.k))
+        dV = None if dy is None else np.zeros((C, self.k, dy.shape[1]))
+        for e, (tc, tp, cc, cp, _) in enumerate(self._parts):
+            contrib = np.zeros(self.n)
+            dcon = None if dy is None else np.zeros((self.n, dy.shape[1]))
+            for cur, prev in ((tc, tp), (cc, cp)):
+                d = y[cur] - y[prev]
+                np.add.at(contrib, cur, n * self.L[e, cur] * (d - d.mean()))
+                if dcon is not None:
+                    dd = dy[cur] - dy[prev]
+                    np.add.at(dcon, cur, n * self.L[e, cur][:, None] * (dd - dd.mean(axis=0)))
+            V[:, e] = cluster_matrix @ contrib
+            if dV is not None:
+                dV[:, e, :] = cluster_matrix @ dcon
+        return V, dV
+
+    def covariance_block(self, sol: InnerSolution | None, linear: LinearFit | None) -> np.ndarray:
+        """covariance_block(sol, linear) -> n diag(Var(g_e)) at the log mc of ``sol``."""
+        assert sol is not None
+        y, _, _ = self.costs.log_costs(sol, False)
+        return self.n * np.diag(self.variances(y))
+
+
+@dataclass(frozen=True)
 class GroupMomentRow:
     """One GMY micro moment (ExjCondH.m): ``diff`` = E[x_char | buy, set_a] - E[x_char | buy, set_b] with each side the
     household-weighted mean of the households' own conditional means; ``ratio`` = purchase rate in set_a / in set_b.
@@ -817,6 +984,10 @@ class GroupMicroMoments:
     has no households) of a dict with ``columns`` (the product columns of S after P, in order), ``S`` (G_t, C+1)
     (column 0 = P_g, then S_g[c]), ``d_delta`` (G_t, C+1, J_t) partials in delta_t (price order), ``d_theta``
     (G_t, C+1, P) partials in theta (layout order), both None without a Jacobian, and ``w`` (G_t,) agent weights.
+    Optional ``M`` (G_t, C+1), each household's conditional mean m_g (column 0 = 1), with ``M_d_delta`` and
+    ``M_d_theta`` shaped as ``d_delta`` and ``d_theta``: a model whose households all buy with positive probability
+    (a logit) gives it, so a household whose P_g underflows keeps its exact m_g instead of S_g / P_g (no digits left)
+    or being dropped as a never-buyer at P_g = 0; buyers are then the households of positive weight.
 
     The covariance is fixed, ``diag(variances)``, so W1 = (n V)^{-1} and a row contributes (f / sd)^2 to q (GMY's
     weight diag(1 / variance), deviation D6). ``bind(markets, n, P)`` and ``bind_agents(agents, agent_rows)``
@@ -916,6 +1087,13 @@ class GroupMicroMoments:
             raise KeyError(f"{self.name}: group sums lack product column {char!r} (have {cols})")
         return 1 + cols.index(char)
 
+    @staticmethod
+    def _buyers(entry: dict[str, Any]) -> np.ndarray:
+        """(G,) households with P_g > 0: those of positive weight where the model gives ``M``, else S_g0 > 0."""
+        if "M" in entry:
+            return np.asarray(entry["w"]) > 0
+        return np.asarray(entry["S"])[:, 0] > 0
+
     def moments(self, sol: InnerSolution, need_jacobian: bool) -> tuple[np.ndarray, np.ndarray | None,
                                                                          np.ndarray | None]:
         """(model values (k,), d_delta (k, n), d_theta (k, P)): the GMY quantities M_a - M_b and A_a / A_b."""
@@ -924,10 +1102,11 @@ class GroupMicroMoments:
         mem = [self._member[t] for t in self._in]
         # pooled set statistics
         W, Wp, never = {}, {}, {}
+        buys = [self._buyers(e) for e in entries]
         for s in self.sets:
             W[s] = sum(float(e["w"][m[s]].sum()) for e, m in zip(entries, mem))
-            Wp[s] = sum(float(e["w"][m[s] & (np.asarray(e["S"])[:, 0] > 0)].sum()) for e, m in zip(entries, mem))
-            never[s] = sum(int(np.sum(m[s] & ~(np.asarray(e["S"])[:, 0] > 0))) for e, m in zip(entries, mem))
+            Wp[s] = sum(float(e["w"][m[s] & b].sum()) for e, m, b in zip(entries, mem, buys))
+            never[s] = sum(int(np.sum(m[s] & ~b)) for m, b in zip(mem, buys))
             if not W[s] > 0:
                 raise ValueError(f"{self.name}: set {s!r} has no households in the dataset's markets")
         den = Wp if self.never_buyers == "drop" else W
@@ -935,20 +1114,24 @@ class GroupMicroMoments:
         self.last_info = {"micro_never_buyers": never, "micro_households": n_hh,
                           "micro_never_buyer_share_max": max(never[s] / max(n_hh[s], 1) for s in self.sets)}
         stats: dict[tuple[str, str | None], float] = {}
-        coefs: list[list[np.ndarray]] = [[] for _ in entries]   # per market: list over rows of (G, C+1)
+        coefs: list[list[np.ndarray]] = [[] for _ in entries]   # per market: list over rows of (G, C+1), on S
+        coefs_m: list[list[np.ndarray]] = [[] for _ in entries]  # the same on M, where the model gives it
 
         def side(s: str, char: str | None) -> float:
             key = (s, char)
             if key not in stats:
                 tot = 0.0
-                for e, m in zip(entries, mem):
+                for e, m, bt in zip(entries, mem, buys):
                     S = np.asarray(e["S"])
                     if char is None:
                         tot += float(S[m[s], 0].sum())
                     else:
                         c = self._column(e, char)
-                        buy = m[s] & (S[:, 0] > 0)
-                        tot += float(np.sum(e["w"][buy] * S[buy, c] / S[buy, 0]))
+                        buy = m[s] & bt
+                        if "M" in e:
+                            tot += float(np.sum(e["w"][buy] * np.asarray(e["M"])[buy, c]))
+                        else:
+                            tot += float(np.sum(e["w"][buy] * S[buy, c] / S[buy, 0]))
                 stats[key] = tot / (W[s] if char is None else den[s])
             return stats[key]
 
@@ -958,13 +1141,17 @@ class GroupMicroMoments:
             value[r_i] = a - b if r.kind == "diff" else a / b
             if not need_jacobian:
                 continue
-            for t_i, (e, m) in enumerate(zip(entries, mem)):
+            for t_i, (e, m, bt) in enumerate(zip(entries, mem, buys)):
                 S = np.asarray(e["S"])
                 K = np.zeros_like(S)
+                KM = np.zeros_like(S)
                 if r.kind == "diff":
                     c = self._column(e, r.char)
                     for s, sign in ((r.set_a, 1.0), (r.set_b, -1.0)):
-                        buy = m[s] & (S[:, 0] > 0)
+                        buy = m[s] & bt
+                        if "M" in e:   # d m_g = d M_g
+                            KM[buy, c] += sign * e["w"][buy] / den[s]
+                            continue
                         coef = sign * e["w"][buy] / (den[s] * S[buy, 0])
                         K[buy, c] += coef
                         K[buy, 0] -= coef * S[buy, c] / S[buy, 0]
@@ -972,6 +1159,7 @@ class GroupMicroMoments:
                     K[m[r.set_a], 0] += (1.0 / b) / W[r.set_a]
                     K[m[r.set_b], 0] += -(a / b ** 2) / W[r.set_b]
                 coefs[t_i].append(K)
+                coefs_m[t_i].append(KM)
         if not need_jacobian:
             return value, None, None
         d_delta = np.zeros((self.k, self._n))
@@ -984,6 +1172,13 @@ class GroupMicroMoments:
             dT = np.asarray(e["d_theta"], dtype=float)
             d_delta[:, self._markets[t].rows] += Kt @ dD.reshape(-1, dD.shape[-1])
             part = Kt @ dT.reshape(-1, dT.shape[-1])
+            if "M" in e:
+                if e.get("M_d_delta") is None or e.get("M_d_theta") is None:
+                    raise ValueError(f"{self.name}: conditional means M without their derivatives")
+                KMt = np.stack([K.ravel() for K in coefs_m[t_i]])
+                mD = np.asarray(e["M_d_delta"], dtype=float)
+                d_delta[:, self._markets[t].rows] += KMt @ mD.reshape(-1, mD.shape[-1])
+                part = part + KMt @ np.asarray(e["M_d_theta"], dtype=float).reshape(-1, dT.shape[-1])
             d_theta = part if d_theta is None else d_theta + part
         assert d_theta is not None
         return value, d_delta, d_theta
