@@ -45,11 +45,18 @@ GMY = {
     "gmy_alias": ["run", "--stage", "step2", "--nu", "16", "--years", "1991", "1999", "--moments", "demand"],
     "gmy_start_warm": ["run", "--stage", "all", "--nu", "16", "--years", "1991", "1999", "--warm-delta", STAGE,
                        "--start-theta", STAGE, "--start-theta-except", "sigma_z_log_height"],
+    "gmy_in_cost_joint": ["run", "--stage", "all", "--nu", "64", "--years", "1991", "1999", "--households", "500",
+                          "--antithetic-taste", "--moments", "demand_supply_msfd_own", "--weighting", "joint_cue",
+                          "--drop-block", "own", "--cost-shifters", "in_cost", "--a-lo", "0.05"],
+    "gmy_alo_moments": ["run", "--stage", "all", "--nu", "64", "--years", "1991", "1999", "--households", "500",
+                        "--antithetic-taste", "--moments", "demand_supply_msfd_own", "--weighting", "joint_cue",
+                        "--drop-block", "own", "--cost-shifters", "in_cost", "--a-lo", "0.05", "--alo-moments",
+                        "c4c6c"],
 }
 #: command lines whose spec hash holds an absolute path of tmp_path: run key only
 PATH_IN_HASH = {"gmy_start_warm"}
 
-#: case -> (run directory name, spec hash) on bd9942d
+#: case -> (run directory name, spec hash) on bd9942d, unless noted
 EXPECTED: dict[str, tuple[str, str]] = {
     "petrin_all": ("petrin_pcm_937151f021", "2ee5eb99cf49e53951701e940870eefad607083b533f19c5ed488cd9f4b79658"),
     "petrin_gate_seed": ("petrin_pcm_1390293108", "2ee5eb99cf49e53951701e940870eefad607083b533f19c5ed488cd9f4b79658"),
@@ -64,6 +71,10 @@ EXPECTED: dict[str, tuple[str, str]] = {
     "gmy_options": ("gmy_pcm_d41949d7be", "1e300a1f801d87c72f94493769719d475ab5a0a44b8e72b4076303786f0be3cb"),
     "gmy_alias": ("gmy_pcm_6a24c53b4d", "8e0fe673376949dd8013c333d2a4c29f08aa10a5e6071ce35630f2f6b1fc2bd4"),
     "gmy_start_warm": ("gmy_pcm_c012f0d0ac", "b87186d95e59478354ebde0ed00c17b8d22a530b5459a482ed444b7d74185380"),
+    # computed on 7e84731 (before --alo-moments): the option left off keeps this directory and hash
+    "gmy_in_cost_joint": ("gmy_pcm_11c22c8446", "b65b622f016c0d572b33a4139d5abb0faf6784f00e06cb84a8302b144633b6bf"),
+    # computed when --alo-moments was added
+    "gmy_alo_moments": ("gmy_pcm_0686bfbcc7", "90bb7e417b9dbe90262fecade816f385d8e3781c9fa3fbf1e87d6d92943ab39f"),
 }
 
 

@@ -959,11 +959,12 @@ class EventCostContinuityMoments:
 @dataclass(frozen=True)
 class GroupMomentRow:
     """One GMY micro moment (ExjCondH.m): ``diff`` = E[x_char | buy, set_a] - E[x_char | buy, set_b] with each side the
-    household-weighted mean of the households' own conditional means; ``ratio`` = purchase rate in set_a / in set_b.
+    household-weighted mean of the households' own conditional means; ``ratio`` = purchase rate in set_a / in set_b;
+    ``mean`` = E[x_char | buy, set_a] alone (a level row; set_b is not used, by convention equal to set_a).
     ``set_a`` and ``set_b`` are 0/1 agent columns (the survey years are part of the set); ``char`` is a product column
     (None for a ratio row)."""
 
-    kind: Literal["diff", "ratio"]
+    kind: Literal["diff", "ratio", "mean"]
     char: str | None
     set_a: str
     set_b: str
@@ -978,7 +979,8 @@ class GroupMicroMoments:
     ``M_H[c] = sum_{g in H+} w_g m_g[c] / D_H`` with H+ the households with P_g > 0 and D_H = sum_{H+} w_g
     (``never_buyers="drop"``, the stated intent of ExjCondH.m, deviation D2) or sum_H w_g (``"keep"``, the literal code of
     ExjCondH.m: a never-buyer keeps its weight and adds 0); ``A_H = sum_H P_g / sum_H w_g``. Row values are
-    ``M_a - M_b - value`` (diff) and ``A_a / A_b - value`` (ratio). Partials: ``d m_g = (d S_g - m_g d P_g) / P_g``.
+    ``M_a - M_b - value`` (diff), ``M_a - value`` (mean) and ``A_a / A_b - value`` (ratio). Partials:
+    ``d m_g = (d S_g - m_g d P_g) / P_g``.
 
     Kernel contract (``sol.outputs["group_sums"]``): a list with one entry per model market (None where the dataset
     has no households) of a dict with ``columns`` (the product columns of S after P, in order), ``S`` (G_t, C+1)
@@ -1014,7 +1016,7 @@ class GroupMicroMoments:
         if never_buyers not in ("drop", "keep"):
             raise ValueError(f"never_buyers must be 'drop' or 'keep', got {never_buyers!r}")
         for r in self.rows:
-            if r.kind not in ("diff", "ratio") or (r.kind == "diff") != (r.char is not None):
+            if r.kind not in ("diff", "ratio", "mean") or (r.kind != "ratio") != (r.char is not None):
                 raise ValueError(f"{name}: bad row {r}")
         self.never_buyers = never_buyers
         self.k = len(self.rows)
@@ -1096,7 +1098,7 @@ class GroupMicroMoments:
 
     def moments(self, sol: InnerSolution, need_jacobian: bool) -> tuple[np.ndarray, np.ndarray | None,
                                                                          np.ndarray | None]:
-        """(model values (k,), d_delta (k, n), d_theta (k, P)): the GMY quantities M_a - M_b and A_a / A_b."""
+        """(model values (k,), d_delta (k, n), d_theta (k, P)): the GMY quantities M_a - M_b, M_a and A_a / A_b."""
         entries = self._outputs(sol)
         assert self._member is not None and self._markets is not None and self._n is not None
         mem = [self._member[t] for t in self._in]
@@ -1138,16 +1140,17 @@ class GroupMicroMoments:
         value = np.empty(self.k)
         for r_i, r in enumerate(self.rows):
             a, b = side(r.set_a, r.char), side(r.set_b, r.char)
-            value[r_i] = a - b if r.kind == "diff" else a / b
+            value[r_i] = a - b if r.kind == "diff" else a if r.kind == "mean" else a / b
             if not need_jacobian:
                 continue
+            sides = ((r.set_a, 1.0), (r.set_b, -1.0)) if r.kind == "diff" else ((r.set_a, 1.0),)
             for t_i, (e, m, bt) in enumerate(zip(entries, mem, buys)):
                 S = np.asarray(e["S"])
                 K = np.zeros_like(S)
                 KM = np.zeros_like(S)
-                if r.kind == "diff":
+                if r.kind != "ratio":
                     c = self._column(e, r.char)
-                    for s, sign in ((r.set_a, 1.0), (r.set_b, -1.0)):
+                    for s, sign in sides:
                         buy = m[s] & bt
                         if "M" in e:   # d m_g = d M_g
                             KM[buy, c] += sign * e["w"][buy] / den[s]

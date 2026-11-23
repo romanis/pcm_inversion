@@ -511,3 +511,66 @@ def test_cost_shifters_in_the_cost_equation(gmy: Any) -> None:
         np.testing.assert_array_equal(a, b)
     with pytest.raises(ValueError):
         sp.set_cost_shifters("both")
+
+
+def test_alo_moments_c4c6c(gmy: Any) -> None:
+    """--alo-moments c4c6c (LEARNINGS 35): off leaves every block, the run key and the payload as before; on adds the
+    three rival-distance columns to the markup shifters of supply_ms and supply_fd (C4) and the 10 premium-make rows
+    to the micro block (C6c), and needs --cost-shifters in_cost."""
+    sp = gmy.GMYSpec((1998, 1999, 2000), households=200)
+    sp.set_moments("demand_supply_msfd_own")
+    sp.set_weighting_mode("joint_cue", ["event_cost"])
+    sp.set_cost_shifters("in_cost")
+    off = (sp.Z_supply_ms.copy(), sp.fd_markup_shifters().copy(), sp.supply_fd_design[0].copy())
+    mic0 = sp.micro_moment()[0]
+    key0, pay0, norm0 = sp.paper_run_key(), sp.payload(), sp.normalisations
+    assert "alo_moments" not in key0 and "alo_moments" not in pay0 and mic0.k == 33
+    sp.set_alo_moments("c4c6c")
+    ms, fd = sp.Z_supply_ms, sp.fd_markup_shifters()
+    np.testing.assert_array_equal(ms[:, :off[0].shape[1]], off[0])
+    np.testing.assert_array_equal(fd[:, :off[1].shape[1]], off[1])
+    assert ms.shape[1] == off[0].shape[1] + 3 and fd.shape[1] == off[1].shape[1] + 3
+    assert sp.markup_shifter_names[-3:] == ["rival_distance_1", "rival_distance_2", "rival_products_within_median"]
+    assert np.all(np.isfinite(ms)) and np.all(np.isfinite(fd))
+    mic = sp.micro_moment()[0]
+    assert mic.k == 43 and mic.name == "micro_gmy"
+    np.testing.assert_array_equal(mic.values[:33], mic0.values)
+    np.testing.assert_array_equal(mic.variances[:33], mic0.variances)
+    assert list(mic.labels[33:]) == [f"Income{q} {gmy.PREMIUM_CHAR} {s}" for s in ("cex", "mri") for q in range(1, 6)]
+    assert all(r.kind == "mean" and r.char == "premium_make" and r.set_a == r.set_b for r in mic.rows[33:])
+    assert np.all(np.isfinite(mic.values)) and np.all((mic.values[33:] > 0) & (mic.values[33:] < 1))
+    assert np.all(np.isfinite(mic.variances)) and np.all(mic.variances > 0)
+    assert len(sp.micro_moment("prefit")[0].rows) == 20                 # the prefit rows are unchanged
+    key, pay = sp.paper_run_key(), sp.payload()
+    assert key["alo_moments"] == "c4c6c" and key0.items() <= key.items()
+    assert pay["alo_moments"]["premium_makes"] == list(gmy.PREMIUM_MAKES)
+    assert len(sp.normalisations) == len(norm0) + 1
+    prob = sp.build_problem(1, 0, 8, "all")
+    try:
+        assert prob.blocks["micro_gmy"].stop - prob.blocks["micro_gmy"].start == 43
+        ev = prob.evaluate(prob.layout.starts(), need_jacobian=False)
+        assert ev.ok and np.all(np.isfinite(ev.g))
+    finally:
+        prob.model.close()
+    sp.set_alo_moments("off")
+    for a, b in zip(off, (sp.Z_supply_ms, sp.fd_markup_shifters(), sp.supply_fd_design[0])):
+        np.testing.assert_array_equal(a, b)
+    assert sp.paper_run_key() == key0 and sp.payload() == pay0 and sp.micro_moment()[0].k == 33
+    sp.set_alo_moments("c4c6c")
+    sp.set_cost_shifters("excluded")
+    with pytest.raises(ValueError, match="in_cost"):
+        sp.moment_list("all")
+    with pytest.raises(ValueError):
+        sp.set_alo_moments("c4")
+
+
+def test_premium_makes_follow_their_rule(gmy: Any) -> None:
+    """PREMIUM_MAKES is every make whose models all have lux = 1 and whose sales-weighted mean msrp is at least
+    PREMIUM_PRICE_FLOOR ($1000 of 2015), over all 39 years; load_products marks them in ``premium_make``."""
+    p = gmy.load_products()
+    by = p.groupby("make")
+    lux = by.lux.min() == 1
+    price = by.apply(lambda g: float(np.average(g.msrp, weights=g.sales)), include_groups=False)
+    rule = sorted(m for m in lux.index if lux[m] and price[m] >= gmy.PREMIUM_PRICE_FLOOR)
+    assert rule == sorted(gmy.PREMIUM_MAKES)
+    np.testing.assert_array_equal(p.premium_make.to_numpy(), p.make.isin(gmy.PREMIUM_MAKES).to_numpy(float))

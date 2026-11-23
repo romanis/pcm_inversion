@@ -384,8 +384,8 @@ def _pcm_matched_design(spec: Any, start_theta: Mapping[str, float] | None) -> d
 def same_moments_problem(threads: int, households: int = 2000, years: tuple[int, ...] = SAME_YEARS,
                          fd_max_gap: int = 3, seed: int = SEED, utility: str = "gmy",
                          moments: str = "demand_supply_msfd_own", drop_blocks: Sequence[str] = (),
-                         start_theta: Mapping[str, float] | None = None, cost_shifters: str = "excluded"
-                         ) -> tuple[Any, Any, dict[str, Any]]:
+                         start_theta: Mapping[str, float] | None = None, cost_shifters: str = "excluded",
+                         alo_moments: str = "off") -> tuple[Any, Any, dict[str, Any]]:
     """(NFPGMMProblem, GMYSpec, design): a mixed logit (``MixedLogitModel``, the harness's BLP contraction) on the
     moment blocks of the PCM's ``--moments <moments> --weighting joint_cue [--drop-block ...]`` problem
     (``GMYSpec.moment_blocks``): the same products (twins merged, shares below 1e-5 dropped, price ties spread), the
@@ -395,7 +395,7 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
 
     ``utility``: ``gmy`` is GMY's spec 6 with alpha the first nonlinear parameter (a pattern term on price with a
     demographic of ones, so ds/dp, which the supply blocks read, moves with it); ``pcm_matched`` is the PCM's utility
-    (``_pcm_matched_design``)."""
+    (``_pcm_matched_design``). ``cost_shifters`` and ``alo_moments`` are the PCM's options of the same names."""
     from nfp_harness.problem import NFPGMMProblem
 
     if utility not in UTILITIES:
@@ -403,6 +403,7 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
     spec = gmy_pcm.GMYSpec(years=years, households=households)
     spec.fd_max_gap = int(fd_max_gap)
     spec.set_cost_shifters(cost_shifters)
+    spec.set_alo_moments(alo_moments)
     spec.set_moments(moments)
     spec.set_weighting_mode("joint_cue", list(drop_blocks))
     ms, _ = spec.moment_blocks(moments, True)
@@ -451,6 +452,8 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
     prob.set_joint("cue")
     design.update(moments=moments, drop_blocks=list(spec.drop_blocks), fd_max_gap=int(fd_max_gap),
                   cost_shifters=cost_shifters)
+    if alo_moments != "off":   # only when set, so the design of an earlier run is unchanged
+        design["alo_moments"] = alo_moments
     return prob, spec, design
 
 
@@ -627,7 +630,7 @@ def same_moments_main(args: Any) -> None:
                                               moments=args.moments, drop_blocks=args.drop_block or (),
                                               start_theta=st if args.utility == "pcm_matched" and not own_fit
                                               else None,
-                                              cost_shifters=args.cost_shifters)
+                                              cost_shifters=args.cost_shifters, alo_moments=args.alo_moments)
     prob.segments = spec.products[spec.groups].astype(str).to_numpy()   # type: ignore[attr-defined]
     log.info("%s: %d products, %d moments, identification %s", design, prob.n, prob.k, prob.identification)
     theta0 = prob.layout.starts()
@@ -683,6 +686,8 @@ def main() -> None:
                          "same-moments JSON)")
     ap.add_argument("--cost-shifters", choices=gmy_pcm.COST_SHIFTER_MODES, default="excluded",
                     help="same-moments: as the PCM's --cost-shifters")
+    ap.add_argument("--alo-moments", choices=gmy_pcm.ALO_MOMENT_MODES, default="off",
+                    help="same-moments: as the PCM's --alo-moments (c4c6c needs --cost-shifters in_cost)")
     ap.add_argument("--tag", default="", help="suffix of the output names (default none)")
     ap.add_argument("--counterfactuals", action="store_true",
                     help="published / fit: also run the shared counterfactuals at the estimate (off by default, so "
