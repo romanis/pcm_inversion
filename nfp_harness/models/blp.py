@@ -41,7 +41,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from ..second_choice import logit_second_choice_matrix
+from ..second_choice import inside_mass_without, logit_second_choice_matrix
 from ..types import EvalStatus, InnerSolution, KernelRequests, MarketIndex
 
 __all__ = ["MixedLogitModel"]
@@ -269,7 +269,7 @@ class MixedLogitModel:
         (module docstring; the contract of ``moments.SecondChoiceMoments``)."""
         w = self.w[t]
         J = P.shape[0]
-        rest = P.sum(axis=0)[None, :] - P                                      # r_jh = R_h - P_jh
+        rest = inside_mass_without(P)                                          # r_jh = R_h - P_jh
         with np.errstate(divide="ignore", invalid="ignore"):
             inv_r = np.where(rest > 0, 1.0 / rest, 0.0)
         q = P * inv_r                                                          # P_jh / r_jh

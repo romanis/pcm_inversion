@@ -486,7 +486,11 @@ CASES: dict[str, Case] = {c.name: c for c in (
          f"by the pre-harness PCMProblem at its start_values)",
          approx=(("nevo.W", 1e-15), ("nevo.q", 1e-13), ("nevo.G", 1e-12), ("nevo.dq", 1e-11))),
     Case("gmy_blp", "GMY", build_gmy_blp, ("module:pyblp",) + GMY_DATA, (1,),
-         f"gmy estimate_blp main() stage published on {GMY_YEARS}, {GMY_HOUSEHOLDS} households"),
+         f"gmy estimate_blp main() stage published on {GMY_YEARS}, {GMY_HOUSEHOLDS} households",
+         # logit_second_choice_matrix sets its diagonal to an exact 0 and sums a household's dominant-product
+         # inside mass directly (second_choice.inside_mass_without): these pins move by at most 5e-16 relative
+         approx=(("summary.second_choice.1999.model", 1e-15), ("summary.table6.suv.model", 1e-15),
+                 ("summary.table6.electric.model", 1e-15))),
     Case("kernel_synthetic", "kernel", build_kernel_synthetic, ("kernel",), (1, 8),
          "tests/fixtures/gmy_baseline.py synthetic markets (a_lo and alpha_lo bounds), every pcm_kernel function"),
 )}
