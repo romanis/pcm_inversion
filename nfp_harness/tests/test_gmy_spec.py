@@ -564,6 +564,31 @@ def test_alo_moments_c4c6c(gmy: Any) -> None:
         sp.set_alo_moments("c4")
 
 
+def test_supply_fd_step(gmy: Any) -> None:
+    """--supply-fd-step (LEARNINGS 36): the default 1e-3 leaves the run key as before; another step reaches both supply
+    blocks' secant and enters the run key; a non-positive step is refused."""
+    import argparse
+
+    sp = gmy.GMYSpec((1998, 1999, 2000), households=200)
+    sp.set_moments("demand_supply_msfd_own")
+    sp.set_cost_shifters("in_cost")
+    key0 = sp.paper_run_key()
+    assert "supply_fd_step" not in key0 and sp.supply_fd_step == gmy.SUPPLY_FD_STEP == 1e-3
+    assert all(sp.supply_moment(k).fd_step == 1e-3 for k in ("ms", "fd"))
+    parser = argparse.ArgumentParser()
+    sp.add_paper_arguments(parser)
+    base = ["--cost-shifters", "in_cost", "--moments", "demand_supply_msfd_own"]
+    sp.configure_paper(parser.parse_args(base))
+    key1 = sp.paper_run_key()
+    assert "supply_fd_step" not in key1 and sp.supply_fd_step == 1e-3
+    sp.configure_paper(parser.parse_args(["--supply-fd-step", "0.05", *base]))
+    assert all(sp.supply_moment(k).fd_step == 0.05 and sp.supply_moment(k).fd_scale == "unit" for k in ("ms", "fd"))
+    key = sp.paper_run_key()
+    assert key["supply_fd_step"] == 0.05 and {k: v for k, v in key.items() if k != "supply_fd_step"} == key1
+    with pytest.raises(ValueError, match="positive"):
+        sp.configure_paper(parser.parse_args(["--supply-fd-step", "0"]))
+
+
 def test_premium_makes_follow_their_rule(gmy: Any) -> None:
     """PREMIUM_MAKES is every make whose models all have lux = 1 and whose sales-weighted mean msrp is at least
     PREMIUM_PRICE_FLOOR ($1000 of 2015), over all 39 years; load_products marks them in ``premium_make``."""

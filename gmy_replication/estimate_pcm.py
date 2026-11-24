@@ -223,6 +223,11 @@ COST_SHIFTER_MODES = ("excluded", "in_cost")
 #: distances in characteristic space as extra markup shifters of supply_ms and supply_fd (needs --cost-shifters
 #: in_cost), and C6c, the premium-make purchase share by income quintile in CEX and MRI, 10 rows in the micro block
 ALO_MOMENT_MODES = ("off", "c4c6c")
+#: --supply-fd-step: the supply blocks' secant step in natural units (SupplyMoments fd_scale="unit"). 1e-3 (default)
+#: is narrower than the frontier-event spacing at 128k draws per market, so the secant measures single markup jumps
+#: and the Gauss-Newton curvature is 10-20x too large in about 15 coordinates; 0.05 matches the trust-radius floor
+#: (noise_Delta_floor), the step the secant is meant to describe (LEARNINGS 32, 36)
+SUPPLY_FD_STEP = 1e-3
 #: C4: the characteristic space of the rival distances (instruments.rival_distances), each standardised over the
 #: pooled products; characteristics only, prices are endogenous
 RIVAL_DISTANCE_CHARS = ("z_log_hp", "z_log_footprint", "z_log_mpg", "lux", "van", "suv", "truck")
@@ -699,6 +704,7 @@ class GMYSpec(PaperSpec):
         self.a_lo_free = False
         self.cost_shifters = "excluded"
         self.alo_moments = "off"
+        self.supply_fd_step = SUPPLY_FD_STEP
         self._micro_alo: MicroMoments | None = None
         self.cf_year = CF_YEAR
         self.a_lo = float(a_lo)
@@ -1058,6 +1064,9 @@ class GMYSpec(PaperSpec):
                                  "shifters of supply_ms and supply_fd (C4, needs --cost-shifters in_cost) and the "
                                  "premium-make purchase share by income quintile in CEX and MRI (C6c, 10 micro rows); "
                                  "LEARNINGS 35; part of the run key when not off")
+        parser.add_argument("--supply-fd-step", type=float, default=SUPPLY_FD_STEP,
+                            help="secant step of the supply blocks' Jacobian in natural units (default 1e-3); 0.05 "
+                                 "matches the trust-radius floor (LEARNINGS 36); part of the run key when not 1e-3")
         parser.add_argument("--cf-year", type=int, default=CF_YEAR,
                             help=f"counterfactuals: the year of the merger, cost shock and removal diversion (default "
                                  f"{CF_YEAR}); post-estimation only, not in the run key")
@@ -1098,6 +1107,10 @@ class GMYSpec(PaperSpec):
         self.a_lo_free = bool(getattr(args, "a_lo_free", False))
         self.set_cost_shifters(getattr(args, "cost_shifters", None) or "excluded")
         self.set_alo_moments(getattr(args, "alo_moments", None) or "off")
+        step = getattr(args, "supply_fd_step", None)
+        self.supply_fd_step = SUPPLY_FD_STEP if step is None else float(step)
+        if not self.supply_fd_step > 0:
+            raise ValueError(f"--supply-fd-step must be positive, got {self.supply_fd_step}")
         self.cf_year = int(getattr(args, "cf_year", None) or CF_YEAR)
 
     def paper_run_key(self) -> dict[str, Any]:
@@ -1135,6 +1148,8 @@ class GMYSpec(PaperSpec):
             out["cost_shifters"] = self.cost_shifters
         if self.alo_moments != "off":
             out["alo_moments"] = self.alo_moments
+        if self.supply_fd_step != SUPPLY_FD_STEP:
+            out["supply_fd_step"] = self.supply_fd_step
         return out
 
     @property
@@ -1307,7 +1322,8 @@ class GMYSpec(PaperSpec):
         elif kind != "levels":
             raise ValueError(f"supply kind must be levels, ms or fd, got {kind!r}")
         return SupplyMoments(Z, w, self.products.firm_ids.to_numpy(), self.clusters, name=name, w_names=names,
-                             rcond_min=1e-12, mc_floor=0.05, fd_step=1e-3, fd_scale="unit")
+                             rcond_min=1e-12, mc_floor=0.05, fd_step=self.supply_fd_step,
+                             fd_scale="unit")
 
     @property
     def Z_supply_ms(self) -> np.ndarray:
