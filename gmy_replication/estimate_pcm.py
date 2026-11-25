@@ -219,6 +219,25 @@ FD_SHIFTERS = SUPPLY_EXCLUDED
 FD_MAX_GAP = 1
 #: --cost-shifters: SUPPLY_EXCLUDED as excluded supply instruments (default) or as cost-equation regressors
 COST_SHIFTER_MODES = ("excluded", "in_cost")
+#: --alo-moments: off (default) or c4c6c, the two candidates of LEARNINGS 35 finding 6 that inform a_lo: C4, rival
+#: distances in characteristic space as extra markup shifters of supply_ms and supply_fd (needs --cost-shifters
+#: in_cost), and C6c, the premium-make purchase share by income quintile in CEX and MRI, 10 rows in the micro block
+ALO_MOMENT_MODES = ("off", "c4c6c")
+#: --supply-fd-step: the supply blocks' secant step in natural units (SupplyMoments fd_scale="unit"). 1e-3 (default)
+#: is narrower than the frontier-event spacing at 128k draws per market, so the secant measures single markup jumps
+#: and the Gauss-Newton curvature is 10-20x too large in about 15 coordinates; 0.05 matches the trust-radius floor
+#: (noise_Delta_floor), the step the secant is meant to describe (LEARNINGS 32, 36)
+SUPPLY_FD_STEP = 1e-3
+#: C4: the characteristic space of the rival distances (instruments.rival_distances), each standardised over the
+#: pooled products; characteristics only, prices are endogenous
+RIVAL_DISTANCE_CHARS = ("z_log_hp", "z_log_footprint", "z_log_mpg", "lux", "van", "suv", "truck")
+#: C6c: the premium makes (data_blp.csv ``make``): every make whose models all have lux = 1 and whose sales-weighted
+#: mean msrp over 1980-2018 is at least $45k of 2015 (tests/test_gmy_spec.py checks the rule gives this list)
+PREMIUM_MAKES = ("audi", "bmw", "cadillac", "genesis", "hummer", "infiniti", "jaguar", "land rover", "lexus", "lincoln",
+                 "mercedes-benz", "porsche", "sterling cars", "tesla")
+PREMIUM_PRICE_FLOOR = 45.0   # msrp in $1000 of 2015
+#: C6c: the data label of the premium-make rows and its product column
+PREMIUM_CHAR = "PremiumMake"
 #: the cleanest ownership events among US car makers 1980-2018, as (name, public transition year T, target makes).
 #: ``GMYSpec.ownership_events`` compares T - 1 with T + 1 (T is a mixed year) and keeps an event only when the data's ``parent`` of every target make differs between the two years; minority stakes the
 #: data do not code are not listed
@@ -309,6 +328,8 @@ HOLDING = 2.5   # number_households / 2.5: average duration 5 years, 2 cars per 
 AGE_BINS = (0.30, 0.40, 0.50, 0.60)   # age / 100 cut points of the five age sets
 #: micro-moment characteristic (data column name) -> product column of the model counterpart
 MICRO_CHAR = {"Price": "prices", "Van": "van", "logSizeLW": "log_footprint", "Truck": "truck"}
+#: MICRO_CHAR with the C6c rows' characteristic (--alo-moments c4c6c)
+ALO_MICRO_CHAR = {**MICRO_CHAR, PREMIUM_CHAR: "premium_make"}
 
 
 def package_root(root: str | pathlib.Path | None = None) -> pathlib.Path:
@@ -344,7 +365,8 @@ def load_products(root: str | pathlib.Path | None = None) -> pd.DataFrame:
     ``product_ids``, ``firm_ids`` (parent), ``clustering_ids`` (make2), ``prices`` ($10k of 2015), ``shares``,
     ``market_size``, ``quantity``, the ``XTERMS`` columns (raw), their z-scored versions ``z_<col>`` for
     ``Z_XTERMS``, the ``STAGE2_X`` columns, ``demand_instruments0`` (lag_pl_con), ``iv_prod``, ``steel_weight``,
-    ``IV_N``, ``IV_N_weight`` and ``trend`` (year - 1980), plus every column of data_blp.csv."""
+    ``IV_N``, ``IV_N_weight``, ``trend`` (year - 1980) and ``premium_make`` (1 for PREMIUM_MAKES), plus every column
+    of data_blp.csv."""
     r = package_root(root)
     d = pd.read_csv(r / "data" / "data_blp.csv")
     if not (d.FINAL_SAMPLE == 1).all():
@@ -364,6 +386,7 @@ def load_products(root: str | pathlib.Path | None = None) -> pd.DataFrame:
     out["shares"] = d.sales / out.market_size
     out["const"] = 1.0
     out["electric"] = np.maximum(d.PHEV, d.EV).astype(float)
+    out["premium_make"] = d.make.isin(PREMIUM_MAKES).astype(float)
     for c in Z_XTERMS:
         out[f"z_{c}"] = zscore(d[c])
     for c in ("log_height", "log_curbweight", "log_number_trims"):
@@ -440,10 +463,12 @@ def load_agents(root: str | pathlib.Path | None = None, n_households: int = 1000
     return a
 
 
-def load_micro_tables(root: str | pathlib.Path | None = None) -> dict[str, dict[str, pd.DataFrame]]:
-    """load_micro_tables(root=None) -> {"cex": {"value", "variance"}, "mri": {...}}: the 44 demographics x
-    characteristics tables of cleanMoments.m (CEX 44 x 75: 13 characteristics and 62 make groups; MRI 44 x 76, plus
-    PurchaseProb). The MRI rows on urban / rural are NaN, as cleanMoments.m sets them."""
+def load_micro_tables(root: str | pathlib.Path | None = None, bootstrap: bool = False) -> dict[str, dict[str, Any]]:
+    """load_micro_tables(root=None, bootstrap=False) -> {"cex": {"value", "variance"}, "mri": {...}}: the 44
+    demographics x characteristics tables of cleanMoments.m (CEX 44 x 75: 13 characteristics and 62 make groups; MRI 44
+    x 76, plus PurchaseProb). The MRI rows on urban / rural are NaN, as cleanMoments.m sets them. ``bootstrap`` adds
+    ``"bootstrap"``, the (44, columns, 500) values of the 500 bootstrap samples (full_bootstrap_results.mat, same row
+    and column order); the variance tables are their variances (ddof 1)."""
     from scipy.io import loadmat
     r = package_root(root)
     makes = pd.read_csv(r / "data" / "make_group_ids.csv").make.tolist()
@@ -455,7 +480,8 @@ def load_micro_tables(root: str | pathlib.Path | None = None) -> dict[str, dict[
     # cleanMoments.m labels both surveys with the CEX names (the MRI file's name arrays are not used)
     chars = [str(x[0]) for x in cex["car_char_names_cex"].ravel()][:-1]
     demog = [str(x[0]) for x in cex["demog_names_cex"].ravel()]
-    out: dict[str, dict[str, pd.DataFrame]] = {}
+    boot = loadmat(r / "data" / "full_bootstrap_results.mat") if bootstrap else None
+    out: dict[str, dict[str, Any]] = {}
     for s in ("cex", "mri"):
         m = cex if s == "cex" else loadmat(r / "data" / "microMomentsMRI.mat")
         cols = [fix(c) for c in chars + makes + ["PurchaseProb"]]
@@ -463,14 +489,23 @@ def load_micro_tables(root: str | pathlib.Path | None = None) -> dict[str, dict[
         cols = cols[:val.shape[1]]
         out[s] = {"value": pd.DataFrame(val, index=demog, columns=cols),
                   "variance": pd.DataFrame(var, index=demog, columns=cols)}
+        if boot is not None:
+            b = np.asarray(boot[f"bootstrap_moment_values_{s}"], dtype=float)
+            if b.shape[:2] != val.shape:
+                raise ValueError(f"{s}: bootstrap values {b.shape} do not match the moment table {val.shape}")
+            out[s]["bootstrap"] = b
     urb = ["Urban", "Rural", "UrbanMINUSRural", "UrbanOVERRural"]
     out["mri"]["value"].loc[urb, :] = np.nan
     return out
 
 
-def load_micro_moments(root: str | pathlib.Path | None = None) -> MicroMoments:
-    """load_micro_moments(root=None) -> MicroMoments of spec 6 (33 rows)."""
-    t = load_micro_tables(root)
+def load_micro_moments(root: str | pathlib.Path | None = None, premium_makes: Sequence[str] = ()) -> MicroMoments:
+    """load_micro_moments(root=None, premium_makes=()) -> MicroMoments of spec 6 (33 rows). ``premium_makes`` (makes as
+    in data_blp.csv) appends the C6c rows (--alo-moments c4c6c): E[premium make | purchase, income quintile q], kind
+    ``mean``, for CEX then MRI, q = 1..5 (10 rows, char PREMIUM_CHAR). A row's value is the sum of the makes' columns
+    of the level row Income<q> (each make column is that make's share of the quintile's purchases), its variance the
+    variance (ddof 1) of that sum over the 500 bootstrap samples, the bootstrap behind GMY's own variances."""
+    t = load_micro_tables(root, bootstrap=bool(premium_makes))
     rows: list[dict[str, Any]] = []
 
     def add(demog_rows: Sequence[tuple[str, Any, Any]], chars: Sequence[str], surveys: Sequence[str], demographic: str,
@@ -494,6 +529,20 @@ def load_micro_moments(root: str | pathlib.Path | None = None) -> MicroMoments:
     add(fam, ["Van", "logSizeLW"], ["cex", "mri"], "fs_group")
     add([("UrbanMINUSRural", 0, 1)], ["Truck"], ["cex"], "rural")
     add([(f"Income{q}OVERIncome1", q, 1) for q in (5, 4, 3, 2)], ["PurchaseProb"], ["mri"], "inc_quintile", "ratio")
+    if premium_makes:
+        cols = [m.upper().replace(" ", "_").replace("-", "_") for m in premium_makes]
+        for s in ("cex", "mri"):
+            missing = [c for c in cols if c not in t[s]["value"].columns]
+            if missing:
+                raise KeyError(f"{s}: no make columns {missing}")
+            j = [list(t[s]["value"].columns).index(c) for c in cols]
+            for q in (1, 2, 3, 4, 5):
+                name = f"Income{q}"
+                i = list(t[s]["value"].index).index(name)
+                draws = t[s]["bootstrap"][i, j, :].sum(axis=0)
+                rows.append({"name": f"{name} {PREMIUM_CHAR} {s}", "survey": s, "char": PREMIUM_CHAR, "kind": "mean",
+                             "demographic": "inc_quintile", "a": q, "b": q,
+                             "value": float(t[s]["value"].iloc[i, j].sum()), "variance": float(draws.var(ddof=1))})
     return MicroMoments(pd.DataFrame(rows))
 
 
@@ -560,10 +609,11 @@ def add_set_columns(agents: pd.DataFrame) -> pd.DataFrame:
     return micro_sets.add_set_columns(agents, SURVEYS, SET_DEMOGRAPHICS)
 
 
-def group_moment_rows(micro: MicroMoments) -> list[tuple[str, str | None, str, str]]:
-    """(kind, product column or None, set column a, set column b) for each of the 33 rows of ``micro``, in order: the
-    arguments of ``moments.GroupMomentRow``."""
-    return micro_sets.group_moment_rows(micro, MICRO_CHAR)
+def group_moment_rows(micro: MicroMoments, char_map: Mapping[str, str] = MICRO_CHAR
+                      ) -> list[tuple[str, str | None, str, str]]:
+    """(kind, product column or None, set column a, set column b) for each row of ``micro`` (the 33 of spec 6, plus
+    the C6c rows with ``char_map=ALO_MICRO_CHAR``), in order: the arguments of ``moments.GroupMomentRow``."""
+    return micro_sets.group_moment_rows(micro, char_map)
 
 
 def micro_evaluator(products: pd.DataFrame, agents: pd.DataFrame, micro: MicroMoments
@@ -653,6 +703,9 @@ class GMYSpec(PaperSpec):
         self.drop_blocks: tuple[str, ...] = ()
         self.a_lo_free = False
         self.cost_shifters = "excluded"
+        self.alo_moments = "off"
+        self.supply_fd_step = SUPPLY_FD_STEP
+        self._micro_alo: MicroMoments | None = None
         self.cf_year = CF_YEAR
         self.a_lo = float(a_lo)
         self.prefit_rows = "price_purchase"
@@ -715,6 +768,7 @@ class GMYSpec(PaperSpec):
         a["log_ybar_inc_w"] = income_law_basis(y, self.income_law_ybar)
         self.agents = add_set_columns(a)
         self.micro = data.micro
+        self.data_root = data.root
         self.X1, self.X1_names = self.linear_design(p)
         self.linear_names = list(self.X1_names)
         Z_ex, ex_names = excluded_instruments(p, instruments)
@@ -742,6 +796,30 @@ class GMYSpec(PaperSpec):
         self.cost_shifters = mode
         if self._loaded is not None:
             self.build_cost_design()
+
+    def set_alo_moments(self, mode: str) -> None:
+        """``off`` (default) or ``c4c6c`` (ALO_MOMENT_MODES): C4, the three ``rival_distances`` columns on
+        RIVAL_DISTANCE_CHARS added to the markup shifters of supply_ms and supply_fd, and C6c, the 10 premium-make rows
+        added to the micro block (one block, weight diag(1 / variance) as GMY's 33 rows). C4 needs ``--cost-shifters
+        in_cost``; ``moment_blocks`` refuses the mode otherwise."""
+        if mode not in ALO_MOMENT_MODES:
+            raise ValueError(f"alo moments must be one of {ALO_MOMENT_MODES}, got {mode!r}")
+        self.alo_moments = mode
+
+    @property
+    def distance_chars(self) -> tuple[str, ...]:
+        """C4's characteristic space, or () when --alo-moments is off."""
+        return RIVAL_DISTANCE_CHARS if self.alo_moments == "c4c6c" else ()
+
+    @property
+    def micro_table(self) -> tuple[MicroMoments, Mapping[str, str]]:
+        """(micro-moment table, char map) of the micro block: GMY's 33 rows, or under --alo-moments c4c6c those and the
+        10 C6c rows (``load_micro_moments`` with PREMIUM_MAKES)."""
+        if self.alo_moments == "off":
+            return self.micro, MICRO_CHAR
+        if self._micro_alo is None:
+            self._micro_alo = load_micro_moments(self.data_root, premium_makes=PREMIUM_MAKES)
+        return self._micro_alo, ALO_MICRO_CHAR
 
     def build_cost_design(self) -> None:
         """cost_basis (the cost equation's regressors), cost_names and Z_supply under ``cost_shifters``."""
@@ -981,6 +1059,14 @@ class GMYSpec(PaperSpec):
                                  "trade-agreement terms out of the cost equation as excluded instruments; in_cost puts "
                                  "them in the cost equation and keeps only markup shifters excluded (LEARNINGS 35); "
                                  "part of the run key when not excluded")
+        parser.add_argument("--alo-moments", choices=ALO_MOMENT_MODES, default="off",
+                            help="off (default) or c4c6c: rival distances in characteristic space as extra markup "
+                                 "shifters of supply_ms and supply_fd (C4, needs --cost-shifters in_cost) and the "
+                                 "premium-make purchase share by income quintile in CEX and MRI (C6c, 10 micro rows); "
+                                 "LEARNINGS 35; part of the run key when not off")
+        parser.add_argument("--supply-fd-step", type=float, default=SUPPLY_FD_STEP,
+                            help="secant step of the supply blocks' Jacobian in natural units (default 1e-3); 0.05 "
+                                 "matches the trust-radius floor (LEARNINGS 36); part of the run key when not 1e-3")
         parser.add_argument("--cf-year", type=int, default=CF_YEAR,
                             help=f"counterfactuals: the year of the merger, cost shock and removal diversion (default "
                                  f"{CF_YEAR}); post-estimation only, not in the run key")
@@ -1020,6 +1106,11 @@ class GMYSpec(PaperSpec):
         self.set_weighting_mode(getattr(args, "weighting", None) or "default", drop)
         self.a_lo_free = bool(getattr(args, "a_lo_free", False))
         self.set_cost_shifters(getattr(args, "cost_shifters", None) or "excluded")
+        self.set_alo_moments(getattr(args, "alo_moments", None) or "off")
+        step = getattr(args, "supply_fd_step", None)
+        self.supply_fd_step = SUPPLY_FD_STEP if step is None else float(step)
+        if not self.supply_fd_step > 0:
+            raise ValueError(f"--supply-fd-step must be positive, got {self.supply_fd_step}")
         self.cf_year = int(getattr(args, "cf_year", None) or CF_YEAR)
 
     def paper_run_key(self) -> dict[str, Any]:
@@ -1055,6 +1146,10 @@ class GMYSpec(PaperSpec):
             out["a_lo_free"] = True
         if self.cost_shifters != "excluded":
             out["cost_shifters"] = self.cost_shifters
+        if self.alo_moments != "off":
+            out["alo_moments"] = self.alo_moments
+        if self.supply_fd_step != SUPPLY_FD_STEP:
+            out["supply_fd_step"] = self.supply_fd_step
         return out
 
     @property
@@ -1093,6 +1188,12 @@ class GMYSpec(PaperSpec):
             "D3: the second-choice joint law is renormalised on both sides; data matrices merged over the same-firm "
             "twins, twin-to-twin pairs dropped",
             f"D4: excluded instruments {self.instruments} ({', '.join(self.Z_names[self.X1.shape[1]:])}), standardised",
+            *([f"--alo-moments {self.alo_moments} (LEARNINGS 35): C4, distances to the nearest and second-nearest "
+               f"rival product and the count of rival products within the median nearest-rival distance, in the "
+               f"standardised space of {', '.join(RIVAL_DISTANCE_CHARS)}, added to the markup shifters of supply_ms "
+               f"and supply_fd; C6c, E[premium make | purchase, income quintile] in CEX and MRI (10 micro rows, "
+               f"premium makes {', '.join(PREMIUM_MAKES)}), variances from the 500 bootstrap samples"]
+              if self.alo_moments != "off" else []),
             "D6: micro weight diag(1/variance), second-choice weight 30 per row, both fixed; step 2 updates the "
             "aggregate block only",
             "aggregate block clustered by model (product_ids): make2 has 56 levels against the aggregate moments, so a "
@@ -1178,13 +1279,14 @@ class GMYSpec(PaperSpec):
         return PCMSpec(self.kernel_chars, track_realised_mass=False, trial_cold_evals=0, bound_kind="a")
 
     def micro_moment(self, rows: str = "all") -> list[GroupMicroMoments]:
-        """GMY's 33 micro moments (V3) as one GroupMicroMoments, in load_micro_moments order, fixed covariance
-        diag(variance) (D6). Rows whose household sets are empty in ``--years`` are dropped. ``rows="prefit"`` keeps
-        the price-by-income, price-by-age and purchase-rate rows (20 of 33), the rows that pin phi_inc and phi_age, or
-        under ``--prefit-rows age`` the 8 price-by-age rows."""
-        tab = self.micro.table
+        """GMY's 33 micro moments (V3), plus the 10 C6c rows under --alo-moments c4c6c, as one GroupMicroMoments, in
+        load_micro_moments order, fixed covariance diag(variance) (D6). Rows whose household sets are empty in
+        ``--years`` are dropped. ``rows="prefit"`` keeps the price-by-income, price-by-age and purchase-rate rows (20 of
+        33), the rows that pin phi_inc and phi_age, or under ``--prefit-rows age`` the 8 price-by-age rows."""
+        micro, char_map = self.micro_table
+        tab = micro.table
         keep = []
-        for k, (kind, char, sa, sb) in enumerate(group_moment_rows(self.micro)):
+        for k, (kind, char, sa, sb) in enumerate(group_moment_rows(micro, char_map)):
             if rows == "prefit" and not (tab.char.iloc[k] in ("Price", "PurchaseProb")):
                 continue
             if rows == "prefit" and self.prefit_rows == "age" and not (
@@ -1220,14 +1322,15 @@ class GMYSpec(PaperSpec):
         elif kind != "levels":
             raise ValueError(f"supply kind must be levels, ms or fd, got {kind!r}")
         return SupplyMoments(Z, w, self.products.firm_ids.to_numpy(), self.clusters, name=name, w_names=names,
-                             rcond_min=1e-12, mc_floor=0.05, fd_step=1e-3, fd_scale="unit")
+                             rcond_min=1e-12, mc_floor=0.05, fd_step=self.supply_fd_step,
+                             fd_scale="unit")
 
     @property
     def Z_supply_ms(self) -> np.ndarray:
         """[cost basis, GMY's excluded supply instruments, markup shifters], the excluded columns standardised as one
         block (the first columns equal ``Z_supply``'s), collinear columns dropped."""
         p = self.products
-        ms, _ = markup_shifters(p, MARKUP_SHIFTER_CHARS)
+        ms, _ = markup_shifters(p, MARKUP_SHIFTER_CHARS, distance_characteristics=self.distance_chars)
         if self.cost_shifters == "in_cost":   # the cost shifters are regressors in cost_basis; markup shifters only
             return drop_collinear(np.column_stack([self.cost_basis, standardise(ms)]), keep=self.cost_basis.shape[1])
         ex = np.column_stack([np.column_stack([p[c].to_numpy(float) for c in SUPPLY_EXCLUDED]), ms])
@@ -1236,7 +1339,7 @@ class GMYSpec(PaperSpec):
     @property
     def markup_shifter_names(self) -> list[str]:
         return ([f"own_{c}" for c in MARKUP_SHIFTER_CHARS] + [f"rival_{c}" for c in MARKUP_SHIFTER_CHARS]
-                + ["own_products", "rival_products"])
+                + ["own_products", "rival_products"] + (list(iv.RIVAL_DISTANCE_NAMES) if self.distance_chars else []))
 
     @property
     def fd_pairs(self) -> tuple[np.ndarray, np.ndarray]:
@@ -1273,7 +1376,7 @@ class GMYSpec(PaperSpec):
         """(n, k) markup shifters (``markup_shifters`` of MARKUP_SHIFTER_CHARS), standardised; columns with no
         within-model variation over the pairs are dropped. The excluded set of supply_fd under ``in_cost``."""
         cur, prev = self.fd_pairs
-        ms, _ = markup_shifters(self.products, MARKUP_SHIFTER_CHARS)
+        ms, _ = markup_shifters(self.products, MARKUP_SHIFTER_CHARS, distance_characteristics=self.distance_chars)
         z = standardise(ms)
         return z[:, drop_collinear_columns(z[cur] - z[prev], keep=0)]
 
@@ -1365,6 +1468,9 @@ class GMYSpec(PaperSpec):
         """(moment blocks of the moment set ``which``, the aggregate block's Z) in the problem's order; ``joint``: the
         joint weightings' plain IV forms and ``--drop-block``. Independent of the inner model, so the same blocks
         serve the PCM (``build_problem``) and the mixed logit on the same moments (estimate_blp.py same-moments)."""
+        if self.alo_moments != "off" and self.cost_shifters != "in_cost":
+            raise ValueError(f"--alo-moments {self.alo_moments} needs --cost-shifters in_cost (C4 is defined on the "
+                             f"in_cost supply blocks, LEARNINGS 35)")
         Z_agg = self.Z[:, :self.X1.shape[1]] if joint and "aggregate" in self.drop_blocks else self.Z
         ms: list[Any] = []
         if which in ("gmy", "demand_supply", "demand_supply_ms", "aggregate") or which in FD_MOMENTS:
@@ -1479,7 +1585,12 @@ class GMYSpec(PaperSpec):
                    if self.moments in OWN_MOMENTS else {}),
                 **({"a_lo_free": list(A_LO_FREE)} if self.a_lo_free else {}),
                 **({"cost_shifters": {"mode": self.cost_shifters, "in_cost": list(SUPPLY_EXCLUDED)}}
-                   if self.cost_shifters != "excluded" else {})}
+                   if self.cost_shifters != "excluded" else {}),
+                **({"alo_moments": {"mode": self.alo_moments, "rival_distance_chars": list(RIVAL_DISTANCE_CHARS),
+                                    "rival_distances": list(iv.RIVAL_DISTANCE_NAMES),
+                                    "premium_makes": list(PREMIUM_MAKES),
+                                    "premium_rows": [n for n in self.micro_table[0].table.name if PREMIUM_CHAR in n]}}
+                   if self.alo_moments != "off" else {})}
 
     def gate_profiles(self) -> list[tuple[str, str, dict[str, Any]]]:
         """The sigma_p ray profile (section 3): lambda in {0.5, 1, 2} times the start spreads, sigma_p in {1.5, ..,

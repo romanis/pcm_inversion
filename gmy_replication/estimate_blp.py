@@ -216,7 +216,10 @@ class GMYLogit:
         return NFPGMMProblem(self.model, ms, LinearIV(np.ones((n, 1)), np.ones((n, 1))), layout, max_step=False)
 
 
-def fit_step1(model: GMYLogit, theta0: np.ndarray, max_nfev: int) -> tuple[np.ndarray, dict]:
+def fit_step1(model: GMYLogit, theta0: np.ndarray, max_nfev: int, ftol: float = 1e-9, xtol: float = 1e-10,
+              jac: str = "2-point", diff_step: float = 1e-6, rounds: int = 1) -> tuple[np.ndarray, dict]:
+    """lsqnonlin step 1. The defaults are estimation.m's options; ``rounds`` > 1 restarts least squares from its own
+    result (a fresh Jacobian and trust region) until q stops falling by more than 1e-6 or the rounds run out."""
     t0 = time.time()
     best = {"q": np.inf}
 
@@ -231,10 +234,22 @@ def fit_step1(model: GMYLogit, theta0: np.ndarray, max_nfev: int) -> tuple[np.nd
         return r
 
     # lsqnonlin with forward differences of step 1e-6 (estimation.m options)
-    res = least_squares(fun, theta0, bounds=(LOWER, UPPER), method="trf", diff_step=1e-6, jac="2-point",
-                        max_nfev=max_nfev, ftol=1e-9, xtol=1e-10, gtol=1e-8, verbose=0)
-    return res.x, {"status": int(res.status), "message": res.message, "nfev": int(res.nfev),
-                   "q": float(2 * res.cost), "optimality": float(res.optimality), "seconds": time.time() - t0}
+    x, hist = np.clip(theta0, LOWER, UPPER), []
+    for _ in range(max(1, rounds)):
+        res = least_squares(fun, x, bounds=(LOWER, UPPER), method="trf", diff_step=diff_step, jac=jac,
+                            max_nfev=max_nfev, ftol=ftol, xtol=xtol, gtol=1e-8, verbose=0)
+        hist.append({"status": int(res.status), "message": res.message, "nfev": int(res.nfev),
+                     "q": float(2 * res.cost), "optimality": float(res.optimality)})
+        log.info("least_squares round %d: q %.6f, %s, optimality %.3g", len(hist), hist[-1]["q"], res.message,
+                 res.optimality)
+        gain = (hist[-2]["q"] if len(hist) > 1 else np.inf) - hist[-1]["q"]
+        x = res.x
+        if gain <= 1e-6:
+            break
+    out = dict(hist[-1], seconds=time.time() - t0)
+    if rounds > 1:
+        out["rounds"] = hist
+    return x, out
 
 
 # ---------------------------------------------------------------- step 2 and post-estimation in pyblp
@@ -384,18 +399,19 @@ def _pcm_matched_design(spec: Any, start_theta: Mapping[str, float] | None) -> d
 def same_moments_problem(threads: int, households: int = 2000, years: tuple[int, ...] = SAME_YEARS,
                          fd_max_gap: int = 3, seed: int = SEED, utility: str = "gmy",
                          moments: str = "demand_supply_msfd_own", drop_blocks: Sequence[str] = (),
-                         start_theta: Mapping[str, float] | None = None, cost_shifters: str = "excluded"
-                         ) -> tuple[Any, Any, dict[str, Any]]:
+                         start_theta: Mapping[str, float] | None = None, cost_shifters: str = "excluded",
+                         alo_moments: str = "off") -> tuple[Any, Any, dict[str, Any]]:
     """(NFPGMMProblem, GMYSpec, design): a mixed logit (``MixedLogitModel``, the harness's BLP contraction) on the
     moment blocks of the PCM's ``--moments <moments> --weighting joint_cue [--drop-block ...]`` problem
     (``GMYSpec.moment_blocks``): the same products (twins merged, shares below 1e-5 dropped, price ties spread), the
     same households and ownership coding, the same X1 and Z, micro weight diag(1 / variance), second choices x 30, and
-    ``set_joint("cue")``. Taste draws are GMY's Latin hypercube normals, one per household and market
+    ``set_joint("cue")`` (a set with no product-level block, e.g. ``gmy_nolinear``, keeps the fixed weight W1 of its
+    micro and second-choice blocks, GMY's step-1 objective). Taste draws are GMY's Latin hypercube normals, one per household and market
     (estimation.m), seed + market position.
 
     ``utility``: ``gmy`` is GMY's spec 6 with alpha the first nonlinear parameter (a pattern term on price with a
     demographic of ones, so ds/dp, which the supply blocks read, moves with it); ``pcm_matched`` is the PCM's utility
-    (``_pcm_matched_design``)."""
+    (``_pcm_matched_design``). ``cost_shifters`` and ``alo_moments`` are the PCM's options of the same names."""
     from nfp_harness.problem import NFPGMMProblem
 
     if utility not in UTILITIES:
@@ -403,6 +419,7 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
     spec = gmy_pcm.GMYSpec(years=years, households=households)
     spec.fd_max_gap = int(fd_max_gap)
     spec.set_cost_shifters(cost_shifters)
+    spec.set_alo_moments(alo_moments)
     spec.set_moments(moments)
     spec.set_weighting_mode("joint_cue", list(drop_blocks))
     ms, _ = spec.moment_blocks(moments, True)
@@ -448,15 +465,22 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
     layout = ParameterLayout([ParameterSpec(n, "taste", None, None, float(np.clip(v, l_, h)), float(l_), float(h),
                                             unit=1.0) for n, v, l_, h in zip(names, start, lo, hi)])
     prob = NFPGMMProblem(model, ms, spec.linear_for("all"), layout, max_step=False)
-    prob.set_joint("cue")
+    if prob.agg is not None:
+        prob.set_joint("cue")
+    else:   # no product-level block (e.g. gmy_nolinear, GMY's step 1): every block has a fixed covariance, W = W1
+        prob.set_weighting(prob.initial_weighting(layout.starts()))
     design.update(moments=moments, drop_blocks=list(spec.drop_blocks), fd_max_gap=int(fd_max_gap),
                   cost_shifters=cost_shifters)
+    if alo_moments != "off":   # only when set, so the design of an earlier run is unchanged
+        design["alo_moments"] = alo_moments
     return prob, spec, design
 
 
 def same_moments_evaluate(prob: Any, theta: np.ndarray) -> dict[str, Any]:
     """q_CUE, its blocks, Hansen J and the economics of the mixed logit at theta (no Jacobian): every moment row
-    (data and model) of the micro and second-choice blocks, Lerner indices and own elasticities by year and segment."""
+    (data and model) of the micro and second-choice blocks, Lerner indices and own elasticities by year and segment.
+    A problem with no product-level block (``same_moments_problem`` on e.g. ``gmy_nolinear``) is scored with its fixed
+    W, and without a supply block the Lerner and elasticity fields are left out."""
     from scipy.stats import chi2
 
     from nfp_harness.weighting import weight_from_covariance
@@ -464,14 +488,34 @@ def same_moments_evaluate(prob: Any, theta: np.ndarray) -> dict[str, Any]:
     ev = prob.evaluate(np.asarray(theta, dtype=float), need_jacobian=False)
     if not ev.ok:
         return {"status": ev.status.value, "note": ev.aux.get("note")}
-    W = weight_from_covariance(prob.covariance(ev))
-    q = float(prob.n * ev.g @ W @ ev.g)
+    if ev.aux.get("joint") is not None:
+        W = weight_from_covariance(prob.covariance(ev))
+        q = float(prob.n * ev.g @ W @ ev.g)
+    else:   # no product-level block: the problem's fixed W (same_moments_problem)
+        q = float(ev.aux["q"])
     ident = prob.identification
     df = int(ident["overidentifying"])
     sol = ev.aux["solution"]
-    sup = next(m for m in prob.moments if getattr(m, "is_supply", False))
-    _, _, info = sup.log_costs(sol, False)
     model = prob.model
+    mic = next((m for m in prob.moments if m.name == "micro_gmy"), None)
+    sc = next((m for m in prob.moments if m.name == "second_choice"), None)
+    out = {"status": "ok", "theta": dict(zip(prob.layout.names, map(float, theta))), "q_cue": q,
+           "q_blocks": ev.aux["q_blocks"], "q_blocks_own": ev.aux.get("q_blocks_own", {}),
+           "moments": int(ident["effective_moments"]), "free_nonlinear": int(ident["p_free"]),
+           "linear": int(ident["k_linear"]), "df": df, "J_p_value": float(chi2.sf(q, df)),
+           "price_coefficient_max": max(float(model.price_coefficients(theta, t).max())
+                                        for t in range(len(model.markets))),
+           "micro": [] if mic is None else [
+               {"name": lab, "data": float(d), "model": float(v), "z": float((v - d) / np.sqrt(var))}
+               for lab, d, v, var in zip(mic.labels, mic.values, ev.aux["micro_predicted"]["micro_gmy"],
+                                         mic.variances)],
+           "second_choice": [] if sc is None else [
+               {"row": lab, "data": float(d), "model": float(v)}
+               for lab, d, v in zip(sc.labels, sc.values, ev.aux["micro_predicted"]["second_choice"])]}
+    sup = next((m for m in prob.moments if getattr(m, "is_supply", False)), None)
+    if sup is None:
+        return out
+    _, _, info = sup.log_costs(sol, False)
     lerner, own = np.full(prob.n, np.nan), np.full(prob.n, np.nan)
     mids = np.empty(prob.n, dtype=int)
     for t, m in enumerate(model.markets):
@@ -483,27 +527,12 @@ def same_moments_evaluate(prob: Any, theta: np.ndarray) -> dict[str, Any]:
         mids[r] = int(m.market_id)
     years = [int(m.market_id) for m in model.markets]
     s_all = np.asarray(sol.outputs["shares"])
-    mic = next((m for m in prob.moments if m.name == "micro_gmy"), None)
-    sc = next((m for m in prob.moments if m.name == "second_choice"), None)
-    out = {"status": "ok", "theta": dict(zip(prob.layout.names, map(float, theta))), "q_cue": q,
-           "q_blocks": ev.aux["q_blocks"], "q_blocks_own": ev.aux["q_blocks_own"],
-           "moments": int(ident["effective_moments"]), "free_nonlinear": int(ident["p_free"]),
-           "linear": int(ident["k_linear"]), "df": df, "J_p_value": float(chi2.sf(q, df)),
-           "lerner_median": float(np.nanmedian(lerner)),
-           "lerner_sales_weighted_mean": float(np.nansum(lerner * s_all) / np.sum(s_all[np.isfinite(lerner)])),
-           "lerner_median_by_year": {y: float(np.nanmedian(lerner[mids == y])) for y in years},
-           "own_elasticity_median": float(np.nanmedian(own)),
-           "own_elasticity_median_by_year": {y: float(np.nanmedian(own[mids == y])) for y in years},
-           "share_mc_clipped": float(info.get("share_mc_clipped", float("nan"))),
-           "price_coefficient_max": max(float(model.price_coefficients(theta, t).max())
-                                        for t in range(len(model.markets))),
-           "micro": [] if mic is None else [
-               {"name": lab, "data": float(d), "model": float(v), "z": float((v - d) / np.sqrt(var))}
-               for lab, d, v, var in zip(mic.labels, mic.values, ev.aux["micro_predicted"]["micro_gmy"],
-                                         mic.variances)],
-           "second_choice": [] if sc is None else [
-               {"row": lab, "data": float(d), "model": float(v)}
-               for lab, d, v in zip(sc.labels, sc.values, ev.aux["micro_predicted"]["second_choice"])]}
+    out.update({"lerner_median": float(np.nanmedian(lerner)),
+                "lerner_sales_weighted_mean": float(np.nansum(lerner * s_all) / np.sum(s_all[np.isfinite(lerner)])),
+                "lerner_median_by_year": {y: float(np.nanmedian(lerner[mids == y])) for y in years},
+                "own_elasticity_median": float(np.nanmedian(own)),
+                "own_elasticity_median_by_year": {y: float(np.nanmedian(own[mids == y])) for y in years},
+                "share_mc_clipped": float(info.get("share_mc_clipped", float("nan")))})
     seg = getattr(prob, "segments", None)
     if seg is not None:
         out["lerner_median_by_segment"] = {k: float(np.nanmedian(lerner[seg == k])) for k in np.unique(seg)}
@@ -627,7 +656,7 @@ def same_moments_main(args: Any) -> None:
                                               moments=args.moments, drop_blocks=args.drop_block or (),
                                               start_theta=st if args.utility == "pcm_matched" and not own_fit
                                               else None,
-                                              cost_shifters=args.cost_shifters)
+                                              cost_shifters=args.cost_shifters, alo_moments=args.alo_moments)
     prob.segments = spec.products[spec.groups].astype(str).to_numpy()   # type: ignore[attr-defined]
     log.info("%s: %d products, %d moments, identification %s", design, prob.n, prob.k, prob.identification)
     theta0 = prob.layout.starts()
@@ -680,10 +709,18 @@ def main() -> None:
     ap.add_argument("--fd-max-gap", type=int, default=1, help="same-moments: as the PCM's --fd-max-gap")
     ap.add_argument("--start-theta", default=None,
                     help="same-moments: named starts (a harness stage .npz, e.g. the PCM's, for pcm_matched; a "
-                         "same-moments JSON)")
+                         "same-moments JSON); fit: a fit JSON whose theta replaces Table 4's")
     ap.add_argument("--cost-shifters", choices=gmy_pcm.COST_SHIFTER_MODES, default="excluded",
                     help="same-moments: as the PCM's --cost-shifters")
+    ap.add_argument("--alo-moments", choices=gmy_pcm.ALO_MOMENT_MODES, default="off",
+                    help="same-moments: as the PCM's --alo-moments (c4c6c needs --cost-shifters in_cost)")
     ap.add_argument("--tag", default="", help="suffix of the output names (default none)")
+    ap.add_argument("--ftol", type=float, default=1e-9, help="fit: least_squares ftol (default estimation.m's)")
+    ap.add_argument("--xtol", type=float, default=1e-10, help="fit: least_squares xtol")
+    ap.add_argument("--jac", choices=("2-point", "3-point"), default="2-point", help="fit: finite-difference scheme")
+    ap.add_argument("--diff-step", type=float, default=1e-6, help="fit: relative finite-difference step")
+    ap.add_argument("--rounds", type=int, default=1,
+                    help="fit: restart least squares from its result up to this many times while q falls")
     ap.add_argument("--counterfactuals", action="store_true",
                     help="published / fit: also run the shared counterfactuals at the estimate (off by default, so "
                          "the outputs of a plain run are unchanged); same-moments with --max-nfev 0: run them at the "
@@ -710,7 +747,13 @@ def main() -> None:
     log.info("q at Table 4 theta %.4f (%.1fs)", float(r0 @ r0), time.time() - t0)
     fit = None
     if args.stage == "fit":
-        theta, fit = fit_step1(model, theta, args.max_nfev)
+        st = _start_theta(args.start_theta)
+        if st:   # named starts (a fit JSON); names it lacks stay at Table 4
+            theta = np.array([st.get(n.replace(" ", "_"), v) for n, v in zip(NAMES, TABLE4_THETA)])
+            rs = model.residuals(theta, commit=True)
+            log.info("start from %s: q %.4f", args.start_theta, float(rs @ rs))
+        theta, fit = fit_step1(model, theta, args.max_nfev, ftol=args.ftol, xtol=args.xtol, jac=args.jac,
+                               diff_step=args.diff_step, rounds=args.rounds)
         log.info("step 1: %s", fit)
     m = model.moments(theta, commit=True)
     r = model.residuals(theta)

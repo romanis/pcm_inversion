@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from nfp_harness.instruments import (difference_instruments, firm_product_counts, gh_instruments, markup_shifters,
-                                     within_differences)
+                                     rival_distances, within_differences)
 from nfp_harness.moments import DifferenceIVMoments, DifferenceSarganIVMoments, IVMoments, SarganIVMoments
 from nfp_harness.types import LinearFit
 
@@ -99,3 +99,33 @@ def test_difference_iv_blocks_are_not_aggregate() -> None:
         assert a.d_delta is not None and b.d_delta is not None
         np.testing.assert_array_equal(a.value, b.value)
         np.testing.assert_array_equal(a.d_delta, b.d_delta)
+
+
+def test_rival_distances_by_hand() -> None:
+    import pandas as pd
+    # one market, firms a, a, b, c on one characteristic (sd 1.5 over the pooled products) and a constant column
+    frame = pd.DataFrame({"market_ids": [1, 1, 1, 1], "firm_ids": ["a", "a", "b", "c"], "x": [0.0, 1.0, 3.0, 4.0],
+                          "flat": [2.0, 2.0, 2.0, 2.0]})
+    D, names = rival_distances(frame, ("x", "flat"))    # the constant column is dropped
+    assert names == ["rival_distance_1", "rival_distance_2", "rival_products_within_median"]
+    sd = np.std([0.0, 1.0, 3.0, 4.0])
+    # rivals of 0: {3, 4}; of 1: {3, 4}; of 3: {0, 1, 4}; of 4: {0, 1, 3}
+    np.testing.assert_allclose(D[:, 0], np.array([3.0, 2.0, 1.0, 1.0]) / sd)
+    np.testing.assert_allclose(D[:, 1], np.array([4.0, 3.0, 2.0, 3.0]) / sd)
+    # median nearest-rival distance 1.5 / sd: rivals within it
+    np.testing.assert_array_equal(D[:, 2], [0, 0, 1, 1])
+    with pytest.raises(ValueError, match="two rival"):
+        rival_distances(frame.assign(firm_ids=["a", "a", "a", "b"]), ("x",))
+
+
+def test_markup_shifters_with_distances_extend_the_default(pyblp) -> None:   # type: ignore[no-untyped-def]
+    import pandas as pd
+    rng = np.random.default_rng(3)
+    n = 40
+    frame = pd.DataFrame({"market_ids": np.repeat([0, 1], n // 2), "firm_ids": rng.integers(0, 4, n),
+                          "a": rng.normal(size=n), "b": rng.normal(size=n)})
+    Z0, n0 = markup_shifters(frame, ("a", "b"))
+    Z1, n1 = markup_shifters(frame, ("a", "b"), distance_characteristics=("a", "b"))
+    np.testing.assert_array_equal(Z1[:, :6], Z0)
+    np.testing.assert_array_equal(Z1[:, 6:], rival_distances(frame, ("a", "b"))[0])
+    assert n1 == n0 + ["rival_distance_1", "rival_distance_2", "rival_products_within_median"]

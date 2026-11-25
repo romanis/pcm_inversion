@@ -444,3 +444,54 @@ def test_warm_stage_writes_a_delta_file_other_runs_read(tmp_path: pathlib.Path) 
     finally:
         m.close()
     assert all(pm["stages"].startswith("warm ok") for pm in sol.per_market)
+
+
+class CueSpec(ToySpec):
+    """ToySpec under the joint CUE weighting (``set_joint("cue")``)."""
+
+    def build_problem(self, nu: int, seed: int, threads: int | None, moments: str,
+                      layout_changes: dict[str, Any] | None = None) -> NFPGMMProblem:
+        problem = super().build_problem(nu, seed, threads, moments, layout_changes)
+        problem.set_joint("cue")
+        return problem
+
+
+@pytest.mark.parametrize("cue", [False, True])
+def test_score_evaluates_the_start_under_the_stages_weight_and_writes_no_run_directory(
+        tmp_path: pathlib.Path, cue: bool) -> None:
+    """``score`` at the layout starts: q is n g'W g with W1 = initial_weighting(theta) (fixed W) or with CUE's
+    S(theta)^-1 (a joint CUE problem), the blocks sum to q, df is the identification count, every micro row is
+    reported; the ``score`` command writes its JSON and no run directory."""
+    from nfp_harness.pipeline import main, score
+    from nfp_harness.weighting import weight_from_covariance
+
+    syn = make_synthetic(2, 8, 32, 8, seed=2)
+    spec = (CueSpec if cue else ToySpec)(syn)
+    rec = score(spec, syn["nu"], syn["seed"], 8)
+    problem = spec.build_problem(syn["nu"], syn["seed"], 8, "all")
+    try:
+        theta = problem.layout.starts()
+        if not cue:
+            problem.set_weighting(problem.initial_weighting(theta))
+        ev = problem.evaluate(theta, need_jacobian=False)
+        W = weight_from_covariance(problem.covariance(ev)) if cue else problem.initial_weighting(theta)
+        q = float(problem.n * ev.g @ W @ ev.g)
+        df = int(problem.identification["overidentifying"])
+    finally:
+        problem.model.close()
+    assert rec["status"] == "ok"
+    assert rec["q"] == pytest.approx(q, rel=1e-10)
+    assert sum(rec["q_blocks"].values()) == pytest.approx(rec["q"], rel=1e-10)
+    assert rec["df"] == df and rec["block_rows"] == {"aggregate": syn["Z"].shape[1], "micro": 3}
+    assert ("q_blocks_own" in rec) == cue and rec["weight"].startswith("CUE" if cue else "W1")
+    assert [r["data"] for r in rec["rows"]["micro"]] == pytest.approx(list(true_micro_values(syn)))
+    assert rec["theta"] == dict(zip(synthetic_layout().names, map(float, theta)))
+
+    out = tmp_path / "score" / "toy.json"
+    base = tmp_path / "runs"
+    status = main(spec, ["score", "--nu", str(syn["nu"]), "--seed", str(syn["seed"]), "--threads", "8",
+                         "--results", str(base), "--out", str(out)])
+    assert status == 0
+    written = json.loads(out.read_text())
+    assert written["q"] == pytest.approx(q, rel=1e-10) and written["df"] == df
+    assert not base.exists()

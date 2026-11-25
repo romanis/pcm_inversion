@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["first_second_correlations", "logit_second_choice_matrix", "correlation_adjoint"]
+__all__ = ["first_second_correlations", "logit_second_choice_matrix", "correlation_adjoint", "inside_mass_without"]
 
 
 def first_second_correlations(first_shares: np.ndarray, second_choice: np.ndarray, x: np.ndarray,
@@ -43,6 +43,23 @@ def first_second_correlations(first_shares: np.ndarray, second_choice: np.ndarra
     return corr if full else np.diag(corr).copy()
 
 
+def inside_mass_without(probabilities: np.ndarray) -> np.ndarray:
+    """inside_mass_without(P) -> (J, H) r_jh = sum_{l != j} P_lh, household h's inside mass with product j removed.
+
+    ``R_h - P_jh`` cancels when one product holds almost all of h's inside mass: at P_jh = 1 - 1.8e-13 the
+    difference carries the rounding error of R_h (1.1e-16), 6e-4 of its value, and that error jumps as theta moves.
+    For every product but h's largest, r_jh >= P_top,h >= R_h / 2, so ``R_h - P_jh`` keeps full precision; the
+    largest product's r is summed over the other products directly."""
+    P = np.asarray(probabilities, dtype=float)
+    H = P.shape[1]
+    rest = P.sum(axis=0)[None, :] - P
+    top = np.argmax(P, axis=0)
+    others = P.copy()
+    others[top, np.arange(H)] = 0.0
+    rest[top, np.arange(H)] = others.sum(axis=0)
+    return rest
+
+
 def logit_second_choice_matrix(probabilities: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """logit_second_choice_matrix(probabilities, weights) -> (J, J) C[j, k] = P(second = k | first = j, second inside)
     for a mixed logit with (J, H) purchase probabilities P and household weights w (H,), as ComputeSecondChoiceMoments.m:
@@ -55,11 +72,12 @@ def logit_second_choice_matrix(probabilities: np.ndarray, weights: np.ndarray) -
         raise ValueError(f"{w.size} weights for {H} households")
     buyers = w[None, :] * P
     buyers = buyers / buyers.sum(axis=1, keepdims=True)          # (J, H): household mix of j's buyers
-    rest = P.sum(axis=0)[None, :] - P                             # (J, H): inside mass with j removed
+    rest = inside_mass_without(P)                                 # (J, H): inside mass with j removed
     with np.errstate(invalid="ignore", divide="ignore"):
         B = np.where(rest > 0, buyers / rest, 0.0)                # (J, H)
     C = B @ P.T                                                   # C[j, k] = sum_h B[j, h] P[k, h]
-    C[np.arange(J), np.arange(J)] -= np.einsum("jh,jh->j", B, P)  # remove k = j
+    C[np.arange(J), np.arange(J)] = 0.0                           # k = j is not a second choice; subtracting
+    # sum_h B_jh P_jh would leave the rounding of B_jh P_jh = buyers_jh P_jh / r_jh (1.7e12 at r_jh = 1.8e-13)
     return C
 
 

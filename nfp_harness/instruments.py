@@ -7,7 +7,8 @@ table with ``market_ids`` and ``firm_ids`` and named characteristic columns: ``b
 Gandhi-Houde instruments, standardised). ``first_stage_table`` screens candidate excluded sets for price relevance.
 
 Supply-side builders: ``firm_product_counts`` and ``markup_shifters`` (Gandhi-Houde columns over the firm's other
-products and over rivals', plus the two counts; they move Nash markups and not costs), and the within-id first
+products and over rivals', plus the two counts, optionally ``rival_distances`` in characteristic space; they move
+Nash markups and not costs), and the within-id first
 differences ``within_differences`` / ``difference_instruments``, which write E[dz dr] = 0 as a levels moment Z_d' r so
 the IV and supply blocks apply unchanged.
 """
@@ -23,7 +24,7 @@ from .linear import matrix_rank
 
 __all__ = ["standardise", "keep_rank", "drop_collinear_columns", "drop_collinear", "pyblp_frame", "blp_sums",
            "gh_instruments", "excluded_instruments", "first_stage_table", "firm_product_counts", "markup_shifters",
-           "within_differences", "difference_instruments"]
+           "rival_distances", "within_differences", "difference_instruments"]
 
 
 def standardise(A: np.ndarray) -> np.ndarray:
@@ -141,12 +142,47 @@ def firm_product_counts(market_ids: np.ndarray, firm_ids: np.ndarray) -> np.ndar
     return np.column_stack([n_firm - 1, n_market - n_firm]).astype(float)
 
 
-def markup_shifters(products: pd.DataFrame, characteristics: Sequence[str], version: str = "local"
-                    ) -> tuple[np.ndarray, list[str]]:
-    """markup_shifters(products, characteristics, version="local") -> ((n, 2K + 2), names): excluded supply instruments
-    that move Nash markups and not costs. ``gh_instruments`` of the K ``characteristics`` over the firm's other products
-    (``own_<x>``) and over rivals' products (``rival_<x>``), then the counts of the firm's other products
-    (``own_products``) and of rivals' products (``rival_products``). Unscaled."""
+#: the columns of ``rival_distances``
+RIVAL_DISTANCE_NAMES = ("rival_distance_1", "rival_distance_2", "rival_products_within_median")
+
+
+def rival_distances(products: pd.DataFrame, characteristics: Sequence[str]) -> tuple[np.ndarray, list[str]]:
+    """rival_distances(products, characteristics) -> ((n, 3), names): per product, the Euclidean distance in
+    characteristic space to the nearest and to the second-nearest product of another firm in its market, and the number
+    of rival products within the median nearest-rival distance (the median over every product). Each characteristic is
+    standardised over the pooled products (``standardise``); a column with no variation is dropped. Characteristics
+    only: prices are set in the same equilibrium, so a distance in price would be endogenous. Raises ValueError when a
+    product has fewer than two rival products in its market."""
+    X = np.column_stack([products[c].to_numpy(float) for c in characteristics])
+    X = standardise(X[:, X.std(axis=0) > 0])
+    market = products["market_ids"].to_numpy()
+    firm = products["firm_ids"].to_numpy()
+    n = len(products)
+    d1, d2 = np.empty(n), np.empty(n)
+    dists: list[tuple[np.ndarray, np.ndarray]] = []
+    for m in np.unique(market):
+        rows = np.flatnonzero(market == m)
+        D = np.sqrt(((X[rows, None, :] - X[None, rows, :]) ** 2).sum(axis=2))
+        D[firm[rows][:, None] == firm[rows][None, :]] = np.inf   # the firm's own products are not rivals
+        near = np.sort(D, axis=1)[:, :2]
+        if not np.all(np.isfinite(near)):
+            raise ValueError(f"market {m}: a product has fewer than two rival products")
+        d1[rows], d2[rows] = near[:, 0], near[:, 1]
+        dists.append((rows, D))
+    cut = float(np.median(d1))
+    within = np.empty(n)
+    for rows, D in dists:
+        within[rows] = (D <= cut).sum(axis=1)
+    return np.column_stack([d1, d2, within]), list(RIVAL_DISTANCE_NAMES)
+
+
+def markup_shifters(products: pd.DataFrame, characteristics: Sequence[str], version: str = "local",
+                    distance_characteristics: Sequence[str] = ()) -> tuple[np.ndarray, list[str]]:
+    """markup_shifters(products, characteristics, version="local", distance_characteristics=()) -> ((n, 2K + 2 [+ 3]),
+    names): excluded supply instruments that move Nash markups and not costs. ``gh_instruments`` of the K
+    ``characteristics`` over the firm's other products (``own_<x>``) and over rivals' products (``rival_<x>``), then the
+    counts of the firm's other products (``own_products``) and of rivals' products (``rival_products``), then, when
+    ``distance_characteristics`` is given, the three ``rival_distances`` columns in that space. Unscaled."""
     characteristics = list(characteristics)
     if not characteristics:
         raise ValueError("markup_shifters needs at least one characteristic")
@@ -154,7 +190,10 @@ def markup_shifters(products: pd.DataFrame, characteristics: Sequence[str], vers
     names = ([f"own_{c}" for c in characteristics] + [f"rival_{c}" for c in characteristics]
              + ["own_products", "rival_products"])
     counts = firm_product_counts(products["market_ids"].to_numpy(), products["firm_ids"].to_numpy())
-    return np.column_stack([gh, counts]), names
+    if not distance_characteristics:
+        return np.column_stack([gh, counts]), names
+    dist, dnames = rival_distances(products, distance_characteristics)
+    return np.column_stack([gh, counts, dist]), names + dnames
 
 
 def within_differences(ids: np.ndarray, periods: np.ndarray, max_gap: int = 1) -> tuple[np.ndarray, np.ndarray]:

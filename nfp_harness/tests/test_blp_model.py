@@ -479,3 +479,26 @@ def _gmy_blp():
         sys.modules[name] = mod
         spec.loader.exec_module(mod)
     return sys.modules[name]
+
+
+def test_same_moments_without_a_product_level_block_scores_gmys_fixed_weight() -> None:
+    """estimate_blp.py same-moments on ``gmy_nolinear`` (micro and second-choice blocks only): the problem keeps W1
+    (no joint CUE, which needs an aggregate block), so q is sum (data - model)^2 / variance over the micro rows plus
+    30^2 sum (data - model)^2 over the second-choice rows, df = rows - free parameters, and the supply-side fields
+    are left out."""
+    blp = _gmy_blp()
+    prob, spec, design = blp.same_moments_problem(4, households=200, years=(1991, 1999), moments="gmy_nolinear")
+    try:
+        assert prob.agg is None and prob.supply is None
+        out = blp.same_moments_evaluate(prob, prob.layout.starts())
+    finally:
+        prob.model.close()
+    assert out["status"] == "ok"
+    mic = spec.micro_moment()[0]
+    q_micro = sum((r["model"] - r["data"]) ** 2 / v for r, v in zip(out["micro"], mic.variances))
+    q_sc = sum((blp.SC_WEIGHT * (r["model"] - r["data"])) ** 2 for r in out["second_choice"])
+    assert out["q_blocks"]["micro_gmy"] == pytest.approx(q_micro, rel=1e-10)
+    assert out["q_blocks"]["second_choice"] == pytest.approx(q_sc, rel=1e-10)
+    assert out["q_cue"] == pytest.approx(q_micro + q_sc, rel=1e-10)
+    assert out["df"] == len(out["micro"]) + len(out["second_choice"]) - prob.layout.n_free()
+    assert "lerner_median" not in out

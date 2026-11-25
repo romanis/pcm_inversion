@@ -79,3 +79,21 @@ def test_evaluator_checks_shapes() -> None:
         ev([np.ones((2, 3))])
     with pytest.raises(ValueError, match="expected"):
         ev([np.ones((2, 3)), np.ones((2, 2))])
+
+
+def test_mean_rows() -> None:
+    """A ``mean`` row is E[x | buy, set a] alone: its char is mapped, set b repeats set a, and its value is the set-a
+    side of the matching ``diff`` row."""
+    rows = micro().table.to_dict("records") + [
+        {"name": "Size inc2", "survey": "s1", "char": "Size", "kind": "mean", "demographic": "inc", "a": 2, "b": 2,
+         "value": 0.3, "variance": 0.01},
+        {"name": "Size inc1", "survey": "s1", "char": "Size", "kind": "mean", "demographic": "inc", "a": 1, "b": 1,
+         "value": 0.3, "variance": 0.01}]
+    m = MicroMoments(pd.DataFrame(rows))
+    assert group_moment_rows(m, CHAR_MAP)[3:] == [("mean", "size", "s1_inc_2", "s1_inc_2"),
+                                                  ("mean", "size", "s1_inc_1", "s1_inc_1")]
+    rng = np.random.default_rng(1)
+    P = [rng.uniform(0.05, 0.3, size=(2, 3)), rng.uniform(0.05, 0.3, size=(3, 2))]
+    got = MicroMomentEvaluator(products(), agents(), m, CHAR_MAP)(P)
+    np.testing.assert_array_equal(got[:3], MicroMomentEvaluator(products(), agents(), micro(), CHAR_MAP)(P))
+    assert got[3] - got[4] == pytest.approx(got[1], rel=1e-14, abs=1e-15)

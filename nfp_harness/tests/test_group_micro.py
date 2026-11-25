@@ -254,3 +254,40 @@ def test_gmy_rows_reproduce_the_logit_evaluator() -> None:
                                     outputs={GROUP_OUTPUTS: entries}))
     assert got.shape == (33,)
     np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-14)
+
+
+def test_mean_rows_values_and_jacobian() -> None:
+    """``mean`` rows (E[x | buy, set]): the difference of two of them is the matching ``diff`` row, and their Jacobian
+    in delta and theta matches central differences."""
+    model, delta, data = model_at()
+    lay = layout()
+    theta = lay.starts()
+    rows = [GroupMomentRow("mean", "prices", "A", "A"), GroupMomentRow("mean", "prices", "B", "B"),
+            GroupMomentRow("mean", "x1", "notA", "notA"), GroupMomentRow("diff", "prices", "A", "B")]
+    g = GroupMicroMoments("micro_m", MicroDataset("survey", 1), rows, np.zeros(4), np.full(4, 1e-3))
+    g.bind(model.markets, model.n_products, model.P)
+    g.bind_agents(data["agents"], [model.market_draws(t)["agent_rows"] for t in range(model.T)])
+    val, dd, dt = g.moments(solution(model, delta, theta, True), True)
+    assert dd is not None and dt is not None
+    assert val[0] - val[1] == pytest.approx(val[3], rel=1e-13)
+    want = hand_values(model, delta, theta, data)
+    assert val[3] == pytest.approx(want[0], rel=1e-12)
+    h = 1e-6
+    for j in model.markets[0].rows[[0, 5]].tolist() + model.markets[1].rows[[3, 10]].tolist():
+        e = np.zeros_like(delta)
+        e[j] = h
+        fd = (g.predicted(solution(model, delta + e, theta, False))
+              - g.predicted(solution(model, delta - e, theta, False))) / (2 * h)
+        np.testing.assert_allclose(dd[:, j], fd, rtol=1e-6, atol=1e-8)
+    for k in range(lay.P):
+        if lay.names[k] == "a_lo":
+            continue
+        e = np.zeros_like(theta)
+        e[k] = h
+        fd = (g.predicted(solution(model, delta, theta + e, False))
+              - g.predicted(solution(model, delta, theta - e, False))) / (2 * h)
+        np.testing.assert_allclose(dt[:, k], fd, rtol=1e-6, atol=1e-8)
+    with pytest.raises(ValueError, match="bad row"):
+        GroupMicroMoments("x", MicroDataset("survey", 1), [GroupMomentRow("mean", None, "A", "A")], np.zeros(1),
+                          np.ones(1))
+    model.close()

@@ -2,10 +2,10 @@
 
 A micro-moment table has one row per moment: ``name``, ``survey`` (a 0/1 agent column: the household is in that
 survey's sample), ``char`` (the data label of the characteristic), ``kind`` ("diff": E[x | set a] - E[x | set b];
-"ratio": P(buy | a) / P(buy | b)), ``demographic`` (the agent column defining the sets), ``a`` and ``b`` (its levels),
-``value`` and ``variance``. A household set is the households with ``demographic == level`` and ``survey == 1``; its
-0/1 agent column is named by ``set_column``. ``char_map`` maps a data label to the product column of the model
-counterpart.
+"mean": E[x | set a], with ``b`` equal to ``a``; "ratio": P(buy | a) / P(buy | b)), ``demographic`` (the agent column
+defining the sets), ``a`` and ``b`` (its levels), ``value`` and ``variance``. A household set is the households with
+``demographic == level`` and ``survey == 1``; its 0/1 agent column is named by ``set_column``. ``char_map`` maps a data
+label to the product column of the model counterpart.
 
 The model counterpart of E[x | H] is the household-weighted mean over the households in H (pooled over the markets,
 each market's weights summing to 1) of that household's expected x given a purchase: ``MicroMomentEvaluator``. This is
@@ -66,7 +66,7 @@ def group_moment_rows(micro: MicroMoments, char_map: Mapping[str, str]) -> list[
     of ``moments.GroupMomentRow``."""
     out = []
     for r in micro.table.itertuples():
-        char = char_map[r.char] if r.kind == "diff" else None
+        char = char_map[r.char] if r.kind != "ratio" else None
         out.append((r.kind, char, set_column(r.survey, r.demographic, r.a), set_column(r.survey, r.demographic, r.b)))
     return out
 
@@ -77,8 +77,8 @@ class MicroMomentEvaluator:
     ``probabilities[t]`` is the (J_t, H_t) purchase probability matrix of the t-th market in sorted market order, rows
     in ``products`` order within the market, columns in ``agents`` order within the market. For a "diff" row each
     household's expected x given a purchase, sum_j x_j P_jh / sum_j P_jh, is averaged with the household weights over
-    the households of set a (and of set b), pooled across markets. For a "ratio" row the household's purchase
-    probability sum_j P_jh is averaged the same way.
+    the households of set a and of set b, pooled across markets (a "mean" row: set a only). For a "ratio" row the
+    household's purchase probability sum_j P_jh is averaged the same way.
     """
 
     def __init__(self, products: pd.DataFrame, agents: pd.DataFrame, micro: MicroMoments,
@@ -101,7 +101,7 @@ class MicroMomentEvaluator:
                 pair.append(np.concatenate(vec))
             self.sides.append((pair[0], pair[1]))
         self.kind = micro.table.kind.to_numpy()
-        self.col = [chars.index(char_map[c]) if k == "diff" else -1
+        self.col = [chars.index(char_map[c]) if k != "ratio" else -1
                     for c, k in zip(micro.table.char, micro.table.kind)]
 
     def __call__(self, probabilities: Sequence[np.ndarray]) -> np.ndarray:
@@ -121,7 +121,7 @@ class MicroMomentEvaluator:
         for k, (wa, wb) in enumerate(self.sides):
             v = S if self.kind[k] == "ratio" else X[self.col[k]]
             a, b = (wa @ v) / wa.sum(), (wb @ v) / wb.sum()
-            out[k] = a / b if self.kind[k] == "ratio" else a - b
+            out[k] = a / b if self.kind[k] == "ratio" else a if self.kind[k] == "mean" else a - b
         return out
 
 
