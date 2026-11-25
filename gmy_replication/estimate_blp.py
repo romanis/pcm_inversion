@@ -390,7 +390,8 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
     moment blocks of the PCM's ``--moments <moments> --weighting joint_cue [--drop-block ...]`` problem
     (``GMYSpec.moment_blocks``): the same products (twins merged, shares below 1e-5 dropped, price ties spread), the
     same households and ownership coding, the same X1 and Z, micro weight diag(1 / variance), second choices x 30, and
-    ``set_joint("cue")``. Taste draws are GMY's Latin hypercube normals, one per household and market
+    ``set_joint("cue")`` (a set with no product-level block, e.g. ``gmy_nolinear``, keeps the fixed weight W1 of its
+    micro and second-choice blocks, GMY's step-1 objective). Taste draws are GMY's Latin hypercube normals, one per household and market
     (estimation.m), seed + market position.
 
     ``utility``: ``gmy`` is GMY's spec 6 with alpha the first nonlinear parameter (a pattern term on price with a
@@ -449,7 +450,10 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
     layout = ParameterLayout([ParameterSpec(n, "taste", None, None, float(np.clip(v, l_, h)), float(l_), float(h),
                                             unit=1.0) for n, v, l_, h in zip(names, start, lo, hi)])
     prob = NFPGMMProblem(model, ms, spec.linear_for("all"), layout, max_step=False)
-    prob.set_joint("cue")
+    if prob.agg is not None:
+        prob.set_joint("cue")
+    else:   # no product-level block (e.g. gmy_nolinear, GMY's step 1): every block has a fixed covariance, W = W1
+        prob.set_weighting(prob.initial_weighting(layout.starts()))
     design.update(moments=moments, drop_blocks=list(spec.drop_blocks), fd_max_gap=int(fd_max_gap),
                   cost_shifters=cost_shifters)
     if alo_moments != "off":   # only when set, so the design of an earlier run is unchanged
@@ -459,7 +463,9 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
 
 def same_moments_evaluate(prob: Any, theta: np.ndarray) -> dict[str, Any]:
     """q_CUE, its blocks, Hansen J and the economics of the mixed logit at theta (no Jacobian): every moment row
-    (data and model) of the micro and second-choice blocks, Lerner indices and own elasticities by year and segment."""
+    (data and model) of the micro and second-choice blocks, Lerner indices and own elasticities by year and segment.
+    A problem with no product-level block (``same_moments_problem`` on e.g. ``gmy_nolinear``) is scored with its fixed
+    W, and without a supply block the Lerner and elasticity fields are left out."""
     from scipy.stats import chi2
 
     from nfp_harness.weighting import weight_from_covariance
@@ -467,14 +473,34 @@ def same_moments_evaluate(prob: Any, theta: np.ndarray) -> dict[str, Any]:
     ev = prob.evaluate(np.asarray(theta, dtype=float), need_jacobian=False)
     if not ev.ok:
         return {"status": ev.status.value, "note": ev.aux.get("note")}
-    W = weight_from_covariance(prob.covariance(ev))
-    q = float(prob.n * ev.g @ W @ ev.g)
+    if ev.aux.get("joint") is not None:
+        W = weight_from_covariance(prob.covariance(ev))
+        q = float(prob.n * ev.g @ W @ ev.g)
+    else:   # no product-level block: the problem's fixed W (same_moments_problem)
+        q = float(ev.aux["q"])
     ident = prob.identification
     df = int(ident["overidentifying"])
     sol = ev.aux["solution"]
-    sup = next(m for m in prob.moments if getattr(m, "is_supply", False))
-    _, _, info = sup.log_costs(sol, False)
     model = prob.model
+    mic = next((m for m in prob.moments if m.name == "micro_gmy"), None)
+    sc = next((m for m in prob.moments if m.name == "second_choice"), None)
+    out = {"status": "ok", "theta": dict(zip(prob.layout.names, map(float, theta))), "q_cue": q,
+           "q_blocks": ev.aux["q_blocks"], "q_blocks_own": ev.aux.get("q_blocks_own", {}),
+           "moments": int(ident["effective_moments"]), "free_nonlinear": int(ident["p_free"]),
+           "linear": int(ident["k_linear"]), "df": df, "J_p_value": float(chi2.sf(q, df)),
+           "price_coefficient_max": max(float(model.price_coefficients(theta, t).max())
+                                        for t in range(len(model.markets))),
+           "micro": [] if mic is None else [
+               {"name": lab, "data": float(d), "model": float(v), "z": float((v - d) / np.sqrt(var))}
+               for lab, d, v, var in zip(mic.labels, mic.values, ev.aux["micro_predicted"]["micro_gmy"],
+                                         mic.variances)],
+           "second_choice": [] if sc is None else [
+               {"row": lab, "data": float(d), "model": float(v)}
+               for lab, d, v in zip(sc.labels, sc.values, ev.aux["micro_predicted"]["second_choice"])]}
+    sup = next((m for m in prob.moments if getattr(m, "is_supply", False)), None)
+    if sup is None:
+        return out
+    _, _, info = sup.log_costs(sol, False)
     lerner, own = np.full(prob.n, np.nan), np.full(prob.n, np.nan)
     mids = np.empty(prob.n, dtype=int)
     for t, m in enumerate(model.markets):
@@ -486,27 +512,12 @@ def same_moments_evaluate(prob: Any, theta: np.ndarray) -> dict[str, Any]:
         mids[r] = int(m.market_id)
     years = [int(m.market_id) for m in model.markets]
     s_all = np.asarray(sol.outputs["shares"])
-    mic = next((m for m in prob.moments if m.name == "micro_gmy"), None)
-    sc = next((m for m in prob.moments if m.name == "second_choice"), None)
-    out = {"status": "ok", "theta": dict(zip(prob.layout.names, map(float, theta))), "q_cue": q,
-           "q_blocks": ev.aux["q_blocks"], "q_blocks_own": ev.aux["q_blocks_own"],
-           "moments": int(ident["effective_moments"]), "free_nonlinear": int(ident["p_free"]),
-           "linear": int(ident["k_linear"]), "df": df, "J_p_value": float(chi2.sf(q, df)),
-           "lerner_median": float(np.nanmedian(lerner)),
-           "lerner_sales_weighted_mean": float(np.nansum(lerner * s_all) / np.sum(s_all[np.isfinite(lerner)])),
-           "lerner_median_by_year": {y: float(np.nanmedian(lerner[mids == y])) for y in years},
-           "own_elasticity_median": float(np.nanmedian(own)),
-           "own_elasticity_median_by_year": {y: float(np.nanmedian(own[mids == y])) for y in years},
-           "share_mc_clipped": float(info.get("share_mc_clipped", float("nan"))),
-           "price_coefficient_max": max(float(model.price_coefficients(theta, t).max())
-                                        for t in range(len(model.markets))),
-           "micro": [] if mic is None else [
-               {"name": lab, "data": float(d), "model": float(v), "z": float((v - d) / np.sqrt(var))}
-               for lab, d, v, var in zip(mic.labels, mic.values, ev.aux["micro_predicted"]["micro_gmy"],
-                                         mic.variances)],
-           "second_choice": [] if sc is None else [
-               {"row": lab, "data": float(d), "model": float(v)}
-               for lab, d, v in zip(sc.labels, sc.values, ev.aux["micro_predicted"]["second_choice"])]}
+    out.update({"lerner_median": float(np.nanmedian(lerner)),
+                "lerner_sales_weighted_mean": float(np.nansum(lerner * s_all) / np.sum(s_all[np.isfinite(lerner)])),
+                "lerner_median_by_year": {y: float(np.nanmedian(lerner[mids == y])) for y in years},
+                "own_elasticity_median": float(np.nanmedian(own)),
+                "own_elasticity_median_by_year": {y: float(np.nanmedian(own[mids == y])) for y in years},
+                "share_mc_clipped": float(info.get("share_mc_clipped", float("nan")))})
     seg = getattr(prob, "segments", None)
     if seg is not None:
         out["lerner_median_by_segment"] = {k: float(np.nanmedian(lerner[seg == k])) for k in np.unique(seg)}

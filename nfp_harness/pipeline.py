@@ -69,6 +69,11 @@ name of a rule in ``weighting.STEP2_RULES``. The prefit and gate concentration W
 W1)`` or, declared, ``spec.concentrate_rows`` up-weighted by ``spec.upweight``; the gate-minimum start's W likewise
 (``start_concentrate_weighting`` / ``start_concentrate_rows``, calibration rows zeroed).
 
+``score --out <file.json>`` (no stage, no run directory) evaluates the problem the spec's options define once at the
+layout's starting theta (``--start-theta``, warm-started from ``--warm-delta``) under the weight its estimation stages
+use there (CUE's S(theta)^-1 under a joint CUE problem, else W1) and writes q, q by block, df and every micro and
+second-choice row (``score``): a fitted theta scored on another moment set without refitting.
+
 ``--stage all`` runs extensive, step1, step2, post and stability in order; a refused stage is reported and the
 chain continues with what it can do (post and stability fall back to the step-1 estimate). When extensive or
 step1 is refused because the gate failed and the spec names a ``fallback_stage``, that stage runs instead. Resume by
@@ -117,7 +122,7 @@ from .types import KernelRequests, OptimizeResult
 from .weighting import CUE, STEP2_RULES, Fixed, TwoStep, bind_calibration, upweight_rows, weight_from_covariance
 
 __all__ = ["Pipeline", "RunConfig", "StageRefused", "GateFailed", "STAGES", "CHAIN", "main", "run_dir_path", "run_key_options",
-           "estimate_columns", "evaluation_record"]
+           "estimate_columns", "evaluation_record", "score"]
 
 log = logging.getLogger("nfp_harness.pipeline")
 
@@ -199,6 +204,69 @@ def evaluation_record(problem: Any, ev: Any, data_shares: np.ndarray) -> list[di
         pm["products_inverted"] = int(np.sum(np.isfinite(delta[rows])))
         out.append(pm)
     return out
+
+
+def score(spec: Any, nu: int, seed: int = 0, threads: int | None = None, moments: str = "all") -> dict[str, Any]:
+    """Score the spec's problem of moment set ``moments`` at the layout's starting theta (``--start-theta``) without
+    estimating: one evaluation (no Jacobian, no optimizer step, no run directory), the model warm-started as the
+    spec builds it (``--warm-delta``). The weight is the one the estimation stages put on that problem: CUE's
+    S(theta)^-1 on the product-level blocks of a ``set_joint("cue")`` problem (the cue stage's q; the micro and
+    second-choice blocks at the inverses of their fixed covariances), else W1 = ``initial_weighting(theta)`` with the
+    calibration rows bound as the stages bind them. Returns q, q by block (``q_blocks``; ``q_blocks_own`` under a
+    joint weighting), the rows per block, the moment and parameter counts, df = effective moments - free nonlinear -
+    linear parameters, the J p-value against it, and every micro and second-choice row (data, model)."""
+    import time
+
+    from scipy.stats import chi2
+
+    problem = spec.build_problem(nu, seed, threads, moments)
+    try:
+        theta = np.asarray(problem.layout.starts(), dtype=float)
+        cue = (getattr(problem, "_jointcfg", None) or {}).get("mode") == "cue"
+        if cue:
+            weight = "CUE: S(theta)^-1 on the product-level blocks, the fixed covariances' inverses on the others"
+        else:
+            hook = getattr(spec, "binding_weighting", None)
+            W1 = problem.initial_weighting(theta)
+            problem.set_weighting(bind_calibration(problem, W1) if hook is None
+                                  else np.asarray(hook(problem, W1), dtype=float))
+            weight = "W1 = initial_weighting(theta): the fixed blocks at the inverses of their fixed covariances"
+        t0 = time.perf_counter()
+        ev = problem.evaluate(theta, need_jacobian=False)
+        ident = dict(problem.identification)
+        out: dict[str, Any] = {"status": ev.status.value, "theta": dict(zip(problem.layout.names, map(float, theta))),
+                               "free": [n for n, s in zip(problem.layout.names, problem.layout.specs) if s.free],
+                               "nu": int(nu), "seed": int(seed), "moment_set": moments, "weight": weight,
+                               "block_rows": {b: int(s.stop - s.start) for b, s in problem.blocks.items()},
+                               "moments": int(ident["effective_moments"]), "free_nonlinear": int(ident["p_free"]),
+                               "linear": int(ident["k_linear"]), "df": int(ident["overidentifying"]),
+                               "identification": ident, "seconds": time.perf_counter() - t0}
+        mk = getattr(problem.model, "_mk", None)
+        if mk is not None:
+            out["draws_per_market"] = [int(m.R) for m in mk]
+        if not ev.ok:
+            out["note"] = ev.aux.get("note")
+            return out
+        q = float(ev.aux["q"])
+        out.update(q=q, q_blocks=dict(ev.aux["q_blocks"]),
+                   J_p_value=float(chi2.sf(q, out["df"])) if out["df"] > 0 else float("nan"))
+        if "q_blocks_own" in ev.aux:
+            out["q_blocks_own"] = dict(ev.aux["q_blocks_own"])
+        rows: dict[str, list[dict[str, Any]]] = {}
+        for m in problem.moments:
+            pred = ev.aux["micro_predicted"].get(m.name)
+            if pred is None:
+                continue
+            data = ev.aux["micro_data"][m.name]
+            labels = list(getattr(m, "labels", None) or range(len(pred)))
+            rows[m.name] = [{"row": str(lab), "data": float(d), "model": float(v)}
+                            for lab, d, v in zip(labels, data, pred)]
+        out["rows"] = rows
+        return out
+    finally:
+        close = getattr(problem.model, "close", None)
+        if close is not None:
+            close()
 
 
 def _block_diagonal_like(W: np.ndarray, blocks: dict[str, slice],
@@ -1141,11 +1209,16 @@ class Pipeline:
 def _parser(default_nu: int, default_base: pathlib.Path, spec: Any = None) -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Staged NFP-GMM estimation (nfp_harness.pipeline).")
     sub = ap.add_subparsers(dest="command", required=True)
-    for name in ("run", "status"):
+    for name in ("run", "status", "score"):
         p = sub.add_parser(name)
         p.add_argument("--nu", type=int, default=default_nu, help="draws per agent (draws per market = next power of two)")
         p.add_argument("--seed", type=int, default=0)
         p.add_argument("--results", type=pathlib.Path, default=default_base, help="base directory of run directories")
+        if name == "score":
+            p.add_argument("--out", type=pathlib.Path, required=True,
+                           help="JSON file of the score (q, q by block, df, rows) at the --start-theta theta; no run "
+                                "directory is written")
+            p.add_argument("--threads", type=int, default=None, help="OpenMP threads in total (default all cores)")
         if name == "run":
             p.add_argument("--stage", required=True, choices=STAGES + ("all",))
             p.add_argument("--gate-nu", type=int, default=4, help="nu of the gate run that step1 requires")
@@ -1164,15 +1237,40 @@ def _parser(default_nu: int, default_base: pathlib.Path, spec: Any = None) -> ar
     return ap
 
 
+def _score_main(spec: Any, args: argparse.Namespace, argv: Sequence[str]) -> int:
+    """``score``: ``score(...)`` at --nu, --seed and --threads, written to --out; crash dumps next to it
+    (``<out stem>.crash/``)."""
+    out = args.out.resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    logger = runtime.setup_logging(out.with_suffix(".log"))
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in logger.handlers):
+        h = logging.StreamHandler(sys.stdout)
+        h.setFormatter(logging.Formatter("%(asctime)s %(name)s: %(message)s", "%H:%M:%S"))
+        logger.addHandler(h)
+    runtime.check_environment()
+    runtime.enable_crash_dumps(out.parent / f"{out.stem}.crash")
+    log.info("command: %s", " ".join([sys.executable, sys.argv[0], *argv]))
+    rec = score(spec, args.nu, args.seed, args.threads)
+    rec.update(command=[sys.executable, sys.argv[0], *argv], code_commit=code_commit(),
+               run_key=run_key_options(args.nu, args.seed, spec_run_key(spec)))
+    atomic_write(out, json.dumps(to_jsonable(rec), indent=1).encode())
+    log.info("score: %s, q %s, df %s (%s); wrote %s", rec["status"], rec.get("q"), rec["df"], rec["q_blocks"]
+             if "q_blocks" in rec else rec.get("note"), out)
+    return 0 if rec["status"] == "ok" else 6
+
+
 def main(spec: Any, argv: Sequence[str] | None = None, default_nu: int = 16,
          default_base: str | pathlib.Path = "results") -> int:
-    """main(spec, argv=None) -> exit status. ``run --stage <s> [--nu N] [--detach] [--new-run]`` and ``status``."""
+    """main(spec, argv=None) -> exit status. ``run --stage <s> [--nu N] [--detach] [--new-run]``, ``status`` and
+    ``score --out <file.json>`` (``score``: the problem at --start-theta, evaluated once with its stages' weight)."""
     argv = list(sys.argv[1:] if argv is None else argv)
     args = _parser(default_nu, pathlib.Path(default_base), spec).parse_args(argv)
     configure = getattr(spec, "configure", None)
     if callable(configure):
         configure(args)
     cfg_base = args.results.resolve()
+    if args.command == "score":
+        return _score_main(spec, args, argv)
     if args.command == "status":
         path = run_dir_path(cfg_base, spec, args.nu, args.seed)
         print(json.dumps(runtime.status(path), indent=1, default=str))
