@@ -216,7 +216,10 @@ class GMYLogit:
         return NFPGMMProblem(self.model, ms, LinearIV(np.ones((n, 1)), np.ones((n, 1))), layout, max_step=False)
 
 
-def fit_step1(model: GMYLogit, theta0: np.ndarray, max_nfev: int) -> tuple[np.ndarray, dict]:
+def fit_step1(model: GMYLogit, theta0: np.ndarray, max_nfev: int, ftol: float = 1e-9, xtol: float = 1e-10,
+              jac: str = "2-point", diff_step: float = 1e-6, rounds: int = 1) -> tuple[np.ndarray, dict]:
+    """lsqnonlin step 1. The defaults are estimation.m's options; ``rounds`` > 1 restarts least squares from its own
+    result (a fresh Jacobian and trust region) until q stops falling by more than 1e-6 or the rounds run out."""
     t0 = time.time()
     best = {"q": np.inf}
 
@@ -231,10 +234,22 @@ def fit_step1(model: GMYLogit, theta0: np.ndarray, max_nfev: int) -> tuple[np.nd
         return r
 
     # lsqnonlin with forward differences of step 1e-6 (estimation.m options)
-    res = least_squares(fun, theta0, bounds=(LOWER, UPPER), method="trf", diff_step=1e-6, jac="2-point",
-                        max_nfev=max_nfev, ftol=1e-9, xtol=1e-10, gtol=1e-8, verbose=0)
-    return res.x, {"status": int(res.status), "message": res.message, "nfev": int(res.nfev),
-                   "q": float(2 * res.cost), "optimality": float(res.optimality), "seconds": time.time() - t0}
+    x, hist = np.clip(theta0, LOWER, UPPER), []
+    for _ in range(max(1, rounds)):
+        res = least_squares(fun, x, bounds=(LOWER, UPPER), method="trf", diff_step=diff_step, jac=jac,
+                            max_nfev=max_nfev, ftol=ftol, xtol=xtol, gtol=1e-8, verbose=0)
+        hist.append({"status": int(res.status), "message": res.message, "nfev": int(res.nfev),
+                     "q": float(2 * res.cost), "optimality": float(res.optimality)})
+        log.info("least_squares round %d: q %.6f, %s, optimality %.3g", len(hist), hist[-1]["q"], res.message,
+                 res.optimality)
+        gain = (hist[-2]["q"] if len(hist) > 1 else np.inf) - hist[-1]["q"]
+        x = res.x
+        if gain <= 1e-6:
+            break
+    out = dict(hist[-1], seconds=time.time() - t0)
+    if rounds > 1:
+        out["rounds"] = hist
+    return x, out
 
 
 # ---------------------------------------------------------------- step 2 and post-estimation in pyblp
@@ -694,12 +709,18 @@ def main() -> None:
     ap.add_argument("--fd-max-gap", type=int, default=1, help="same-moments: as the PCM's --fd-max-gap")
     ap.add_argument("--start-theta", default=None,
                     help="same-moments: named starts (a harness stage .npz, e.g. the PCM's, for pcm_matched; a "
-                         "same-moments JSON)")
+                         "same-moments JSON); fit: a fit JSON whose theta replaces Table 4's")
     ap.add_argument("--cost-shifters", choices=gmy_pcm.COST_SHIFTER_MODES, default="excluded",
                     help="same-moments: as the PCM's --cost-shifters")
     ap.add_argument("--alo-moments", choices=gmy_pcm.ALO_MOMENT_MODES, default="off",
                     help="same-moments: as the PCM's --alo-moments (c4c6c needs --cost-shifters in_cost)")
     ap.add_argument("--tag", default="", help="suffix of the output names (default none)")
+    ap.add_argument("--ftol", type=float, default=1e-9, help="fit: least_squares ftol (default estimation.m's)")
+    ap.add_argument("--xtol", type=float, default=1e-10, help="fit: least_squares xtol")
+    ap.add_argument("--jac", choices=("2-point", "3-point"), default="2-point", help="fit: finite-difference scheme")
+    ap.add_argument("--diff-step", type=float, default=1e-6, help="fit: relative finite-difference step")
+    ap.add_argument("--rounds", type=int, default=1,
+                    help="fit: restart least squares from its result up to this many times while q falls")
     ap.add_argument("--counterfactuals", action="store_true",
                     help="published / fit: also run the shared counterfactuals at the estimate (off by default, so "
                          "the outputs of a plain run are unchanged); same-moments with --max-nfev 0: run them at the "
@@ -726,7 +747,13 @@ def main() -> None:
     log.info("q at Table 4 theta %.4f (%.1fs)", float(r0 @ r0), time.time() - t0)
     fit = None
     if args.stage == "fit":
-        theta, fit = fit_step1(model, theta, args.max_nfev)
+        st = _start_theta(args.start_theta)
+        if st:   # named starts (a fit JSON); names it lacks stay at Table 4
+            theta = np.array([st.get(n.replace(" ", "_"), v) for n, v in zip(NAMES, TABLE4_THETA)])
+            rs = model.residuals(theta, commit=True)
+            log.info("start from %s: q %.4f", args.start_theta, float(rs @ rs))
+        theta, fit = fit_step1(model, theta, args.max_nfev, ftol=args.ftol, xtol=args.xtol, jac=args.jac,
+                               diff_step=args.diff_step, rounds=args.rounds)
         log.info("step 1: %s", fit)
     m = model.moments(theta, commit=True)
     r = model.residuals(theta)
