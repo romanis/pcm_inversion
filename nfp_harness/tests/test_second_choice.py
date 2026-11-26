@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from nfp_harness.second_choice import first_second_correlations, inside_mass_without, logit_second_choice_matrix
 
@@ -60,3 +61,21 @@ def test_logit_matrix_when_one_product_holds_almost_all_inside_mass():
     rest = inside_mass_without(P)
     assert np.isclose(rest[0, 0], 2e-13, rtol=1e-12, atol=0)
     assert np.allclose(rest[1:, 0], 1.0 - 1e-13, rtol=1e-15, atol=0)
+
+
+def test_group_flows_by_hand() -> None:
+    """Three products in groups a, a, b: the joint law (s / S) C summed by group, rows conditioned on the first's group,
+    P(same group) on the diagonal and the independence benchmark from the two marginals."""
+    from nfp_harness.second_choice import group_flows, joint_law
+
+    s = np.array([0.2, 0.2, 0.4])
+    C = np.array([[0.0, 0.5, 0.5], [1.0, 0.0, 0.0], [0.25, 0.75, 0.0]])
+    pi = joint_law(s, C)
+    np.testing.assert_allclose(pi, np.array([[0.0, 0.125, 0.125], [0.25, 0.0, 0.0], [0.125, 0.375, 0.0]]))
+    F, same, ind = group_flows(s, C, np.array(["a", "a", "b"]), ["a", "b", "c"])
+    np.testing.assert_allclose(F[:2], [[0.75, 0.25, 0.0], [1.0, 0.0, 0.0]])
+    assert np.isnan(F[2]).all()
+    assert same == pytest.approx(0.375)
+    assert ind == pytest.approx(0.5 * 0.875 + 0.5 * 0.125)
+    with pytest.raises(ValueError):
+        group_flows(s, C, np.array(["a", "a", "z"]), ["a", "b"])

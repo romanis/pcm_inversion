@@ -536,3 +536,13 @@ def test_at_bound_exempts_zero_taste_spread() -> None:
     ]
     theta = np.array([0.0, -4.0, 0.0])
     assert at_bound_parameters(theta, specs, np.ones(3)) == ["phi_high", "pi_mi"]
+
+
+def test_scale_direction_takes_spreads_and_signed_loadings() -> None:
+    """The utility-scale direction moves sigma_p up and every spread and factor loading (lambda_*, with its sign) down
+    in proportion, in natural units; other parameters stay."""
+    from nfp_harness.diagnostics.identification import scale_direction
+
+    names = ["sigma_p", "sigma_x", "lambda_g_f1", "lambda_h_f1", "pi_x_d"]
+    d = scale_direction(names, np.array([2.0, 0.4, 0.3, -0.2, 0.7]), np.array([0.25, 0.1, 0.1, 0.1, 0.1]))
+    np.testing.assert_allclose(d, [8.0, -4.0, -3.0, 2.0, 0.0])

@@ -51,6 +51,14 @@ gradient stayed flat while phi_age deepened and thinned the frontiers; a taste i
 ``--robustness no_age_taste`` keeps the round-2 layout. ``--prefit-rows age`` fits phi_age and the age tastes on the 8
 age-price rows alone (a check of the age channel).
 
+Horizontal make-group taste (``--horizontal``, default off, which changes nothing): ``groups`` (H1) adds taste spreads
+on the Japanese-make and premium-make dummies (sigma_regionJP, sigma_premium_make, start 0.5); ``factor`` (H2) adds a
+rank-K latent factor u_ij += sum_k lambda_{g(j),k} eta_ik, eta_ik iid N(0, 1), on 7 make groups (region x premium,
+Korea pooled; ``make_group``), US mass makes the reference (no loading), and the loadings of the K anchor groups
+(FACTOR_ANCHORS) lower triangular with a non-negative diagonal (``--factor-k``, default 2: 11 loadings).
+The new taste draws are their own scrambled Sobol set (``PCMModel`` draw_blocks), so the existing 14 dimensions keep
+their draws bit for bit. Twins are merged on the new columns too (they split none).
+
 Starting theta: every taste and pi of the BLP fit (results/blp_fit_h1000.json) divided by the median |alpha_i|, phi at 0
 (the BLP law sits in c_i), sigma_p 2.5. Data: same-firm exact twins merged (same price and x, shares summed; the
 second-choice matrices merged likewise), remaining price ties spread to a $10 gap. Consumers: 1,000 CPS households per
@@ -113,7 +121,7 @@ from nfp_harness.diagnostics import at_bound_parameters  # noqa: E402
 from nfp_harness.diagnostics.identification import identification_summary  # noqa: E402
 from nfp_harness.instruments import drop_collinear, drop_collinear_columns, keep_rank, standardise  # noqa: E402
 from nfp_harness.models import pcm_post as pp  # noqa: E402
-from nfp_harness.models.pcm import PCMSpec  # noqa: E402
+from nfp_harness.models.pcm import DRAW_BLOCK_SEED_STEP, PCMSpec  # noqa: E402
 from nfp_harness.instruments import difference_instruments, markup_shifters, within_differences  # noqa: E402
 from nfp_harness.moments import (CostEvent, DifferenceIVMoments, DifferenceSarganIVMoments,  # noqa: E402
                                  EventCostContinuityMoments, GroupMicroMoments, GroupMomentRow, IVMoments,
@@ -121,7 +129,7 @@ from nfp_harness.moments import (CostEvent, DifferenceIVMoments, DifferenceSarga
 from nfp_harness.paper import PaperSpec  # noqa: E402
 from nfp_harness.params import ParameterLayout, ParameterSpec  # noqa: E402
 from nfp_harness.profile import NotMonotoneDecreasing  # noqa: E402
-from nfp_harness.second_choice import first_second_correlations  # noqa: E402
+from nfp_harness.second_choice import first_second_correlations, group_flows  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
 RESULTS = HERE / "results"
@@ -151,6 +159,32 @@ UNOBS = ("van", "suv", "truck", "z_log_footprint", "z_log_hp", "z_log_mpg", "lux
 #: PCM extension (round 1, deviation D7): taste spreads on three of GMY's X1 columns outside the second-choice set
 EXTRA_SPREADS = ("z_log_height", "z_log_curbweight", "z_log_number_trims")
 EXTRA_SPREAD_START = 0.5   # round 2 (1.0 in round 1)
+#: --horizontal: off (default), groups (H1: spreads on HORIZONTAL_SPREADS) or factor (H2: a rank-K factor on make groups)
+HORIZONTAL_MODES = ("off", "groups", "factor")
+HORIZONTAL_SPREADS = ("regionJP", "premium_make")
+HORIZONTAL_SPREAD_START = 0.5
+#: H2's make groups (``make_group``, region x premium with Korea pooled): the reference group has no loading column,
+#: every other group a 0/1 column hg_<group>
+FACTOR_REFERENCE = "us_mass"
+FACTOR_GROUPS = ("us_prem", "jp_mass", "jp_prem", "kr", "eu_mass", "eu_prem")
+MAKE_GROUPS = (FACTOR_REFERENCE,) + FACTOR_GROUPS
+#: the triangular order of the loadings: with K factors the first K groups' rows of Lambda are lower triangular
+FACTOR_ORDER = ("jp_mass", "eu_prem", "us_prem", "jp_prem", "kr", "eu_mass")
+FACTOR_K_CHOICES = (1, 2, 3)
+FACTOR_K_DEFAULT = 2
+#: K -> the group of each factor's sign anchor (loading >= 0); lambda_{anchor_j, k} = 0 for j < k. K = 1 anchors on
+#: eu_prem, which its start (the prestige vector) loads, instead of jp_mass, which it does not
+FACTOR_ANCHORS = {1: ("eu_prem",), 2: FACTOR_ORDER[:2], 3: FACTOR_ORDER[:3]}
+#: K -> per factor, the groups whose loading starts at FACTOR_LOADING_START (the others at 0): nationality (Japanese
+#: makes), prestige (the premium groups), then Korea
+FACTOR_START = {1: (("us_prem", "jp_prem", "eu_prem"),),
+                2: (("jp_mass", "jp_prem"), ("us_prem", "jp_prem", "eu_prem")),
+                3: (("jp_mass", "jp_prem"), ("us_prem", "jp_prem", "eu_prem"), ("kr",))}
+FACTOR_LOADING_START = 0.5
+#: German makes (post-estimation group diagnostic only)
+GERMAN_MAKES = ("audi", "bmw", "mercedes-benz", "porsche", "volkswagen", "smart", "mini")
+#: post: product groups whose first/second-choice correlation is reported for data and model
+GROUP_SC_COLUMNS = ("regionJP", "regionKR", "premium_make", "german_make")
 PIS = (("van", "fs2"), ("van", "fs34"), ("van", "fs5"), ("z_log_footprint", "fs2"), ("z_log_footprint", "fs34"),
        ("z_log_footprint", "fs5"), ("truck", "rural"))
 PI_CONST_INC = ("const", "inc")   # free by default; robustness no_pi_const_inc drops it (D8)
@@ -365,8 +399,10 @@ def load_products(root: str | pathlib.Path | None = None) -> pd.DataFrame:
     ``product_ids``, ``firm_ids`` (parent), ``clustering_ids`` (make2), ``prices`` ($10k of 2015), ``shares``,
     ``market_size``, ``quantity``, the ``XTERMS`` columns (raw), their z-scored versions ``z_<col>`` for
     ``Z_XTERMS``, the ``STAGE2_X`` columns, ``demand_instruments0`` (lag_pl_con), ``iv_prod``, ``steel_weight``,
-    ``IV_N``, ``IV_N_weight``, ``trend`` (year - 1980) and ``premium_make`` (1 for PREMIUM_MAKES), plus every column
-    of data_blp.csv."""
+    ``IV_N``, ``IV_N_weight``, ``trend`` (year - 1980), ``premium_make`` (1 for PREMIUM_MAKES), ``german_make`` (1 for
+    GERMAN_MAKES), ``make_group`` (MAKE_GROUPS: region x premium, Korea pooled) and its 0/1 columns ``hg_<group>`` for
+    FACTOR_GROUPS, plus every column of data_blp.csv. Raises ValueError unless regionUS, regionEU, regionJP and regionKR
+    partition the products."""
     r = package_root(root)
     d = pd.read_csv(r / "data" / "data_blp.csv")
     if not (d.FINAL_SAMPLE == 1).all():
@@ -387,6 +423,16 @@ def load_products(root: str | pathlib.Path | None = None) -> pd.DataFrame:
     out["const"] = 1.0
     out["electric"] = np.maximum(d.PHEV, d.EV).astype(float)
     out["premium_make"] = d.make.isin(PREMIUM_MAKES).astype(float)
+    out["german_make"] = d.make.isin(GERMAN_MAKES).astype(float)
+    regions = d[["regionUS", "regionEU", "regionJP", "regionKR"]].to_numpy(float)
+    if not np.array_equal(regions.sum(axis=1), np.ones(len(d))):
+        raise ValueError("regionUS, regionEU, regionJP and regionKR do not partition the products")
+    prem = out.premium_make.to_numpy() == 1
+    out["make_group"] = np.select(
+        [d.regionKR == 1, (d.regionUS == 1) & prem, d.regionUS == 1, (d.regionJP == 1) & prem, d.regionJP == 1,
+         (d.regionEU == 1) & prem], ["kr", "us_prem", "us_mass", "jp_prem", "jp_mass", "eu_prem"], "eu_mass")
+    for g in FACTOR_GROUPS:
+        out[f"hg_{g}"] = (out.make_group == g).astype(float)
     for c in Z_XTERMS:
         out[f"z_{c}"] = zscore(d[c])
     for c in ("log_height", "log_curbweight", "log_number_trims"):
@@ -704,6 +750,8 @@ class GMYSpec(PaperSpec):
         self.a_lo_free = False
         self.cost_shifters = "excluded"
         self.alo_moments = "off"
+        self.horizontal = "off"
+        self.factor_k = FACTOR_K_DEFAULT
         self.supply_fd_step = SUPPLY_FD_STEP
         self._micro_alo: MicroMoments | None = None
         self.cf_year = CF_YEAR
@@ -805,6 +853,68 @@ class GMYSpec(PaperSpec):
         if mode not in ALO_MOMENT_MODES:
             raise ValueError(f"alo moments must be one of {ALO_MOMENT_MODES}, got {mode!r}")
         self.alo_moments = mode
+
+    def set_horizontal(self, mode: str, factor_k: int | None = None) -> None:
+        """``off`` (default), ``groups`` or ``factor`` (HORIZONTAL_MODES; module docstring), with ``factor_k`` factors
+        (FACTOR_K_CHOICES, default FACTOR_K_DEFAULT; refused unless the mode is factor). The kernel columns decide the
+        twins, so a loaded spec reloads."""
+        if mode not in HORIZONTAL_MODES:
+            raise ValueError(f"horizontal must be one of {HORIZONTAL_MODES}, got {mode!r}")
+        if factor_k is not None and mode != "factor":
+            raise ValueError(f"--factor-k applies to --horizontal factor only, not {mode!r}")
+        k = FACTOR_K_DEFAULT if factor_k is None else int(factor_k)
+        if k not in FACTOR_K_CHOICES:
+            raise ValueError(f"factor_k must be one of {FACTOR_K_CHOICES}, got {factor_k!r}")
+        self.horizontal, self.factor_k = mode, k
+        if self._loaded is not None:
+            self.load(self.years, self.instruments)
+
+    @property
+    def horizontal_columns(self) -> tuple[str, ...]:
+        """The kernel columns of --horizontal: HORIZONTAL_SPREADS (groups), hg_<group> of FACTOR_GROUPS (factor) or
+        none (off)."""
+        if self.horizontal == "groups":
+            return HORIZONTAL_SPREADS
+        if self.horizontal == "factor":
+            return tuple(f"hg_{g}" for g in FACTOR_GROUPS)
+        return ()
+
+    def horizontal_specs(self) -> list[ParameterSpec]:
+        """The --horizontal taste parameters: under groups a spread per HORIZONTAL_SPREADS column on draws nu<n>
+        continuing the spreads' numbering; under factor the loadings lambda_<group>_f<k> on hg_<group> and the shared
+        draw eta<k>, factor by factor in FACTOR_ORDER, without the triangular zeros, the anchors bounded below at 0."""
+        n0 = len(UNOBS) + len(self.extra_spreads)
+        if self.horizontal == "groups":
+            return [ParameterSpec(f"sigma_{c}", "taste", c, f"nu{n0 + k}", HORIZONTAL_SPREAD_START, 0.0, TASTE_CAP,
+                                  cap=True, unit=0.1, note="horizontal extension H1 (not in GMY); cap $100k per sd")
+                    for k, c in enumerate(HORIZONTAL_SPREADS)]
+        if self.horizontal != "factor":
+            return []
+        K = self.factor_k
+        anchors, starts = FACTOR_ANCHORS[K], FACTOR_START[K]
+        specs = []
+        for k in range(K):
+            for g in FACTOR_ORDER:
+                if g in anchors[:k]:   # lower-triangular zero
+                    continue
+                anchor = g == anchors[k]
+                specs.append(ParameterSpec(
+                    f"lambda_{g}_f{k + 1}", "taste", f"hg_{g}", f"eta{k + 1}",
+                    FACTOR_LOADING_START if g in starts[k] else 0.0, 0.0 if anchor else -TASTE_CAP, TASTE_CAP,
+                    unit=0.1, note=f"horizontal extension H2 (not in GMY): loading of {g} on factor {k + 1}"
+                                   + ("; sign anchor" if anchor else "")))
+        return specs
+
+    def draw_blocks(self, layout: ParameterLayout) -> list[list[str]] | None:
+        """--horizontal: the spreads' draws (nu0, nu1, ...) as one Sobol set and the new draws as a second, so the
+        existing dimensions keep their draws bit for bit (PCMModel draw_blocks); off: None (one set)."""
+        if self.horizontal == "off":
+            return None
+        new = list(dict.fromkeys(s.basis for s in self.horizontal_specs()))
+        agent_cols = set(self.agents.columns)
+        old = list(dict.fromkeys(s.basis for s in layout.specs if s.role == "taste" and s.basis is not None
+                                 and s.basis not in agent_cols and s.basis not in new))
+        return [old, new]
 
     @property
     def distance_chars(self) -> tuple[str, ...]:
@@ -1010,8 +1120,8 @@ class GMYSpec(PaperSpec):
 
     @property
     def kernel_chars(self) -> tuple[str, ...]:
-        """Columns of x in the kernel: GMY's 12 and the extra spread columns."""
-        return TASTE + self.extra_spreads
+        """Columns of x in the kernel: GMY's 12, the extra spread columns and the --horizontal columns."""
+        return TASTE + self.extra_spreads + self.horizontal_columns
 
     @property
     def twin_keys(self) -> tuple[str, ...]:
@@ -1064,6 +1174,12 @@ class GMYSpec(PaperSpec):
                                  "shifters of supply_ms and supply_fd (C4, needs --cost-shifters in_cost) and the "
                                  "premium-make purchase share by income quintile in CEX and MRI (C6c, 10 micro rows); "
                                  "LEARNINGS 35; part of the run key when not off")
+        parser.add_argument("--horizontal", choices=HORIZONTAL_MODES, default="off",
+                            help="horizontal make-group taste: off (default); groups, taste spreads on the regionJP and "
+                                 "premium_make dummies (H1); factor, a rank-K latent factor on 7 make groups (region x "
+                                 "premium, Korea pooled; H2); part of the run key when not off")
+        parser.add_argument("--factor-k", type=int, choices=FACTOR_K_CHOICES, default=None,
+                            help=f"--horizontal factor: the number of factors (default {FACTOR_K_DEFAULT})")
         parser.add_argument("--supply-fd-step", type=float, default=SUPPLY_FD_STEP,
                             help="secant step of the supply blocks' Jacobian in natural units (default 1e-3); 0.05 "
                                  "matches the trust-radius floor (LEARNINGS 36); part of the run key when not 1e-3")
@@ -1099,6 +1215,7 @@ class GMYSpec(PaperSpec):
         self.set_prefit_rows(getattr(args, "prefit_rows", None) or "price_purchase")
         self.set_income_law(getattr(args, "income_law", None) or "gmy_blp")
         self.antithetic_taste = bool(getattr(args, "antithetic_taste", False))
+        self.set_horizontal(getattr(args, "horizontal", None) or "off", getattr(args, "factor_k", None))
         self.load(years, getattr(args, "instruments", None) or "gmy")   # after the robustness: the kernel columns
         self.set_moments(getattr(args, "moments", None) or "gmy")       # decide the twins
         self.fd_max_gap = int(getattr(args, "fd_max_gap", None) or FD_MAX_GAP)
@@ -1150,7 +1267,14 @@ class GMYSpec(PaperSpec):
             out["alo_moments"] = self.alo_moments
         if self.supply_fd_step != SUPPLY_FD_STEP:
             out["supply_fd_step"] = self.supply_fd_step
+        if self.horizontal != "off":
+            out["horizontal"] = self.horizontal_key
         return out
+
+    @property
+    def horizontal_key(self) -> dict[str, Any]:
+        """--horizontal in the run key: the mode, and the number of factors under factor."""
+        return {"mode": self.horizontal, **({"k": self.factor_k} if self.horizontal == "factor" else {})}
 
     @property
     def antithetic_draws(self) -> bool:
@@ -1214,6 +1338,15 @@ class GMYSpec(PaperSpec):
              f"to dilute the taste sorting of second choices (GMY_ROUND1 section 3); twins are merged on these columns "
              f"too"
              if self.extra_spreads else "D7 off (robustness gmy_spreads_only): GMY's 11 spreads only"),
+            *([f"H1 (--horizontal groups): taste spreads on the Japanese-make and premium-make dummies, start "
+               f"{HORIZONTAL_SPREAD_START:g}, independent draws (a separate Sobol set); twins merged on these columns "
+               f"too"] if self.horizontal == "groups" else []),
+            *([f"H2 (--horizontal factor, K = {self.factor_k}): rank-K factor on 7 make groups (region x premium, Korea "
+               f"pooled), US mass makes the reference, loadings lower-triangular in "
+               f"({', '.join(FACTOR_ANCHORS[self.factor_k])}) with non-negative diagonal, start "
+               f"{FACTOR_LOADING_START:g} on {'; '.join(', '.join(g) for g in FACTOR_START[self.factor_k])} by factor; "
+               f"eta draws a separate Sobol set; twins merged on the group columns too"]
+              if self.horizontal == "factor" else []),
             ("D8 undone (round 2): GMY's constant x income taste is free and fitted in the prefit beside phi_inc: the "
              "purchase-rate rows need a shifter of the buy margin that leaves the price paid alone, which alpha "
              "(phi_inc) is not" if "no_pi_const_inc" not in self.robustness else
@@ -1243,6 +1376,7 @@ class GMYSpec(PaperSpec):
             specs.append(ParameterSpec(f"sigma_{c}", "taste", c, f"nu{len(UNOBS) + k}", EXTRA_SPREAD_START, 0.0,
                                        TASTE_CAP, cap=True, unit=0.1,
                                        note="PCM extension D7 (not in GMY); cap $100k per sd"))
+        specs.extend(self.horizontal_specs())
         for c, d in self.pis:
             if (c, d) in PIS_AGE:   # not in GMY's BLP layout
                 specs.append(ParameterSpec(f"pi_{c}_{d}", "taste", c, d, 0.0, -TASTE_CAP, TASTE_CAP, unit=0.1,
@@ -1522,10 +1656,20 @@ class GMYSpec(PaperSpec):
                                                     pr[list(SECOND_CHOICE_CHARS)].to_numpy(float)).tolist()
         return out
 
-    def merged_second_choice_data(self, year: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """(data correlations (K,), x (J, K), data shares (J,)) of ``year`` on the merged product set in the model's
-        price order (WP-G4 item 4, D3): the data joint law pi = (s / S) prob is summed over each twin group in rows and
-        columns, a twin-to-twin pair (now the product with itself) is dropped, and the law is renormalised."""
+    def merged_second_choice_data(self, year: int, chars: Sequence[str] = SECOND_CHOICE_CHARS
+                                  ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(data correlations (K,), x (J, K), data shares (J,)) of ``year`` on the columns ``chars`` (default the
+        second-choice moments' SECOND_CHOICE_CHARS) on the merged product set in the model's price order
+        (``merged_second_choice_law``)."""
+        C, s_m = self.merged_second_choice_law(year)
+        x = self.products.iloc[self.market_rows(year)][list(chars)].to_numpy(float)
+        return first_second_correlations(s_m, C, x), x, s_m
+
+    def merged_second_choice_law(self, year: int) -> tuple[np.ndarray, np.ndarray]:
+        """(C (J, J), data shares (J,)) of ``year``: the data's second-choice matrix on the merged product set in the
+        model's price order (WP-G4 item 4, D3). The data joint law pi = (s / S) prob is summed over each twin group in
+        rows and columns, a twin-to-twin pair (now the product with itself) is dropped, and C = pi / (s / S) row by
+        row (zero for a product without data share), so ``joint_law(s, C)`` is pi renormalised."""
         raw = self.raw_products[self.raw_products.market_ids == year].sort_values("position")
         prob = np.asarray(self.second_choices[year]["prob"], dtype=float)
         rows = self.market_rows(year)
@@ -1538,8 +1682,37 @@ class GMYSpec(PaperSpec):
         a = s_m / s_m.sum()
         with np.errstate(divide="ignore", invalid="ignore"):
             C = np.where(a[:, None] > 0, pi / a[:, None], 0.0)
-        x = merged[list(SECOND_CHOICE_CHARS)].to_numpy(float)
-        return first_second_correlations(s_m, C, x), x, s_m
+        return C, s_m
+
+    def group_second_choices(self, model: Any = None, theta: np.ndarray | None = None,
+                             delta: np.ndarray | None = None) -> dict[int, dict[str, Any]]:
+        """Post-estimation make-group diagnostic of the second choices (not a moment): per second-choice year, the
+        first/second-choice correlation of each GROUP_SC_COLUMNS dummy, the flow matrix P(second's make group | first's)
+        over MAKE_GROUPS, P(same group) and that probability were the second independent of the first, for the data on
+        the merged products (``merged_second_choice_law``) and, given ``model``, ``theta`` and (n,) ``delta``, for the
+        model's second-choice matrix at that point under the data's first-choice shares (as the second-choice
+        moments)."""
+        out: dict[int, dict[str, Any]] = {}
+        ids = None if model is None else [m.market_id for m in model.markets]
+        for y in (y for y in SECOND_CHOICE_YEARS if y in self.years):
+            C_d, s = self.merged_second_choice_law(y)
+            merged = self.products.iloc[self.market_rows(y)]
+            x = merged[list(GROUP_SC_COLUMNS)].to_numpy(float)
+            lab = merged.make_group.to_numpy()
+            laws = {"data": C_d}
+            if model is not None:
+                assert theta is not None and delta is not None and ids is not None
+                t = ids.index(y)
+                laws["pcm"] = np.asarray(model.second_choice(t, np.asarray(delta, dtype=float)[model.markets[t].rows],
+                                                             theta, n_threads=model.total_threads)["C"], dtype=float)
+            row: dict[str, Any] = {"groups": list(MAKE_GROUPS)}
+            for side, C in laws.items():
+                F, same, ind = group_flows(s, C, lab, MAKE_GROUPS)
+                corr = first_second_correlations(s, C, x)
+                row[side] = {"corr": dict(zip(GROUP_SC_COLUMNS, map(float, corr))), "same_group": same,
+                             "same_group_independent": ind, "flows": F.tolist()}
+            out[int(y)] = row
+        return out
 
     def second_choice_moment(self, weight: float = SC_WEIGHT) -> list[SecondChoiceMoments]:
         """GMY's second-choice correlation moments (V4) for the second-choice years in ``--years``: 11 characteristics
@@ -1590,7 +1763,24 @@ class GMYSpec(PaperSpec):
                                     "rival_distances": list(iv.RIVAL_DISTANCE_NAMES),
                                     "premium_makes": list(PREMIUM_MAKES),
                                     "premium_rows": [n for n in self.micro_table[0].table.name if PREMIUM_CHAR in n]}}
-                   if self.alo_moments != "off" else {})}
+                   if self.alo_moments != "off" else {}),
+                **({"horizontal": self.horizontal_payload()} if self.horizontal != "off" else {})}
+
+    def horizontal_payload(self) -> dict[str, Any]:
+        """--horizontal in the hashed payload: the mode, the columns, the groups and the normalisation."""
+        out: dict[str, Any] = {**self.horizontal_key, "columns": list(self.horizontal_columns),
+                               "draws": {"blocks": self.draw_blocks(self.base_layout()),
+                                         "seed_step": DRAW_BLOCK_SEED_STEP}}
+        if self.horizontal == "groups":
+            out["start"] = HORIZONTAL_SPREAD_START
+        else:
+            K = self.factor_k
+            out.update(groups={"reference": FACTOR_REFERENCE, "names": list(FACTOR_GROUPS),
+                               "rule": "region x premium_make, Korea pooled", "premium_makes": list(PREMIUM_MAKES)},
+                       normalisation={"order": list(FACTOR_ORDER), "anchors": list(FACTOR_ANCHORS[K]),
+                                      "zeros": [[a, k + 1] for k in range(K) for a in FACTOR_ANCHORS[K][:k]]},
+                       start={"value": FACTOR_LOADING_START, "by_factor": [list(g) for g in FACTOR_START[K]]})
+        return out
 
     def gate_profiles(self) -> list[tuple[str, str, dict[str, Any]]]:
         """The sigma_p ray profile (section 3): lambda in {0.5, 1, 2} times the start spreads, sigma_p in {1.5, ..,
@@ -1672,6 +1862,7 @@ class GMYSpec(PaperSpec):
             out["second_choice"] = rows
             res = np.concatenate([np.asarray(r["pcm"]) - np.asarray(r["data"]) for r in rows.values()])
             out["second_choice_rmse"] = float(np.sqrt(np.nanmean(res ** 2)))
+            out["second_choice_groups"] = self.group_second_choices(model, theta, delta)
         out["phi"] = {n: float(theta[names.index(n)]) for n in ("phi_inc", "phi_age", "sigma_p")}
         return out
 

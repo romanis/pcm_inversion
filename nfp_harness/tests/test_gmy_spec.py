@@ -599,3 +599,272 @@ def test_premium_makes_follow_their_rule(gmy: Any) -> None:
     rule = sorted(m for m in lux.index if lux[m] and price[m] >= gmy.PREMIUM_PRICE_FLOOR)
     assert rule == sorted(gmy.PREMIUM_MAKES)
     np.testing.assert_array_equal(p.premium_make.to_numpy(), p.make.isin(gmy.PREMIUM_MAKES).to_numpy(float))
+
+
+# ---------------------------------------------------------------------------- --horizontal (H1 groups, H2 factor)
+
+
+def _horizontal_spec(gmy: Any) -> Any:
+    """The fixture of the --horizontal tests: three years (1999 a second-choice year), 200 households, antithetic taste
+    draws, the production moment set and weighting of the a_lo 0.03 runs."""
+    sp = gmy.GMYSpec((1998, 1999, 2000), households=200)
+    sp.antithetic_taste = True
+    sp.set_moments("demand_supply_msfd_own")
+    sp.set_weighting_mode("joint_cue", ["event_cost"])
+    sp.set_cost_shifters("in_cost")
+    sp.set_alo_moments("c4c6c")
+    return sp
+
+
+def _snapshot(sp: Any) -> dict[str, Any]:
+    lay = sp.base_layout()
+    return {"kernel_chars": sp.kernel_chars, "twin_keys": sp.twin_keys, "names": lay.names, "starts": lay.starts(),
+            "bounds": lay.bounds(), "units": [s.unit for s in lay.specs], "run_key": sp.paper_run_key(),
+            "payload": sp.payload(), "normalisations": sp.normalisations, "n_merged": sp.n_merged,
+            "products": sp.products.shape, "draw_blocks": sp.draw_blocks(lay)}
+
+
+def _assert_same(a: dict[str, Any], b: dict[str, Any]) -> None:
+    assert a.keys() == b.keys()
+    for k in a:
+        if isinstance(a[k], tuple) and a[k] and isinstance(a[k][0], np.ndarray):
+            for x, y in zip(a[k], b[k]):
+                np.testing.assert_array_equal(x, y)
+        elif isinstance(a[k], np.ndarray):
+            np.testing.assert_array_equal(a[k], b[k])
+        else:
+            assert a[k] == b[k], k
+
+
+def test_horizontal_off_is_the_baseline(gmy: Any) -> None:
+    """--horizontal off (the default) is the layout, kernel columns, twins, run key, payload and normalisations of the
+    code before the option, and one draw set; switching a mode on and off again restores every one of them."""
+    sp = _horizontal_spec(gmy)
+    assert sp.horizontal == "off" and sp.horizontal_columns == () and sp.horizontal_specs() == []
+    base = _snapshot(sp)
+    assert base["kernel_chars"] == gmy.TASTE + gmy.EXTRA_SPREADS
+    assert base["twin_keys"] == ("market_ids", "firm_ids", "prices") + gmy.TASTE[1:] + gmy.EXTRA_SPREADS
+    assert base["names"][:14] == [f"sigma_{c}" for c in gmy.UNOBS + gmy.EXTRA_SPREADS]
+    assert base["names"][14].startswith("pi_") and len(base["names"]) == 29
+    assert "horizontal" not in base["run_key"] and "horizontal" not in base["payload"]
+    assert not any(n.startswith(("H1", "H2")) for n in base["normalisations"])
+    assert base["draw_blocks"] is None
+    for mode, k in (("groups", None), ("factor", 2), ("factor", 3)):
+        sp.set_horizontal(mode, k)
+        assert sp.n_merged == base["n_merged"] and sp.products.shape == base["products"]
+        sp.set_horizontal("off")
+        _assert_same(base, _snapshot(sp))
+    prob = sp.build_problem(1, 0, 4, "all")
+    try:
+        assert prob.model.draw_blocks is None and prob.model.nu_names == [f"nu{k}" for k in range(14)]
+    finally:
+        prob.model.close()
+
+
+def test_horizontal_layouts_and_options(gmy: Any) -> None:
+    """H1 adds sigma_regionJP and sigma_premium_make on nu14 and nu15; H2 with K factors adds 6K - K(K - 1) / 2
+    loadings lambda_<group>_f<k> on hg_<group> and eta<k>, without the triangular zeros, the anchors bounded below at 0;
+    --factor-k only with --horizontal factor; the run key and the payload gain a horizontal entry."""
+    import argparse
+
+    sp = _horizontal_spec(gmy)
+    key0, norm0 = sp.paper_run_key(), sp.normalisations
+    sp.set_horizontal("groups")
+    assert sp.kernel_chars == gmy.TASTE + gmy.EXTRA_SPREADS + ("regionJP", "premium_make")
+    lay = sp.base_layout()
+    assert lay.P == 31 and lay.names[14:16] == ["sigma_regionJP", "sigma_premium_make"]
+    for s, c, b in zip(lay.specs[14:16], ("regionJP", "premium_make"), ("nu14", "nu15")):
+        assert (s.role, s.column, s.basis, s.start, s.lower, s.upper, s.cap, s.unit, s.free) == (
+            "taste", c, b, 0.5, 0.0, gmy.TASTE_CAP, True, 0.1, True)
+    assert sp.draw_blocks(lay) == [[f"nu{k}" for k in range(14)], ["nu14", "nu15"]]
+    assert sp.paper_run_key() == {**key0, "horizontal": {"mode": "groups"}}
+    assert sp.payload()["horizontal"]["columns"] == ["regionJP", "premium_make"]
+    assert len(sp.normalisations) == len(norm0) + 1 and [n[:2] for n in sp.normalisations if n not in norm0] == ["H1"]
+    for K in (1, 2, 3):
+        sp.set_horizontal("factor", K)
+        assert sp.kernel_chars[15:] == tuple(f"hg_{g}" for g in gmy.FACTOR_GROUPS)
+        new = sp.horizontal_specs()
+        assert len(new) == 6 * K - K * (K - 1) // 2 and sp.base_layout().P == 29 + len(new)
+        assert {s.basis for s in new} == {f"eta{k + 1}" for k in range(K)}
+        names = [s.name for s in new]
+        for k, a in enumerate(gmy.FACTOR_ANCHORS[K]):
+            assert all(f"lambda_{z}_f{k + 1}" not in names for z in gmy.FACTOR_ANCHORS[K][:k])   # triangular zeros
+            assert new[names.index(f"lambda_{a}_f{k + 1}")].lower == 0.0
+        assert sum(s.lower == 0.0 for s in new) == K and all(s.lower == -gmy.TASTE_CAP for s in new if s.lower != 0)
+        assert all(s.column == "hg_" + s.name[len("lambda_"):-3] and s.unit == 0.1 and s.free for s in new)
+        assert sp.paper_run_key() == {**key0, "horizontal": {"mode": "factor", "k": K}}
+    sp.set_horizontal("factor")
+    new = {s.name: s for s in sp.horizontal_specs()}
+    assert sorted(new) == sorted(
+        [f"lambda_{g}_f1" for g in gmy.FACTOR_ORDER] + [f"lambda_{g}_f2" for g in gmy.FACTOR_ORDER[1:]])
+    assert {n for n, s in new.items() if s.start == 0.5} == {
+        "lambda_jp_mass_f1", "lambda_jp_prem_f1", "lambda_us_prem_f2", "lambda_jp_prem_f2", "lambda_eu_prem_f2"}
+    assert {n for n, s in new.items() if s.lower == 0.0} == {"lambda_jp_mass_f1", "lambda_eu_prem_f2"}
+    assert all(s.start == 0.0 for n, s in new.items() if s.start != 0.5)
+    pay = sp.payload()["horizontal"]
+    assert pay["normalisation"] == {"order": list(gmy.FACTOR_ORDER), "anchors": ["jp_mass", "eu_prem"],
+                                    "zeros": [["jp_mass", 2]]}
+    assert [n for n in sp.normalisations if n not in norm0][0].startswith("H2 (--horizontal factor, K = 2)")
+    parser = argparse.ArgumentParser()
+    sp.add_paper_arguments(parser)
+    base = ["--years", "1998", "1999", "2000", "--households", "200"]
+    for argv in (["--factor-k", "2"], ["--horizontal", "groups", "--factor-k", "2"]):
+        with pytest.raises(ValueError, match="factor-k"):
+            sp.configure_paper(parser.parse_args(base + argv))
+    sp.configure_paper(parser.parse_args(base + ["--horizontal", "factor", "--factor-k", "3"]))
+    assert (sp.horizontal, sp.factor_k) == ("factor", 3)
+    sp.configure_paper(parser.parse_args(base))
+    assert sp.horizontal == "off" and "horizontal" not in sp.paper_run_key()
+    with pytest.raises(ValueError):
+        sp.set_horizontal("make")
+    with pytest.raises(ValueError):
+        sp.set_horizontal("factor", 4)
+
+
+def test_make_groups_partition_the_products(gmy: Any) -> None:
+    """The six hg_<group> columns and the US mass reference partition every product (the sizes of the design's group
+    table), regionJP + regionKR = regionASIA, and neither mode's columns split a twin group (63 rows merged)."""
+    p = gmy.load_products()
+    H = p[[f"hg_{g}" for g in gmy.FACTOR_GROUPS]].to_numpy()
+    ref = (p.make_group == gmy.FACTOR_REFERENCE).to_numpy(float)
+    np.testing.assert_array_equal(H.sum(axis=1) + ref, np.ones(len(p)))
+    assert p.make_group.value_counts().to_dict() == {"us_mass": 3865, "us_prem": 455, "jp_mass": 2590, "jp_prem": 444,
+                                                     "kr": 424, "eu_mass": 797, "eu_prem": 1119}
+    np.testing.assert_array_equal(p.regionJP + p.regionKR, p.regionASIA)
+    np.testing.assert_array_equal(p.hg_jp_mass + p.hg_jp_prem, p.regionJP)
+    np.testing.assert_array_equal(p.hg_kr, p.regionKR)
+    assert set(p.make[p.premium_make == 1]) - set(p.make[p.hg_us_prem + p.hg_jp_prem + p.hg_eu_prem == 1]) == {"genesis"}
+    keys = gmy.TWIN_KEYS + gmy.EXTRA_SPREADS
+    n = gmy.merge_twins(p, keys)[1]
+    assert n == 63
+    assert gmy.merge_twins(p, keys + gmy.HORIZONTAL_SPREADS)[1] == n
+    assert gmy.merge_twins(p, keys + tuple(f"hg_{g}" for g in gmy.FACTOR_GROUPS))[1] == n
+
+
+def _start_g(sp: Any, changes: dict[str, Any] | None = None, warm: tuple[np.ndarray, dict[str, float]] | None = None
+             ) -> tuple[np.ndarray, Any]:
+    """(g, (per-market taste bases, q, draw names, row-order delta)) at the layout's starts; ``warm`` = (delta, {name:
+    theta}) warm-starts every market there, a term the dict lacks at 0 (as ``read_warm_delta``)."""
+    prob = sp.build_problem(1, 0, 8, "all", layout_changes=changes)
+    try:
+        if warm is not None:
+            prob.model.warm_from_delta(warm[0], np.array([warm[1].get(n, 0.0) for n in prob.layout.names]))
+        ev = prob.evaluate(prob.layout.starts(), need_jacobian=False)
+        assert ev.ok, ev.status
+        basis = [np.asarray(prob.model.kernel_market(t).taste_basis).copy() for t in range(prob.model.T)]
+        return np.asarray(ev.g).copy(), (basis, float(ev.aux["q"]), prob.model.nu_names,
+                                         np.asarray(ev.aux["delta"]).copy())
+    finally:
+        prob.model.close()
+
+
+def test_horizontal_draws_and_first_evaluations(gmy: Any) -> None:
+    """The 14 existing draw columns are bit-identical to the default spec's under both modes and the new columns are
+    antithetic pairs; with the new terms at 0 either mode gives the default spec's moments and q (to 1e-8 relative);
+    and A and B, warm-started from the default solution as --warm-delta does and moved to their starts by the theta
+    path, give the same q (the fixture years have no Korean premium make, genesis, which A's premium spread reaches and
+    B's prestige factor does not)."""
+    sp = _horizontal_spec(gmy)
+    assert "genesis" not in set(sp.products.make)
+    g0, (b0, q0, _, d0) = _start_g(sp)
+    warm = (d0, dict(zip(sp.layout().names, sp.layout().starts())))
+    sp.set_horizontal("groups")
+    zero = {n: {"start": 0.0} for n in ("sigma_regionJP", "sigma_premium_make")}
+    gA0, (bA, qA0, namesA, _) = _start_g(sp, zero)
+    gA, (_, qA, _, _) = _start_g(sp, warm=warm)
+    sp.set_horizontal("factor", 2)
+    gB0, (bB, qB0, namesB, _) = _start_g(sp, {s.name: {"start": 0.0} for s in sp.horizontal_specs()})
+    gB, (_, qB, _, _) = _start_g(sp, warm=warm)
+    sp.set_horizontal("off")
+    assert namesA[14:] == ["nu14", "nu15"] and namesB[14:] == ["eta1", "eta2"]
+    for t in range(len(b0)):
+        np.testing.assert_array_equal(bA[t][:, :14], b0[t][:, :14])
+        np.testing.assert_array_equal(bB[t][:, :14], b0[t][:, :14])
+        newA = bA[t][:, 14:16]
+        np.testing.assert_array_equal(newA[1::2], -newA[::2])
+        # B's loadings on factor k read A's draw k: the same second Sobol set
+        np.testing.assert_array_equal(bB[t][:, 14], newA[:, 0])        # lambda_jp_mass_f1 on eta1
+        np.testing.assert_array_equal(bB[t][:, 20], newA[:, 1])        # lambda_eu_prem_f2 on eta2
+    # cold inversions from the same theta: the moments agree to the inversion tolerance (1e-9 in delta)
+    for g, q in ((gA0, qA0), (gB0, qB0)):
+        assert abs(q / q0 - 1) < 1e-8 and np.max(np.abs(g - g0)) < 1e-7 * np.max(np.abs(g0))
+    # A and B solve different kernel columns, so their inversions stop at different points within that tolerance
+    assert abs(qB / qA - 1) < 1e-8 and np.max(np.abs(gB - gA)) < 1e-7 * np.max(np.abs(gA))
+    assert abs(qA / q0 - 1) > 1e-6   # the new terms do move the fit
+
+
+def test_horizontal_warm_start_from_a_stage_without_the_new_terms(gmy: Any, tmp_path: Any) -> None:
+    """--warm-delta from a default-layout stage: the new terms read as 0 at the stage's theta (every other parameter
+    as stored), and the kernel's theta path takes every market from that point to the new layout's starts."""
+    from nfp_harness.checkpoint import RunDirectory
+
+    sp = _horizontal_spec(gmy)
+    prob = sp.build_problem(1, 0, 8, "all")
+    theta = prob.layout.starts()
+    try:
+        ev = prob.evaluate(theta, need_jacobian=False)
+        assert ev.ok
+        prob.commit(theta)
+        rd = RunDirectory(tmp_path, "gmy_pcm", "0" * 64, "1" * 64, options={})
+        rd.save_stage("cue", {"theta": theta, "q": float(ev.aux["q"]), "W": np.eye(2),
+                              "problem_state": prob.state_dict()})
+        (rd.path / "history.csv").write_text("iteration," + ",".join(f"theta_{n}" for n in prob.layout.names) + "\n")
+        names0 = list(prob.layout.names)
+    finally:
+        prob.model.close()
+    for mode, k in (("groups", None), ("factor", 2)):
+        sp.set_horizontal(mode, k)
+        sp.warm_delta = str(rd.path / "stages" / "cue.npz")
+        delta_w, theta_w = sp.read_warm_delta()
+        assert theta_w is not None
+        lay = sp.layout()
+        new = [s.name for s in sp.horizontal_specs()]
+        for n, v in zip(lay.names, theta_w):
+            assert v == (0.0 if n in new else theta[names0.index(n)]), n
+        np.testing.assert_allclose(delta_w, ev.aux["delta"])
+        pr = sp.build_problem(1, 0, 8, "all")
+        try:
+            e2 = pr.evaluate(pr.layout.starts(), need_jacobian=False)
+            assert e2.ok and all(pm["stages"].startswith("warm") for pm in e2.aux["per_market"]), \
+                [pm["stages"] for pm in e2.aux["per_market"]]
+        finally:
+            pr.model.close()
+    sp.warm_delta = None
+    sp.set_horizontal("off")
+
+
+#: corr(first, second) of the make-group dummies in GMY's second-choice data (HORIZONTAL_DESIGN section 1, raw products)
+GROUP_SC_DATA = {"regionJP": (0.415, 0.372, 0.411, 0.349), "regionKR": (0.022, 0.156, 0.256, 0.210),
+                 "german_make": (0.124, 0.254, 0.339, 0.370), "premium_make": (0.439, 0.493, 0.497, 0.540)}
+
+
+def test_group_second_choice_diagnostic(gmy: Any) -> None:
+    """The post diagnostic's data side reproduces the make-group correlations of GMY's second-choice data (on the merged
+    products, within 0.01 of the raw-product table) with flows that are probabilities; given a model it returns finite
+    model values at that point."""
+    sp = gmy.GMYSpec(gmy.SECOND_CHOICE_YEARS, households=200)
+    tab = sp.group_second_choices()
+    assert sorted(tab) == list(gmy.SECOND_CHOICE_YEARS)
+    for c, want in GROUP_SC_DATA.items():
+        np.testing.assert_allclose([tab[y]["data"]["corr"][c] for y in gmy.SECOND_CHOICE_YEARS], want, atol=0.01)
+    for y, r in tab.items():
+        F = np.asarray(r["data"]["flows"])
+        assert F.shape == (7, 7) and r["groups"] == list(gmy.MAKE_GROUPS)
+        np.testing.assert_allclose(np.nansum(F, axis=1)[~np.isnan(F).all(axis=1)], 1.0)
+        assert r["data"]["same_group"] > r["data"]["same_group_independent"] > 0
+        assert "pcm" not in r
+    fx = _horizontal_spec(gmy)
+    fx.set_horizontal("groups")
+    prob = fx.build_problem(1, 0, 8, "all")
+    try:
+        theta = prob.layout.starts()
+        ev = prob.evaluate(theta, need_jacobian=False)
+        assert ev.ok
+        tab = fx.group_second_choices(prob.model, theta, np.asarray(ev.aux["delta"]))
+        assert list(tab) == [1999]
+        m = tab[1999]["pcm"]
+        assert all(np.isfinite(v) for v in m["corr"].values()) and 0 < m["same_group"] <= 1
+        assert np.isfinite(np.asarray(m["flows"])[:, :]).any()
+    finally:
+        prob.model.close()
+    fx.set_horizontal("off")

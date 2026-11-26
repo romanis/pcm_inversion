@@ -629,3 +629,107 @@ def test_cold_draws_reaches_the_kernel(small: dict[str, Any]) -> None:
         PCMModel(PCMSpec(CHARS), small["data"], synthetic_layout(), small["nu"], small["seed"], cold_draws=-1)
     for m in (m0, m1):
         m.close()
+
+
+
+#: kernel columns of the draw-block and factor tests: CHARS and the 0/1 column top
+FACTOR_CHARS = CHARS + ("top",)
+THETA_FACTOR = THETA_TRUE + np.array([0.3, -0.4, 0.2, -0.3, 0.15])
+
+
+def factor_layout(extra: list[ParameterSpec]) -> ParameterLayout:
+    """The synthetic layout at THETA_FACTOR with ``extra`` taste parameters before the scale terms."""
+    specs = list(synthetic_layout(THETA_FACTOR).specs)
+    return ParameterLayout(specs[:3] + extra + specs[3:])
+
+
+#: a rank-1 factor as GMY's --horizontal factor builds it: two loadings share the draw eta1, one of them negative
+LOADINGS = [ParameterSpec("lambda_x2_f1", "taste", "x2", "eta1", 0.8, -10.0, 10.0, unit=0.1),
+            ParameterSpec("lambda_top_f1", "taste", "top", "eta1", -0.6, -10.0, 10.0, unit=0.1)]
+
+
+def test_draw_blocks_keep_the_first_block(small: dict[str, Any]) -> None:
+    """``draw_blocks``: block 0 is bit for bit the one-set draw of its dimensions, a later block is its own antithetic
+    set over the same row pairs, and a block list that does not partition the draw dimensions is refused."""
+    import math
+
+    syn = small
+    ref = PCMModel(PCMSpec(CHARS), syn["data"], synthetic_layout(THETA_FACTOR), syn["nu"], syn["seed"],
+                   total_threads=2, antithetic=True)
+    lay = factor_layout([ParameterSpec("sigma_top", "taste", "top", "nu2", 0.5, 0.0, 10.0, unit=0.1),
+                         *LOADINGS])
+    one = PCMModel(PCMSpec(FACTOR_CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2, antithetic=True)
+    two = PCMModel(PCMSpec(FACTOR_CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2, antithetic=True,
+                   draw_blocks=[["nu0", "nu1"], ["nu2", "eta1"]])
+    assert two.nu_names == ["nu0", "nu1", "nu2", "eta1"] and two.draw_blocks == (("nu0", "nu1"), ("nu2", "eta1"))
+    assert one.draw_blocks is None
+    for t in range(ref.T):
+        b0 = np.asarray(ref.kernel_market(t).taste_basis)
+        b1 = np.asarray(one.kernel_market(t).taste_basis)
+        b2 = np.asarray(two.kernel_market(t).taste_basis)
+        np.testing.assert_array_equal(b2[:, :3], b0[:, :3])        # nu0, nu1 and the demographic: the old draws
+        assert not np.array_equal(b1[:, :2], b0[:, :2])            # one 4-dimensional set moves them
+        np.testing.assert_array_equal(b2[:, 4], b2[:, 5])          # the two loadings read one draw
+        new = b2[:, 3:5]
+        np.testing.assert_array_equal(new[1::2], -new[::2])        # antithetic in the same row pairs
+        assert math.fsum(new[:, 0]) == 0.0 and not np.array_equal(new[:, 0], b0[:, 0])
+        np.testing.assert_array_equal(np.asarray(two.kernel_market(t).weights),
+                                      np.asarray(ref.kernel_market(t).weights))
+    for m in (ref, one, two):
+        m.close()
+    for bad in ([["nu0", "nu1"], ["nu2"]], [["nu0", "nu1", "nu2"], ["eta1", "nu2"]],
+                [["nu0", "nu1", "nu2", "eta1"], []]):
+        with pytest.raises(ValueError, match="draw_blocks"):
+            PCMModel(PCMSpec(FACTOR_CHARS), syn["data"], lay, syn["nu"], syn["seed"], total_threads=2, draw_blocks=bad)
+
+
+def test_G_with_a_shared_draw_and_a_negative_loading(small: dict[str, Any]) -> None:
+    """Two loadings on one draw (one negative): total G, the micro d_theta and the second-choice adjoint in theta match
+    central differences, so taste_col and taste_basis carry a shared draw (the kernel is linear in theta)."""
+    from nfp_harness.moments import SECOND_CHOICE_ADJOINT, SECOND_CHOICE_OUTPUTS, SecondChoiceMoments
+    from nfp_harness.types import InnerSolution
+
+    syn = small
+    lay = factor_layout(LOADINGS)
+    model = PCMModel(PCMSpec(FACTOR_CHARS, tol=1e-12), syn["data"], lay, syn["nu"], syn["seed"], total_threads=4,
+                     draw_blocks=[["nu0", "nu1"], ["eta1"]])
+    nums, dens, labels = micro_parts()
+    micro = RatioMicroMoment("micro", MicroDataset("synthetic", 10_000), nums, dens, true_micro_values(syn), labels)
+    prob = NFPGMMProblem(model, [IVMoments(syn["Z"]), micro], LinearIV(syn["X1"], syn["Z"]), lay)
+    theta = lay.starts()
+    ev = prob.evaluate(theta)
+    assert ev.ok, ev.status
+    prob.commit(theta)
+    fd, _ = central_fd(prob, theta, ev.aux["delta"])
+    for k in (lay.names.index("lambda_x2_f1"), lay.names.index("lambda_top_f1")):
+        rel = float(np.max(np.abs(ev.G[:, k] - fd[:, k])) / max(np.max(np.abs(ev.G[:, k])), 1e-12))
+        assert rel < 1e-5 and np.max(np.abs(ev.G[:, k])) > 0, (lay.names[k], rel)
+    delta = np.asarray(ev.aux["delta"])
+    pr = syn["data"]["products"]
+    xcols = np.column_stack([pr["x1"], pr["x2"], pr["top"]])
+    years = tuple(m.market_id for m in model.markets)
+    mom = SecondChoiceMoments("second_choice", years, ("x1", "x2", "top"), {y: np.array([0.3, 0.5, 0.2]) for y in years},
+                              {m.market_id: xcols[m.rows] for m in model.markets},
+                              {m.market_id: pr["shares"][m.rows] for m in model.markets})
+    mom.bind(model.markets, model.n_products, model.P)
+
+    def sol_at(th: np.ndarray) -> InnerSolution:
+        outs = [model.second_choice(t, delta[m.rows], th) for t, m in enumerate(model.markets)]
+
+        def adj(t: int, A: np.ndarray, B: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            o = model.second_choice(t, delta[model.markets[t].rows], th, {"A": A, "B": B})
+            return o["out_delta"], o["out_theta"]
+
+        return InnerSolution(delta=delta, D=None, status=EvalStatus.OK, per_market=[],
+                             outputs={SECOND_CHOICE_OUTPUTS: outs, SECOND_CHOICE_ADJOINT: adj})
+
+    _, _, dt = mom.correlations(sol_at(theta), True)
+    assert dt is not None
+    h = 1e-7
+    for k in (lay.names.index("lambda_x2_f1"), lay.names.index("lambda_top_f1")):
+        e = np.zeros_like(theta)
+        e[k] = h
+        fd_sc = (mom.predicted(sol_at(theta + e)) - mom.predicted(sol_at(theta - e))) / (2 * h)
+        np.testing.assert_allclose(dt[:, k], fd_sc, rtol=1e-6, atol=1e-7)
+        assert np.max(np.abs(dt[:, k])) > 0
+    model.close()
