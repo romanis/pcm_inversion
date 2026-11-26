@@ -52,6 +52,14 @@ GMY = {
                         "--antithetic-taste", "--moments", "demand_supply_msfd_own", "--weighting", "joint_cue",
                         "--drop-block", "own", "--cost-shifters", "in_cost", "--a-lo", "0.05", "--alo-moments",
                         "c4c6c"],
+    "gmy_horizontal_groups": ["run", "--stage", "all", "--nu", "64", "--years", "1991", "1999", "--households", "500",
+                              "--antithetic-taste", "--moments", "demand_supply_msfd_own", "--weighting", "joint_cue",
+                              "--drop-block", "own", "--cost-shifters", "in_cost", "--a-lo", "0.05", "--alo-moments",
+                              "c4c6c", "--horizontal", "groups"],
+    "gmy_horizontal_factor": ["run", "--stage", "all", "--nu", "64", "--years", "1991", "1999", "--households", "500",
+                              "--antithetic-taste", "--moments", "demand_supply_msfd_own", "--weighting", "joint_cue",
+                              "--drop-block", "own", "--cost-shifters", "in_cost", "--a-lo", "0.05", "--alo-moments",
+                              "c4c6c", "--horizontal", "factor", "--factor-k", "2"],
 }
 #: command lines whose spec hash holds an absolute path of tmp_path: run key only
 PATH_IN_HASH = {"gmy_start_warm"}
@@ -75,6 +83,9 @@ EXPECTED: dict[str, tuple[str, str]] = {
     "gmy_in_cost_joint": ("gmy_pcm_11c22c8446", "b65b622f016c0d572b33a4139d5abb0faf6784f00e06cb84a8302b144633b6bf"),
     # computed when --alo-moments was added
     "gmy_alo_moments": ("gmy_pcm_0686bfbcc7", "90bb7e417b9dbe90262fecade816f385d8e3781c9fa3fbf1e87d6d92943ab39f"),
+    # computed when --horizontal was added (off leaves every case above unchanged)
+    "gmy_horizontal_groups": ("gmy_pcm_de05afeef7", "6d25777f02626263381578254d778f78621b32895ea38fdea501f0cc8e370e4f"),
+    "gmy_horizontal_factor": ("gmy_pcm_0cce6d38e4", "266a2e3e8d3d50c28e03362339a51bdea3bf9e13ee29cb1b05769e440f7e20a9"),
 }
 
 
