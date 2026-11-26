@@ -323,7 +323,8 @@ class PaperSpec:
 
         model = PCMModel(self.pcm_spec(), {"products": self.products, "agents": self.agents}, layout, nu,
                          self.draw_seed_offset + seed, total_threads=threads, antithetic=self.antithetic_draws,
-                         cold_draws=self.cold_draws, taste_nodes=self.taste_nodes(nu))
+                         cold_draws=self.cold_draws, taste_nodes=self.taste_nodes(nu),
+                         draw_blocks=self.draw_blocks(layout))
         if self.warm_delta:
             delta_w, theta_w = self.read_warm_delta()
             model.warm_from_delta(delta_w, theta_w if theta_w is not None and theta_w.size == layout.P
@@ -333,6 +334,11 @@ class PaperSpec:
     @property
     def antithetic_draws(self) -> Sequence[str] | bool:
         return ()
+
+    def draw_blocks(self, layout: ParameterLayout) -> Sequence[Sequence[str]] | None:
+        """The taste draw dimensions of ``layout`` split into separately drawn Sobol sets (``PCMModel`` draw_blocks), or
+        None (the default) for one set."""
+        return None
 
     def taste_nodes(self, nu: int) -> tuple[np.ndarray, np.ndarray] | None:
         """A quadrature rule (nodes, weights) over the taste draw dimensions at ``nu`` (``PCMModel`` taste_nodes),

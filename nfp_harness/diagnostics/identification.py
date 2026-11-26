@@ -290,13 +290,14 @@ def block_shares(G: np.ndarray, W: np.ndarray, blocks: Mapping[str, slice],
 
 def scale_direction(names: Sequence[str], theta: np.ndarray, units: np.ndarray) -> np.ndarray:
     """The utility-scale direction in natural units at theta (DESIGN 5.2, LEARNINGS 1): sigma_p up and every taste
-    spread (a parameter named ``sigma_<column>``) down in proportion."""
+    spread (a parameter named ``sigma_<column>``) and every factor loading (``lambda_<group>_f<k>``, signed) down in
+    proportion."""
     u = np.asarray(theta, dtype=float) / np.asarray(units, dtype=float)
     out = np.zeros(len(names))
     for k, n in enumerate(names):
         if n == "sigma_p":
             out[k] = u[k]
-        elif n.startswith("sigma_"):
+        elif n.startswith(("sigma_", "lambda_")):
             out[k] = -u[k]
     return out
 

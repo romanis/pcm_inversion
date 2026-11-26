@@ -23,10 +23,12 @@ points over the taste draw dimensions (seed ``seed + t`` for the t-th market in 
 split into consecutive blocks over its A_t agents (``data.cross_agents``), so each agent keeps its
 weight (DESIGN 9, decisions 3 and 6). ``PCMSpec.draws_per_market`` overrides R_t. With ``antithetic`` (taste draw
 dimensions by name, or True for all) the R_t points are R_t / 2 Sobol points each followed by its antithetic partner
-(``data.sobol_normal_draws``); the default (none) leaves the draws unchanged. With ``taste_nodes`` (a quadrature rule
-over the taste draw dimensions) every agent is instead crossed with every node, agent-major, and a draw's weight is the
-agent's weight times the node's (Nevo's Gauss-Hermite grid). a_i has no draws: the kernel integrates its lognormal in
-closed form.
+(``data.sobol_normal_draws``); the default (none) leaves the draws unchanged. With ``draw_blocks`` (a partition of
+the taste draw dimensions) each block is its own scrambled Sobol set, block b with seed ``seed + t + 1_000_003 b``,
+so dimensions added in a later block leave the earlier blocks' columns bit-identical. With ``taste_nodes`` (a
+quadrature rule over the taste draw dimensions) every agent is instead crossed with every node, agent-major, and a
+draw's weight is the agent's weight times the node's (Nevo's Gauss-Hermite grid). a_i has no draws: the kernel
+integrates its lognormal in closed form.
 
 Products are sorted by price within each market (the kernel needs strictly increasing prices;
 spread ties first with ``data.break_price_ties``). ``MarketIndex.rows`` holds the product rows in that
@@ -53,6 +55,10 @@ from ..types import EvalStatus, InnerSolution, KernelRequests, MarketIndex, Micr
 __all__ = ["PCMModel", "PCMSpec", "allocate_threads", "kernel_status", "group_sums_oracle"]
 
 log = logging.getLogger("nfp_harness.models.pcm")
+
+#: seed step between the Sobol sets of ``draw_blocks``: block b of market t has seed
+#: ``seed + t + DRAW_BLOCK_SEED_STEP b``
+DRAW_BLOCK_SEED_STEP = 1_000_003
 
 #: Kernel status string -> harness status. Bad kernel input at a theta inside the layout bounds is
 #: a theta the model cannot evaluate (e.g. a non-finite value), so it is OUT_OF_DOMAIN.
@@ -258,9 +264,16 @@ class PCMModel:
 
     def __init__(self, spec: Any, data: Any, layout: Any, nu_per_agent: int, seed: int,
                  total_threads: int | None = None, antithetic: Sequence[str] | bool = (),
-                 cold_draws: int = 0, taste_nodes: tuple[np.ndarray, np.ndarray] | None = None) -> None:
+                 cold_draws: int = 0, taste_nodes: tuple[np.ndarray, np.ndarray] | None = None,
+                 draw_blocks: Sequence[Sequence[str]] | None = None) -> None:
         """PCMModel(spec, data, layout, nu_per_agent, seed, total_threads=None, antithetic=(), cold_draws=0,
-        taste_nodes=None). None uses os.cpu_count().
+        taste_nodes=None, draw_blocks=None). None uses os.cpu_count().
+
+        ``draw_blocks``: the taste draw dimensions split into blocks (every dimension in exactly one block), each drawn
+        as its own scrambled Sobol set of ``len(block)`` dimensions in the block's order, block b with seed ``seed + t
+        + DRAW_BLOCK_SEED_STEP b`` for market t, so block 0 is the one-block draw of its dimensions and a block added
+        later leaves it bit-identical. Antithetic pairs are the same rows in every block. None (the default) draws
+        every dimension as one set. Refused with ``taste_nodes``. Not part of ``PCMSpec``, so spec hashes do not move.
 
         ``taste_nodes``: (nodes (R_q, dim), weights (R_q,)), a quadrature rule over the taste draw dimensions in the
         order they first appear in the layout. Each market then has R_t = A_t R_q draws: agent a's draws are rows
@@ -364,6 +377,16 @@ class PCMModel:
                                  f"draw dimensions {self.nu_names} (and exclude antithetic draws)")
         #: the quadrature rule of the taste draws (None: scrambled Sobol)
         self.taste_nodes = None if taste_nodes is None else (q_nodes, q_w)
+        if draw_blocks is not None:
+            blocks = [tuple(str(n) for n in b) for b in draw_blocks]
+            flat = [n for b in blocks for n in b]
+            if self.taste_nodes is not None:
+                raise ValueError("draw_blocks: the taste draws come from taste_nodes, not from Sobol sets")
+            if any(not b for b in blocks) or sorted(flat) != sorted(self.nu_names):
+                raise ValueError(f"draw_blocks {blocks} must split the taste draw dimensions {self.nu_names} into "
+                                 f"non-empty blocks, each dimension in exactly one")
+        #: the Sobol blocks of the taste draw dimensions (None: one set over all of them)
+        self.draw_blocks: tuple[tuple[str, ...], ...] | None = None if draw_blocks is None else tuple(blocks)
 
         # ------------------------------------------------------------ products
         mkt = np.asarray(products[sp.market_column]).ravel()
@@ -405,8 +428,7 @@ class PCMModel:
                 R = sp.draws_per_market or 2 ** int(math.ceil(math.log2(A * self.nu_per_agent)))
                 if R < A:
                     raise ValueError(f"market {mid!r}: {R} draws for {A} agents")
-                nu = (sobol_normal_draws(R, len(self.nu_names), self.seed + t, antithetic=anti_cols)
-                      if self.nu_names else np.zeros((R, 0)))
+                nu = self._sobol_draws(R, t, anti_cols)
                 w, idx, nu = cross_agents(w_agent, np.arange(A, dtype=float)[:, None], nu)
                 idx = idx[:, 0].astype(int)
             basis = np.empty((R, len(taste)))
@@ -447,6 +469,20 @@ class PCMModel:
         self._group_U: dict[tuple[str, ...], list[np.ndarray]] = {}
 
     # ---------------------------------------------------------------- helpers
+
+    def _sobol_draws(self, R: int, t: int, anti_cols: Sequence[int]) -> np.ndarray:
+        """(R, len(nu_names)) scrambled Sobol normal draws of market t: one set over every taste draw dimension, or
+        one set per block of ``draw_blocks`` (module docstring)."""
+        if not self.nu_names:
+            return np.zeros((R, 0))
+        if self.draw_blocks is None:
+            return sobol_normal_draws(R, len(self.nu_names), self.seed + t, antithetic=anti_cols)
+        nu = np.empty((R, len(self.nu_names)))
+        for b, block in enumerate(self.draw_blocks):
+            cols = [self.nu_names.index(n) for n in block]
+            anti = [i for i, c in enumerate(cols) if c in anti_cols]
+            nu[:, cols] = sobol_normal_draws(R, len(block), self.seed + t + DRAW_BLOCK_SEED_STEP * b, antithetic=anti)
+        return nu
 
     def _agent_col(self, name: str) -> np.ndarray:
         col = self._agent_col_cache.get(name)

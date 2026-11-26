@@ -10,9 +10,25 @@ survey data). For each characteristic c the moment is corr_pi(x_first,c, x_secon
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 
-__all__ = ["first_second_correlations", "logit_second_choice_matrix", "correlation_adjoint", "inside_mass_without"]
+__all__ = ["joint_law", "first_second_correlations", "group_flows", "logit_second_choice_matrix", "correlation_adjoint",
+           "inside_mass_without"]
+
+
+def joint_law(first_shares: np.ndarray, second_choice: np.ndarray) -> np.ndarray:
+    """joint_law(first_shares, second_choice) -> (J, J) pi[j, k] = (s_j / sum s) C[j, k], renormalised to sum to 1."""
+    s = np.asarray(first_shares, dtype=float).ravel()
+    C = np.asarray(second_choice, dtype=float)
+    if C.shape != (s.size, s.size):
+        raise ValueError(f"shapes: shares {s.shape}, second choice {C.shape}")
+    pi = (s / s.sum())[:, None] * C
+    tot = pi.sum()
+    if not tot > 0:
+        raise ValueError("the joint first/second-choice law has no mass")
+    return pi / tot
 
 
 def first_second_correlations(first_shares: np.ndarray, second_choice: np.ndarray, x: np.ndarray,
@@ -27,11 +43,7 @@ def first_second_correlations(first_shares: np.ndarray, second_choice: np.ndarra
     J = s.size
     if C.shape != (J, J) or x.shape[0] != J:
         raise ValueError(f"shapes: shares {s.shape}, second choice {C.shape}, x {x.shape}")
-    pi = (s / s.sum())[:, None] * C
-    tot = pi.sum()
-    if not tot > 0:
-        raise ValueError("the joint first/second-choice law has no mass")
-    pi = pi / tot
+    pi = joint_law(s, C)
     p1, p2 = pi.sum(axis=1), pi.sum(axis=0)          # marginals of the first and the second choice
     m1, m2 = p1 @ x, p2 @ x
     d1, d2 = x - m1, x - m2
@@ -41,6 +53,26 @@ def first_second_correlations(first_shares: np.ndarray, second_choice: np.ndarra
     with np.errstate(invalid="ignore", divide="ignore"):
         corr = cov / np.outer(sd1, sd2)
     return corr if full else np.diag(corr).copy()
+
+
+def group_flows(first_shares: np.ndarray, second_choice: np.ndarray, labels: np.ndarray, groups: Sequence[str]
+                ) -> tuple[np.ndarray, float, float]:
+    """group_flows(first_shares, second_choice, labels, groups) -> (F (G, G), same, independent): F[a, b] = P(second in
+    group b | first in group a) under the joint law (``joint_law``; NaN rows for a group with no first-choice mass),
+    ``same`` = P(second in the first's group), and ``independent`` = the same probability were the second drawn
+    independently from its marginal. ``labels`` (J,) names each product's group, every one in ``groups``."""
+    pi = joint_law(first_shares, second_choice)
+    lab = np.asarray(labels).astype(str).ravel()
+    names = [str(g) for g in groups]
+    if lab.size != pi.shape[0] or not set(lab) <= set(names):
+        raise ValueError(f"labels: {lab.size} labels for {pi.shape[0]} products, groups {sorted(set(lab) - set(names))} "
+                         f"not in {names}")
+    M = np.stack([lab == g for g in names]).astype(float)           # (G, J)
+    joint = M @ pi @ M.T                                             # (G, G) P(first in a, second in b)
+    p1, p2 = joint.sum(axis=1), joint.sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        F = np.where(p1[:, None] > 0, joint / p1[:, None], np.nan)
+    return F, float(np.trace(joint)), float(p1 @ p2)
 
 
 def inside_mass_without(probabilities: np.ndarray) -> np.ndarray:
