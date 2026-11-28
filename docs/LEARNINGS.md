@@ -1270,3 +1270,80 @@ missing second choices are spread across many directions and fall outside the su
 is evidence that this market needs many horizontal taste dimensions, which the logit error supplies; it does not show
 that the iid form is required. Open before the Grieco-Murry email: a wider Nash bound for the PCM counterfactuals and
 an equilibrium-existence check for the matched BLP.
+
+## 37. GMY 39 years: the survey measures consideration, brand exits cannot rank the models, and the PCM's identified new-product welfare is a fraction of the logits' (2026-11-27)
+
+Analysis scripts and reports are untracked under `.kiro_local/exits/` and `.kiro_local/welfare/` in the
+pcm_inversion-alo-moments worktree. Every fit was rebuilt from its stored options and reproduced its stored q to a
+relative 2.7e-12 or better (PCM a_lo 0.03 1853.713865, matched BLP 1447.248151, paper BLP 904.987726 on GMY's
+classic moments; PCM a_lo 0.02, 0.05, 0.08 too). All counterfactuals hold prices and the remaining products' delta
+fixed.
+
+**Finding 1: the second-choice data are stated consideration, not counterfactual choice.** GMY section 2.4 and
+footnote 3 (March 2023 version): MaritzCX asks recent buyers whether they considered other models and which one they
+"most seriously considered"; GMY use the first listed. Buyers who considered nothing are not in the sample, and there
+is no "would not have bought" answer. The 54-61% of reported second choices that fall on PCM-zero pairs (entry 36,
+finding 8) are consistent with a list of models shopped rather than only with a failure of substitution. Conlon,
+Mortimer and Sarkis (draft, Nov 22 2026) fit GMY's 2015 matrix with a type model and need rank 45-80, which agrees
+with our flat spectrum.
+
+**Finding 2: brand exits do not rank the models.** Plymouth (1999-2001), Oldsmobile (2003-05), Pontiac, Saturn and
+Hummer (2009-10) and Mercury (2010-11) are phase-outs, measured from the last full year. On make-by-segment lines the
+three models' predicted diversion vectors differ by 0.24-0.60 of the exiting volume; ordinary year-to-year churn moves
+the same lines by 2.4-18 times that volume. Pooled across events no model's slope on the revealed changes is
+distinguishable from zero, and where an event slope clears its placebo range a fake exit of a comparable surviving
+brand fits as well. Same-parent capture is 1.12 of the exiting volume for GM (placebo sd 0.26) and 1.90 for Ford
+(sd 0.94) against 0.23-0.44 predicted and 0.37-0.49 in the survey, mostly redesigns launched in the exit year (GM 0.47
+of the raw 0.62; Ford 0.90 of 1.60, the Explorer 0.71 alone), which no fixed-product model can predict. The stated
+second choices explain at most 11% of revealed changes (inside the placebo band) and sit closer to the models; the
+paper BLP matches them best, in sample.
+
+**Finding 3: the outside-good margin is where the models differ most.** Exiting-brand buyers who leave the market:
+PCM 0.4-4.4%, matched BLP 1.7-7.7%, paper BLP 21-44%. For 1981-2018 new models: 2.0%, 5.2% and 24.8% of buyers,
+carrying 0.2%, 2.3% and 22.1% of the loss. A PCM leaver sits at its buy/no-buy cutoff and loses little; a logit leaver
+loses the iid error of the product it gave up. Market growth makes the margin untestable with exits.
+
+**Finding 4: love of variety, measured.** An exact clone gains under $0.0001 per household in the PCM at every a_lo; a
+logit clone of the 2018 F-Series gains $29-80 per household. A second identical copy of each year's new models is worth
+0% of their value in the PCM, 61.5% in the matched BLP truncated at a = 0.03, 64.1% as fitted and 89.3% in the paper
+BLP. Removing every second model within a line costs the logits relatively more than removing a whole segment
+(density/segment ratio 0.62-0.69 paper BLP, 0.33-0.49 PCM between cutoffs).
+
+**Finding 5: PCM new-product welfare is a bound, and only its lower end is identified.** Introductions 1981-2018,
+2015 dollars:
+
+| Model | Lower bound, $B | Upper bound (fitted total), $B |
+|---|---|---|
+| PCM a_lo 0.02 | 37.5 | 700.7 |
+| PCM a_lo 0.03 | 36.1 | 467.7 |
+| PCM a_lo 0.05 | 34.3 | 276.3 |
+| PCM a_lo 0.08 | 32.3 | 158.7 |
+| Matched BLP, as fitted | 431.6 | 431.6 |
+| Matched BLP, a truncated at 0.03 (rescored, not refit; q 1,499.1) | 171.5 | 171.5 |
+| Paper BLP (classic moments) | 79.4 | 79.4 |
+
+The lower bound is the part between observed cutoffs ($29.2-30.2B) plus a conservative tail: below a draw's lowest
+cutoff c* it buys its top product K, and with b = 1/alpha the loss l = y_K b - p_K - max_{j != K}(y_j b - p_j) never
+rises with alpha, so E[l] >= E[l; alpha >= c*] + P(alpha < c*) l(c*). The bound holds for any distribution of a below
+c* with the same mass, which the share inversion pins; when K's frontier neighbour stays, l(c*) = 0 (Song 2007), which
+is why the Model S lower bound is $0. The lower bound moves 14% across a_lo 0.02-0.08, the total 4.4 times; 93.6% of
+the a_lo 0.03 total is below the lowest cutoffs. Without a floor on a the upper bound is infinite. Entry 29's CEX floor
+does not map to a_lo here: GMY's c_i already uses each household's income and age, so a is residual heterogeneity
+that nothing in the data bounds. The matched BLP has the same problem in its own form: its untruncated lognormal
+(sigma_p 2.05) puts 58-72% of level CS on the 4.4% of households with a below 0.03. Landmark examples (entry year,
+$M total, PCM lower-upper at a_lo 0.03 / matched truncated / paper BLP): minivans 1984 273-11,193 / 6,490 / 1,028;
+Explorer 1990 404-1,416 / 1,131 / 803; Model S 2012 0-668 / 25 / 13.
+
+**Finding 6: why the PCM Nash re-solve fails (entry 29, restated).** For one draw a product sells on an interval of
+alpha between its frontier neighbours' cutoffs, and a price rise past the point where those cutoffs meet removes it
+from that draw's frontier and makes its neighbours direct rivals. Summed over draws shares stay continuous, but ds/dp
+jumps at every such point, so profits are kinked and can have several local maxima. Newton steps price products off
+every frontier, the damped zeta map fails the same way, best responses have slopes above one and cycle, and the
++-10% best-response box binds for most products in every scenario at every a_lo. With finite draws a pure-strategy
+equilibrium near observed prices may not exist.
+
+**Consequence.** On welfare the PCM's identified answer for 1981-2018 introductions is $32-38B, against $79-432B for
+the logits, most of whose difference is love of variety and the outside-good error. Every logit value falls inside the
+PCM interval at a_lo 0.03, so the PCM does not contradict them without a floor on a; the defensible headline is the
+lower bound. Open: the no-second-choice refits of the PCM and the matched BLP (branch feat/drop-second-choice-block),
+a consideration-set PCM for the survey moment, and a refit of the matched BLP with the a >= 0.03 truncation.
