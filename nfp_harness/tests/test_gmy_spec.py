@@ -589,6 +589,56 @@ def test_supply_fd_step(gmy: Any) -> None:
         sp.configure_paper(parser.parse_args(["--supply-fd-step", "0"]))
 
 
+
+def test_drop_second_choice(gmy: Any) -> None:
+    """--drop-second-choice: off (the default) leaves the run key, payload, normalisations and blocks as before; on
+    removes the second-choice block from the joint CUE objective, so at one theta q falls by exactly that block's term
+    and df by its rows, enters the run key, and the held-out score at the estimate equals the block's term and rows
+    in the full objective."""
+    sp = gmy.GMYSpec((1998, 1999, 2000), households=200)
+    parser = argparse.ArgumentParser()
+    sp.add_paper_arguments(parser)
+    base = ["--years", "1998", "1999", "2000", "--households", "200", "--moments", "demand_supply_msfd_own",
+            "--weighting", "joint_cue", "--drop-block", "own",
+            "--cost-shifters", "in_cost", "--alo-moments", "c4c6c", "--supply-fd-step", "0.05"]
+    sp.configure_paper(parser.parse_args(base))
+    key0, pay0, norm0 = sp.paper_run_key(), sp.payload(), sp.normalisations
+    assert sp.drop_second_choice is False and "drop_second_choice" not in key0 and "drop_second_choice" not in pay0
+    assert [m.name for m in sp.moment_list("all")] == ["aggregate", "micro_gmy", "second_choice", "supply_ms",
+                                                       "demand_fd", "supply_fd"]
+    full = sp.build_problem(1, 0, 8, "all")
+    try:
+        theta = full.layout.starts()
+        ev = full.evaluate(theta, need_jacobian=False)
+        assert ev.ok
+        q_full, q_sc = float(ev.aux["q"]), float(ev.aux["q_blocks"]["second_choice"])
+        pred_full = np.asarray(ev.aux["micro_predicted"]["second_choice"])
+        df_full = int(full.identification["overidentifying"])
+    finally:
+        full.model.close()
+    sp.configure_paper(parser.parse_args([*base, "--drop-second-choice"]))
+    key, pay = sp.paper_run_key(), sp.payload()
+    assert key["drop_second_choice"] is True and {k: v for k, v in key.items() if k != "drop_second_choice"} == key0
+    assert pay["drop_second_choice"] is True and len(sp.normalisations) == len(norm0) + 1
+    assert [m.name for m in sp.moment_list("all")] == ["aggregate", "micro_gmy", "supply_ms", "demand_fd", "supply_fd"]
+    sc = sp.second_choice_moment()[0]
+    drop = sp.build_problem(1, 0, 8, "all")
+    try:
+        assert "second_choice" not in drop.blocks and drop._jointcfg is not None
+        ev = drop.evaluate(theta, need_jacobian=False)
+        assert ev.ok and q_sc > 0
+        assert float(ev.aux["q"]) == pytest.approx(q_full - q_sc, rel=1e-9)
+        assert int(drop.identification["overidentifying"]) == df_full - sc.k
+        held = drop.evaluate_held_out(sc, theta)
+        assert held["status"] == "ok" and held["rows"] == sc.k == pred_full.size
+        assert held["q"] == pytest.approx(q_sc, rel=1e-9)
+        np.testing.assert_allclose(held["model"], pred_full, rtol=1e-9, atol=1e-12)
+        np.testing.assert_array_equal(held["data"], sc.values)
+    finally:
+        drop.model.close()
+    sp.configure_paper(parser.parse_args(base))
+    assert sp.paper_run_key() == key0 and sp.payload() == pay0 and sp.normalisations == norm0
+
 def test_premium_makes_follow_their_rule(gmy: Any) -> None:
     """PREMIUM_MAKES is every make whose models all have lux = 1 and whose sales-weighted mean msrp is at least
     PREMIUM_PRICE_FLOOR ($1000 of 2015), over all 39 years; load_products marks them in ``premium_make``."""

@@ -797,6 +797,32 @@ class NFPGMMProblem:
             raise RuntimeError(f"inner solve for the micro covariance failed at theta: {sol2.status.value}")
         return sol2
 
+    def evaluate_held_out(self, moment: Any, theta: np.ndarray) -> dict[str, Any]:
+        """A micro block outside the objective, scored at ``theta`` on this problem's model (an out-of-sample fit).
+
+        The block is bound to the model's markets, the model is re-solved at ``theta`` with only the block's
+        requests (warm start, no Jacobian; the solve writes the model's trial state at ``theta``, which the next
+        evaluate overwrites), and ``q = g' V^-1 g`` is the block's term at the weight it carries when it is in the
+        objective: ``V`` its ``fixed_covariance`` (e.g. ``SecondChoiceMoments``, ``I / weight^2``), else
+        ``covariance_block``; in the objective that weight is ``(n V)^-1`` on ``n g'Wg``, so the two agree. Returns
+        status, q, rows, labels, data and model values (``model`` = data + g)."""
+        from .weighting import weight_from_covariance
+
+        moment.bind(self.model.markets, self.n, self.P)
+        req = moment.requests().merge(moment.covariance_requests())
+        sol = self.model.solve(np.asarray(theta, dtype=float), req, False)
+        if sol.status is not EvalStatus.OK:
+            return {"status": sol.status.value, "name": moment.name}
+        blk = moment.evaluate(sol, None, False)
+        g = np.asarray(blk.value, dtype=float)
+        fixed = getattr(moment, "fixed_covariance", None)
+        V = np.asarray(fixed if fixed is not None else moment.covariance_block(sol, None), dtype=float)
+        q = float(g @ weight_from_covariance(V) @ g)
+        data = np.asarray(blk.data if blk.data is not None else moment.values, dtype=float)
+        return {"status": EvalStatus.OK.value, "name": moment.name, "q": q, "rows": int(g.size),
+                "labels": [str(lab) for lab in getattr(moment, "labels", range(g.size))],
+                "data": data.tolist(), "model": (data + g).tolist()}
+
     def covariance(self, ev: Evaluation) -> np.ndarray:
         """covariance(ev) -> S(theta) = blockdiag(S_aggregate, n V_micro), (k, k)."""
         if not ev.ok:

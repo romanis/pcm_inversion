@@ -400,7 +400,7 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
                          fd_max_gap: int = 3, seed: int = SEED, utility: str = "gmy",
                          moments: str = "demand_supply_msfd_own", drop_blocks: Sequence[str] = (),
                          start_theta: Mapping[str, float] | None = None, cost_shifters: str = "excluded",
-                         alo_moments: str = "off") -> tuple[Any, Any, dict[str, Any]]:
+                         alo_moments: str = "off", drop_second_choice: bool = False) -> tuple[Any, Any, dict[str, Any]]:
     """(NFPGMMProblem, GMYSpec, design): a mixed logit (``MixedLogitModel``, the harness's BLP contraction) on the
     moment blocks of the PCM's ``--moments <moments> --weighting joint_cue [--drop-block ...]`` problem
     (``GMYSpec.moment_blocks``): the same products (twins merged, shares below 1e-5 dropped, price ties spread), the
@@ -411,7 +411,8 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
 
     ``utility``: ``gmy`` is GMY's spec 6 with alpha the first nonlinear parameter (a pattern term on price with a
     demographic of ones, so ds/dp, which the supply blocks read, moves with it); ``pcm_matched`` is the PCM's utility
-    (``_pcm_matched_design``). ``cost_shifters`` and ``alo_moments`` are the PCM's options of the same names."""
+    (``_pcm_matched_design``). ``cost_shifters``, ``alo_moments`` and ``drop_second_choice`` are the PCM's options of
+    the same names (``--drop-second-choice`` leaves the second-choice block out of both models' objectives alike)."""
     from nfp_harness.problem import NFPGMMProblem
 
     if utility not in UTILITIES:
@@ -422,6 +423,7 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
     spec.set_alo_moments(alo_moments)
     spec.set_moments(moments)
     spec.set_weighting_mode("joint_cue", list(drop_blocks))
+    spec.drop_second_choice = bool(drop_second_choice)
     ms, _ = spec.moment_blocks(moments, True)
     p, a = spec.products, spec.agents.copy()
     a["one"] = 1.0
@@ -473,14 +475,18 @@ def same_moments_problem(threads: int, households: int = 2000, years: tuple[int,
                   cost_shifters=cost_shifters)
     if alo_moments != "off":   # only when set, so the design of an earlier run is unchanged
         design["alo_moments"] = alo_moments
+    if drop_second_choice:
+        design["drop_second_choice"] = True
     return prob, spec, design
 
 
-def same_moments_evaluate(prob: Any, theta: np.ndarray) -> dict[str, Any]:
+def same_moments_evaluate(prob: Any, theta: np.ndarray, held_out: Sequence[Any] = ()) -> dict[str, Any]:
     """q_CUE, its blocks, Hansen J and the economics of the mixed logit at theta (no Jacobian): every moment row
     (data and model) of the micro and second-choice blocks, Lerner indices and own elasticities by year and segment.
     A problem with no product-level block (``same_moments_problem`` on e.g. ``gmy_nolinear``) is scored with its fixed
-    W, and without a supply block the Lerner and elasticity fields are left out."""
+    W, and without a supply block the Lerner and elasticity fields are left out. ``held_out``: micro blocks outside
+    the objective, scored at theta (``NFPGMMProblem.evaluate_held_out``) into ``held_out``; a held-out
+    ``second_choice`` block also fills the ``second_choice`` rows."""
     from scipy.stats import chi2
 
     from nfp_harness.weighting import weight_from_covariance
@@ -512,9 +518,20 @@ def same_moments_evaluate(prob: Any, theta: np.ndarray) -> dict[str, Any]:
            "second_choice": [] if sc is None else [
                {"row": lab, "data": float(d), "model": float(v)}
                for lab, d, v in zip(sc.labels, sc.values, ev.aux["micro_predicted"]["second_choice"])]}
+
+    def finish(out: dict[str, Any]) -> dict[str, Any]:
+        """The held-out blocks, last: their solve writes the model's trial state at theta."""
+        if held_out:
+            out["held_out"] = {m.name: prob.evaluate_held_out(m, theta) for m in held_out}
+            hs = out["held_out"].get("second_choice")
+            if sc is None and hs is not None and hs["status"] == "ok":
+                out["second_choice"] = [{"row": lab, "data": float(d), "model": float(v)}
+                                        for lab, d, v in zip(hs["labels"], hs["data"], hs["model"])]
+        return out
+
     sup = next((m for m in prob.moments if getattr(m, "is_supply", False)), None)
     if sup is None:
-        return out
+        return finish(out)
     _, _, info = sup.log_costs(sol, False)
     lerner, own = np.full(prob.n, np.nan), np.full(prob.n, np.nan)
     mids = np.empty(prob.n, dtype=int)
@@ -540,7 +557,7 @@ def same_moments_evaluate(prob: Any, theta: np.ndarray) -> dict[str, Any]:
     if evb is not None:
         out["events"] = evb.summary(ev.aux["log_mc"])
     out["markup"], out["lerner"], out["own_elasticity"] = info["markup"], lerner, own
-    return out
+    return finish(out)
 
 
 def same_moments_fit(prob: Any, theta0: np.ndarray, max_nfev: int, max_rounds: int = 6, tag: str = "blp_same_moments"
@@ -643,7 +660,8 @@ def _logit_counterfactuals(model: MixedLogitModel, theta: np.ndarray, delta: np.
 def same_moments_main(args: Any) -> None:
     """Fit a mixed logit on the PCM's moments and write results/<tag>.{json,npz,log}."""
     years = tuple(args.years) if args.years else gmy_pcm.ALL_YEARS
-    tag = (f"blp_same_moments_{args.utility}_{len(years)}y" + (f"_{args.tag}" if args.tag else ""))
+    tag = (f"blp_same_moments_{args.utility}_{len(years)}y" + ("_nosc" if args.drop_second_choice else "")
+           + (f"_{args.tag}" if args.tag else ""))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                         handlers=[logging.FileHandler(OUT / f"{tag}.log"), logging.StreamHandler()])
     t0 = time.time()
@@ -656,7 +674,9 @@ def same_moments_main(args: Any) -> None:
                                               moments=args.moments, drop_blocks=args.drop_block or (),
                                               start_theta=st if args.utility == "pcm_matched" and not own_fit
                                               else None,
-                                              cost_shifters=args.cost_shifters, alo_moments=args.alo_moments)
+                                              cost_shifters=args.cost_shifters, alo_moments=args.alo_moments,
+                                              drop_second_choice=args.drop_second_choice)
+    held = spec.second_choice_moment() if args.drop_second_choice else []
     prob.segments = spec.products[spec.groups].astype(str).to_numpy()   # type: ignore[attr-defined]
     log.info("%s: %d products, %d moments, identification %s", design, prob.n, prob.k, prob.identification)
     theta0 = prob.layout.starts()
@@ -664,7 +684,7 @@ def same_moments_main(args: Any) -> None:
         theta0 = np.array([st.get(n, v) for n, v in zip(prob.layout.names, theta0)])
     if args.max_nfev <= 0:   # evaluate only
         out = {"design": design, "theta0": dict(zip(prob.layout.names, map(float, theta0)))}
-        e = same_moments_evaluate(prob, theta0)
+        e = same_moments_evaluate(prob, theta0, held)
         prob.commit(theta0)
         out["estimate"] = {k: v for k, v in e.items() if k not in ("markup", "lerner", "own_elasticity")}
         if args.counterfactuals:
@@ -673,7 +693,7 @@ def same_moments_main(args: Any) -> None:
         log.info("evaluated at the start: q_CUE %s (%.0f s)", out["estimate"].get("q_cue"), time.time() - t0)
         return
     theta, fit = same_moments_fit(prob, theta0, args.max_nfev, tag=tag)
-    est = same_moments_evaluate(prob, theta)
+    est = same_moments_evaluate(prob, theta, held)
     prob.commit(theta)
     try:
         cfs = _logit_counterfactuals(prob.model, theta, est_delta(prob), spec.products)
@@ -714,6 +734,9 @@ def main() -> None:
                     help="same-moments: as the PCM's --cost-shifters")
     ap.add_argument("--alo-moments", choices=gmy_pcm.ALO_MOMENT_MODES, default="off",
                     help="same-moments: as the PCM's --alo-moments (c4c6c needs --cost-shifters in_cost)")
+    ap.add_argument("--drop-second-choice", action="store_true",
+                    help="same-moments: as the PCM's --drop-second-choice (the second-choice block out of the "
+                         "objective, scored out of sample at the estimate; output names gain _nosc)")
     ap.add_argument("--tag", default="", help="suffix of the output names (default none)")
     ap.add_argument("--ftol", type=float, default=1e-9, help="fit: least_squares ftol (default estimation.m's)")
     ap.add_argument("--xtol", type=float, default=1e-10, help="fit: least_squares xtol")

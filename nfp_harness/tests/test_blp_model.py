@@ -502,3 +502,40 @@ def test_same_moments_without_a_product_level_block_scores_gmys_fixed_weight() -
     assert out["q_cue"] == pytest.approx(q_micro + q_sc, rel=1e-10)
     assert out["df"] == len(out["micro"]) + len(out["second_choice"]) - prob.layout.n_free()
     assert "lerner_median" not in out
+
+
+def test_same_moments_drop_second_choice_removes_exactly_its_term() -> None:
+    """estimate_blp.py same-moments --drop-second-choice on the joint CUE set: at one theta q_CUE falls by exactly the
+    second-choice term of the full problem and df by its rows, the other blocks' terms are unchanged, the design
+    records the option (and only then), and the held-out score reproduces the full problem's second-choice term and
+    rows."""
+    blp = _gmy_blp()
+    kw = dict(households=200, years=(1998, 1999, 2000), moments="demand_supply_msfd_own", drop_blocks=["event_cost"],
+              cost_shifters="in_cost", alo_moments="c4c6c")
+    prob, spec, design = blp.same_moments_problem(4, **kw)
+    try:
+        theta = prob.layout.starts()
+        full = blp.same_moments_evaluate(prob, theta)
+    finally:
+        prob.model.close()
+    assert "drop_second_choice" not in design and full["status"] == "ok"
+    prob, spec, design = blp.same_moments_problem(4, drop_second_choice=True, **kw)
+    try:
+        sc = spec.second_choice_moment()
+        assert "second_choice" not in prob.blocks and design["drop_second_choice"] is True
+        out = blp.same_moments_evaluate(prob, theta, sc)
+    finally:
+        prob.model.close()
+    assert out["status"] == "ok"
+    q_sc = full["q_blocks"]["second_choice"]
+    assert q_sc > 0 and "second_choice" not in out["q_blocks"]
+    assert out["q_cue"] == pytest.approx(full["q_cue"] - q_sc, rel=1e-9)
+    for b, v in out["q_blocks"].items():
+        assert v == pytest.approx(full["q_blocks"][b], rel=1e-9, abs=1e-12), b
+    assert out["df"] == full["df"] - sc[0].k
+    held = out["held_out"]["second_choice"]
+    assert held["status"] == "ok" and held["rows"] == sc[0].k
+    assert held["q"] == pytest.approx(q_sc, rel=1e-9)
+    assert [r["row"] for r in out["second_choice"]] == [r["row"] for r in full["second_choice"]]
+    np.testing.assert_allclose([r["model"] for r in out["second_choice"]],
+                               [r["model"] for r in full["second_choice"]], rtol=1e-9, atol=1e-12)
