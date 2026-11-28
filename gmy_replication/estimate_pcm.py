@@ -701,6 +701,7 @@ class GMYSpec(PaperSpec):
         self.fd_max_gap = FD_MAX_GAP
         self.weighting = "default"
         self.drop_blocks: tuple[str, ...] = ()
+        self.drop_second_choice = False
         self.a_lo_free = False
         self.cost_shifters = "excluded"
         self.alo_moments = "off"
@@ -1050,6 +1051,10 @@ class GMYSpec(PaperSpec):
         parser.add_argument("--drop-block", action="append", choices=DROPPABLE_BLOCKS + tuple(DROP_ALIASES),
                             default=None, help="joint weightings: drop a product-level block (repeatable; own = "
                                                "event_cost); aggregate keeps its X1 rows; part of the run key")
+        parser.add_argument("--drop-second-choice", action="store_true",
+                            help="leave GMY's second-choice correlation block (41 rows, x30) out of the objective; "
+                                 "post still reports the estimate's second choices and their q at that weight, out "
+                                 "of sample (default off: the block is in)")
         parser.add_argument("--a-lo-free", action="store_true",
                             help=f"estimate a_lo as a free GMM parameter on [{A_LO_FREE[0]:g}, {A_LO_FREE[1]:g}], "
                                  f"starting at --a-lo (its Jacobian column by finite differences); part of the run "
@@ -1104,6 +1109,7 @@ class GMYSpec(PaperSpec):
         self.fd_max_gap = int(getattr(args, "fd_max_gap", None) or FD_MAX_GAP)
         drop = [DROP_ALIASES.get(b, b) for b in (getattr(args, "drop_block", None) or ())]
         self.set_weighting_mode(getattr(args, "weighting", None) or "default", drop)
+        self.drop_second_choice = bool(getattr(args, "drop_second_choice", False))
         self.a_lo_free = bool(getattr(args, "a_lo_free", False))
         self.set_cost_shifters(getattr(args, "cost_shifters", None) or "excluded")
         self.set_alo_moments(getattr(args, "alo_moments", None) or "off")
@@ -1142,6 +1148,8 @@ class GMYSpec(PaperSpec):
             out["weighting"] = self.weighting
         if self.drop_blocks:
             out["drop_blocks"] = list(self.drop_blocks)
+        if self.drop_second_choice:
+            out["drop_second_choice"] = True
         if self.a_lo_free:
             out["a_lo_free"] = True
         if self.cost_shifters != "excluded":
@@ -1203,6 +1211,8 @@ class GMYSpec(PaperSpec):
                f"blocks in plain IV form), (beta, gamma) concentrated jointly in one GLS step, single-cluster rows exact "
                f"constraints (NFPGMMProblem.set_joint)"
                + (f"; dropped blocks {', '.join(self.drop_blocks)}" if self.drop_blocks else "")] if self.joint else []),
+            *(["--drop-second-choice: the second-choice correlation block is left out of the objective; post scores "
+               "the estimate's second choices out of sample at weight 30 per row"] if self.drop_second_choice else []),
             *(["ownership on the public-record coding (PUBLIC_RECORD_PARENT): "
                + ("; ".join(f"{r['make']} {r['year']} -> {r['public_record']}" for r in self.recoded_ownership)
                   or "no loaded make-year recoded")]
@@ -1478,7 +1488,7 @@ class GMYSpec(PaperSpec):
         if which == "prefit":
             ms += self.micro_moment("prefit")
         elif which != "aggregate":
-            ms += self.micro_moment() + self.second_choice_moment()
+            ms += self.micro_moment() + ([] if self.drop_second_choice else self.second_choice_moment())
         if which == "demand_supply":
             ms.append(self.supply_moment())
         elif which == "demand_supply_ms":
@@ -1580,6 +1590,7 @@ class GMYSpec(PaperSpec):
                 # options added with the markup-shifter, joint-weighting and free-bound work, only when set
                 **({"fd_max_gap": self.fd_max_gap} if self.moments in FD_MOMENTS else {}),
                 **({"weighting": self.weighting, "drop_blocks": list(self.drop_blocks)} if self.joint else {}),
+                **({"drop_second_choice": True} if self.drop_second_choice else {}),
                 **({"ownership": {"coding": "public_record", "recoded": self.recoded_ownership,
                                   "events": [list(e[:2]) + [list(e[2])] for e in OWNERSHIP_EVENTS]}}
                    if self.moments in OWN_MOMENTS else {}),
@@ -1600,7 +1611,8 @@ class GMYSpec(PaperSpec):
         sig = {n: float(lay.specs[k].start) for k, n in enumerate(lay.names) if n.startswith("sigma_") and n != "sigma_p"}
         rules = {"q_fixed": {"rule": NotMonotoneDecreasing("sigma_p", by=("lambda",), column="q_fixed", rise=3.84,
                                                            only={"lambda": 1.0}),
-                             "columns": ["q_fixed", "q_fixed:aggregate", "q_fixed:micro_gmy", "q_fixed:second_choice"]}}
+                             "columns": ["q_fixed", "q_fixed:aggregate", "q_fixed:micro_gmy"]
+                             + ([] if self.drop_second_choice else ["q_fixed:second_choice"])}}
         return [("sigma_ray", "all", {"direction": sig, "lambdas": [0.5, 1.0, 2.0],
                                       "grid": {"sigma_p": [1.5, 2.0, 2.5, 3.0, 3.5]}, "origin": 0.0,
                                       "concentrate": ("phi_inc", "phi_age"), "rules": rules})]
@@ -1661,8 +1673,15 @@ class GMYSpec(PaperSpec):
                             for lab, d, v, var in zip(mic.labels, mic.values, pred, mic.variances)]
             out["micro_never_buyers"] = ev.aux.get("micro_gmy")
         sc = next((m for m in problem.moments if m.name == "second_choice"), None)
-        if sc is not None:
-            pred = ev.aux["micro_predicted"]["second_choice"]
+        pred = ev.aux["micro_predicted"]["second_choice"] if sc is not None else None
+        held_sc = self.second_choice_moment() if sc is None and self.drop_second_choice else []
+        if held_sc:   # out of sample: the block the objective left out, scored at the estimate at its own weight
+            sc = held_sc[0]
+            held = problem.evaluate_held_out(sc, theta)
+            out["second_choice_held_out"] = {k: held[k] for k in ("status", "q", "rows") if k in held}
+            out["second_choice_held_out"]["weight"] = SC_WEIGHT
+            pred = np.asarray(held["model"]) if held["status"] == "ok" else None
+        if sc is not None and pred is not None:
             rows, k = {}, 0
             for y in sc.years:
                 model_c = np.full(len(sc.chars), np.nan)
